@@ -102,7 +102,7 @@ jobs:
           RENOVATE_ONBOARDING: "false"
           RENOVATE_REQUIRE_CONFIG: optional
           RENOVATE_PLATFORM: github
-          RENOVATE_PLATFORM_COMMIT: "true"
+          RENOVATE_PLATFORM_COMMIT: enabled
           RENOVATE_INTERNAL_CHECKS_FILTER: strict
           RENOVATE_CUSTOM_ENV_VARIABLES: '{"MISE_TRUSTED_CONFIG_PATHS":"/tmp/renovate/repos"}'
           RENOVATE_ALLOWED_UNSAFE_EXECUTIONS: '["goGenerate", "mise"]'
