@@ -11,10 +11,13 @@ on:
   release:
     types:
       - published
+  # release-please dispatches this on the new tag, because the release it
+  # publishes with the built-in token can't fire the release trigger above.
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'release' }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   versions:
@@ -62,7 +65,7 @@ jobs:
       meta-images: ghcr.io/${{ github.repository }}
       meta-tags: |
         type=semver,pattern={{version}}
-        type=raw,value=rolling,enable=${{ github.event_name == 'release' }}
+        type=raw,value=rolling,enable=${{ startsWith(github.ref, 'refs/tags/') }}
         type=ref,event=branch
       output: image
       platforms: linux/amd64,linux/arm64
@@ -97,7 +100,7 @@ jobs:
       meta-images: ghcr.io/${{ github.repository }}
       meta-tags: |
         type=semver,pattern={{version}}
-        type=raw,value=rolling,enable=${{ github.event_name == 'release' }}
+        type=raw,value=rolling,enable=${{ startsWith(github.ref, 'refs/tags/') }}
         type=ref,event=branch
       output: image
       platforms: linux/amd64,linux/arm64
@@ -116,14 +119,14 @@ jobs:
   helm:
     name: Helm
     needs: release
-    if: ${{ github.event_name == 'release' }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-26.04
     permissions:
       contents: read
       id-token: write
       packages: write
     env:
-      VERSION: ${{ github.event.release.tag_name }}
+      VERSION: ${{ github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
