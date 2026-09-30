@@ -1,0 +1,313 @@
+{
+  "managedBy": "dashboard",
+  "revision": 3,
+  "editable": true,
+  "policy": [
+    {
+      "key": "enabled",
+      "scopes": ["repository"],
+      "tenantAdmin": true,
+      "repository": "turnOff",
+      "editable": true
+    },
+    {
+      "key": "filter",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": true,
+      "repository": "and",
+      "editable": true
+    },
+    {
+      "key": "ignore",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": true,
+      "repository": "union",
+      "editable": true
+    },
+    {
+      "key": "skip.onlyPaths",
+      "scopes": [],
+      "tenantAdmin": false,
+      "repository": "own",
+      "editable": false
+    },
+    {
+      "key": "forks",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "editable": false
+    },
+    {
+      "key": "models.review",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "repository": "choose",
+      "editable": false
+    },
+    {
+      "key": "models.fallback",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "repository": "choose",
+      "editable": false
+    },
+    {
+      "key": "mode",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "repository": "choose",
+      "editable": false
+    },
+    {
+      "key": "agent.maxSteps",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "repository": "atMost",
+      "editable": false
+    },
+    {
+      "key": "agent.maxToolOutputBytes",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "repository": "atMost",
+      "editable": false
+    },
+    {
+      "key": "agent.maxTokens",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "repository": "atMost",
+      "editable": false
+    },
+    {
+      "key": "agent.timeout",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "repository": "atMost",
+      "editable": false
+    },
+    {
+      "key": "agent.commands",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "repository": "subset",
+      "editable": false
+    },
+    {
+      "key": "agent.commandTimeout",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "editable": false
+    },
+    {
+      "key": "settle",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": true,
+      "repository": "atMost",
+      "editable": true
+    },
+    {
+      "key": "incremental.maxDeltaFiles",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "editable": false
+    },
+    {
+      "key": "review.instructions",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": true,
+      "repository": "append",
+      "editable": true
+    },
+    {
+      "key": "review.requireSuggestedFix",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": true,
+      "repository": "turnOn",
+      "editable": true
+    },
+    {
+      "key": "review.templates",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": true,
+      "repository": "replace",
+      "editable": true
+    },
+    {
+      "key": "review.context",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": true,
+      "repository": "append",
+      "editable": true
+    },
+    {
+      "key": "review.minSeverity",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": true,
+      "repository": "replace",
+      "editable": true
+    },
+    {
+      "key": "review.inlineComments",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": true,
+      "repository": "replace",
+      "editable": true
+    },
+    {
+      "key": "tasks",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": true,
+      "repository": "append",
+      "editable": true
+    },
+    {
+      "key": "allow",
+      "scopes": ["defaults", "tenant", "repository"],
+      "tenantAdmin": false,
+      "editable": false
+    },
+    {
+      "key": "limits",
+      "scopes": ["defaults", "tenant"],
+      "tenantAdmin": false,
+      "editable": false
+    },
+    {
+      "key": "runner",
+      "scopes": ["defaults", "tenant"],
+      "tenantAdmin": false,
+      "editable": false
+    }
+  ],
+  "inherited": {
+    "tenant": {
+      "enabled": true,
+      "mode": "agentic",
+      "models": {
+        "review": "openrouter/acme-large",
+        "fallback": ""
+      },
+      "filter": "true",
+      "forks": false,
+      "ignore": ["vendor/**"],
+      "settleSeconds": 30,
+      "maxDeltaFiles": 40,
+      "review": {
+        "instructions": ["docs/review.md"],
+        "requireSuggestedFix": true,
+        "templates": {
+          "Summary": "docs/summary.tmpl",
+          "Inline": ""
+        },
+        "minSeverity": "important",
+        "inlineComments": true,
+        "context": [
+          {
+            "path": "db/schema.sql",
+            "description": "the schema",
+            "paths": ["**/*.sql"]
+          }
+        ]
+      },
+      "agent": {
+        "maxSteps": 60,
+        "maxToolOutputBytes": 32768,
+        "maxTokens": 4000000,
+        "timeoutSeconds": 1200,
+        "commands": ["go"],
+        "commandTimeoutSeconds": 30
+      },
+      "limits": {
+        "concurrency": 2,
+        "reviewsPerDay": 0,
+        "tokensPerMonth": 0
+      },
+      "allow": {
+        "modes": ["agentic"],
+        "models": ["openrouter/acme-large", "openrouter/acme-small"],
+        "commands": null,
+        "agent": {
+          "maxSteps": 60,
+          "maxToolOutputBytes": null,
+          "maxTokens": null,
+          "timeoutSeconds": null
+        },
+        "settleSeconds": 600
+      }
+    },
+    "tenantSources": {
+      "models.review": "file"
+    },
+    "repository": {
+      "enabled": true,
+      "mode": "agentic",
+      "models": {
+        "review": "openrouter/acme-large",
+        "fallback": ""
+      },
+      "filter": "true",
+      "forks": false,
+      "ignore": ["vendor/**"],
+      "settleSeconds": 30,
+      "maxDeltaFiles": 40,
+      "review": {
+        "instructions": ["docs/review.md"],
+        "requireSuggestedFix": true,
+        "templates": {
+          "Summary": "docs/summary.tmpl",
+          "Inline": ""
+        },
+        "minSeverity": "important",
+        "inlineComments": true,
+        "context": [
+          {
+            "path": "db/schema.sql",
+            "description": "the schema",
+            "paths": ["**/*.sql"]
+          }
+        ]
+      },
+      "agent": {
+        "maxSteps": 60,
+        "maxToolOutputBytes": 32768,
+        "maxTokens": 4000000,
+        "timeoutSeconds": 1200,
+        "commands": ["go"],
+        "commandTimeoutSeconds": 30
+      },
+      "limits": {
+        "concurrency": 2,
+        "reviewsPerDay": 0,
+        "tokensPerMonth": 0
+      },
+      "allow": {
+        "modes": ["agentic"],
+        "models": ["openrouter/acme-large", "openrouter/acme-small"],
+        "commands": null,
+        "agent": {
+          "maxSteps": 60,
+          "maxToolOutputBytes": null,
+          "maxTokens": null,
+          "timeoutSeconds": null
+        },
+        "settleSeconds": 600
+      }
+    },
+    "repositorySources": {
+      "mode": "dashboard",
+      "models.review": "file"
+    }
+  },
+  "spec": {
+    "slug": "alpha",
+    "installations": [
+      {
+        "name": "alpha-bot",
+        "token": {
+          "set": true
+        }
+      }
+    ]
+  }
+}

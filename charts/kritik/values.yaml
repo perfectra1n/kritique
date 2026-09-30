@@ -1,0 +1,511 @@
+---
+# Default values for kritik.
+#
+# Most string, list and map values below are rendered through Helm's `tpl`, so
+# they may carry template expressions that resolve at install time, e.g.
+#   ingress.hosts[0].host: kritik.{{ .Values.global.domain }}
+# Plain numbers and booleans, and `config.file`, are passed through as they are.
+
+image:
+  # -- Image repository.
+  repository: ghcr.io/home-operations/kritik
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag; defaults to the chart appVersion.
+  tag: ""
+  # -- Pin the image by digest (sha256:…); when set, overrides the tag. The release pipeline fills it with the published image's digest.
+  digest: ""
+
+# -- Image pull secrets for private registries.
+imagePullSecrets: []
+# -- Override the chart name used in resource names.
+nameOverride: ""
+# -- Override the full release name.
+fullnameOverride: ""
+
+# kritik is one binary with three roles. `all` runs ingest and worker in one
+# process (the usual shape); a split topology enables `ingest` and `worker`
+# separately and scales each. Every enabled role renders its own Deployment
+# from the same image, config and secrets. Runner pods are not a role here:
+# the worker creates them as Jobs per review and index.
+roles:
+  all:
+    # -- Run the single-process topology: webhooks, leader duties and the worker in one Deployment.
+    enabled: true
+    # -- Replicas. Any replica can serve webhooks and work jobs; exactly one holds the leader lock at a time.
+    replicas: 1
+    # -- Resources for this role's pods; empty falls back to `resources`.
+    resources: {}
+  ingest:
+    # -- Run webhook ingest as its own Deployment (split topology).
+    enabled: false
+    # -- Replicas for the ingest Deployment.
+    replicas: 2
+    # -- Resources for this role's pods; empty falls back to `resources`.
+    resources: {}
+  worker:
+    # -- Run the worker (queues, runner Jobs, leader duties) as its own Deployment (split topology).
+    enabled: false
+    # -- Replicas for the worker Deployment.
+    replicas: 1
+    # -- Resources for this role's pods; empty falls back to `resources`.
+    resources: {}
+  web:
+    # -- Run the dashboard as its own Deployment (split topology). Requires `web.url` to be set.
+    enabled: false
+    # -- Replicas for the web Deployment.
+    replicas: 1
+    # -- Resources for this role's pods; empty falls back to `resources`.
+    resources: {}
+
+# The dashboard's public URL and listen address. `web.url` is required for
+# `roles.web`; setting it on the `all` topology also serves the dashboard
+# from the same process.
+web:
+  # -- (required for roles.web) Public URL the dashboard is reached at, e.g. https://kritik.example.com. Must be an absolute http(s) URL with no query or fragment.
+  url: ""
+  # -- Dashboard port, served by `all` (once `web.url` is set) and `web` pods.
+  port: 8083
+
+# The declarative configuration file (providers, defaults, tenants with their
+# installations and repositories). Either inline as `file`, rendered into a
+# chart-managed ConfigMap, or an existing ConfigMap with a `config.yaml` key.
+# Secret material never goes in the file: it references files under
+# `secretMounts` or environment variables. Every replica re-reads the file on
+# `reloadInterval`; the leader applies it to the store.
+config:
+  # -- (required unless `existingConfigMap` is set) The configuration file, as YAML. Passed through verbatim, not tpl'd. See the README for the schema.
+  file: {}
+  # providers:
+  #   openrouter:
+  #     type: openrouter
+  #     apiKey: { env: OPENROUTER_API_KEY }
+  #   gateway:
+  #     # Any OpenAI- or Anthropic-API-compatible endpoint is a provider via `baseUrl`.
+  #     type: openai
+  #     baseUrl: https://gateway.example.com/v1
+  #     apiKey: { file: /var/run/secrets/kritik/providers/gateway-api-key }
+  #     # Pricing (USD per million tokens) only matters for providers that
+  #     # don't self-report cost; OpenRouter does, so it needs none here.
+  #     pricing:
+  #       gpt-6-sol: { input: 1.25, output: 10 }
+  #   anthropic:
+  #     type: anthropic
+  #     apiKey: { file: /var/run/secrets/kritik/providers/anthropic-api-key }
+  #     pricing:
+  #       claude-sonnet-5: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }
+  # defaults:
+  #   # Every tenant's runner Job deadline unless it sets its own.
+  #   runner: { activeDeadlineSeconds: 900 }
+  #   models:
+  #     review: openrouter/openai/gpt-6-sol
+  #   filter: "!pr.draft"
+  #   # What a repository's .kritik.yaml may choose; with no bound, only
+  #   # the operator's own value, or a limit or settle time at or below it.
+  #   allow:
+  #     modes: [single, agentic]
+  #     models: [openrouter/openai/gpt-6-sol, openrouter/openai/gpt-6-mini]
+  #     settle: 10m
+  #     # Event-driven tasks (docs/adr/0012-event-tasks.md): off unless
+  #     # enabled. The rest bounds the tasks a repository's .kritik.yaml
+  #     # or a tenant admin defines; the file's own tasks below are trusted.
+  #     tasks:
+  #       enabled: true
+  #       # Normalized events by default; a raw event must be listed.
+  #       events: ["issue.*", "pull_request.*", "comment.*", "raw:release.*"]
+  #       # comment, labels and inlineComments by default; state, assign
+  #       # and reviewers must be listed.
+  #       actions: [comment, labels, inlineComments, assign]
+  #       maxRunsPerSubjectPerHour: 6
+  #   # The operator's own tasks, merged by name across defaults, tenants
+  #   # and repositories; enabled: false switches one off.
+  #   tasks:
+  #     - name: welcome
+  #       on: [{ pull_request: [opened] }]
+  #       if: 'subject.author != "renovate[bot]"'
+  #       mode: single
+  #       promptInline: Welcome the author and summarize the pull request in two sentences.
+  #       actions: { comment: { mode: sticky } }
+  # # The leader's backstop for missed webhooks; interval: 0s turns it off.
+  # polling: { interval: 10m, lookback: 24h }
+  # # Onboarding index jobs kept queued or running at once.
+  # indexing: { onboardWindow: 4 }
+  # # Tools beyond the -tools image's curl, fd and rg, mounted from their
+  # # images (statically linked) into runs whose agent.commands allow them.
+  # tools:
+  #   - { name: helm, image: ghcr.io/example/helm:3@sha256:..., path: /usr/local/bin }
+  # tenants:
+  #   - slug: example
+  #     installations:
+  #       - name: example-github
+  #         forge: github
+  #         account: example
+  #         app:
+  #           clientId: Iv1.example
+  #           privateKey: { file: /var/run/secrets/kritik/bot/private-key.pem }
+  #           webhookSecret: { file: /var/run/secrets/kritik/bot/webhook-secret }
+  #       # Forgejo and Gitea installations authenticate with a bot token
+  #       # instead of a GitHub App. Gitea speaks the same API as Forgejo,
+  #       # so forge: gitea works identically here.
+  #       - name: example-forgejo
+  #         forge: forgejo
+  #         host: forge.example.com
+  #         account: example
+  #         token: { file: /var/run/secrets/kritik/bot/forgejo-token }
+  #         # Runner pods fetch with gitToken instead of token when set; a
+  #         # read-only token keeps a write-capable one out of the pod that
+  #         # reads untrusted pull request content.
+  #         gitToken: { file: /var/run/secrets/kritik/bot/forgejo-read-token }
+  #         webhookSecret: { file: /var/run/secrets/kritik/bot/webhook-secret }
+  #     repositories:
+  #       - name: example/widgets
+  #         # Both installations have account "example", so the entry names
+  #         # the one it belongs to; the same name on the other forge is a
+  #         # separate repository.
+  #         installation: example-github
+  #         # agentic mode gives the model a bounded, read-only tool loop
+  #         # over the commit tree instead of one prompt with the diff.
+  #         mode: agentic
+  #         # maxTokens bounds one review's spend; it is cut further to what
+  #         # is left of the tenant's tokensPerMonth. commands lets the agent
+  #         # run these binaries, found on the runner image's PATH (the -tools
+  #         # image ships curl, fd and rg), each for at most commandTimeout.
+  #         agent: { timeout: 15m, maxTokens: 1000000, commands: [curl, fd, rg], commandTimeout: 30s }
+  #         # Collapse a burst of pushes onto the last head before spending
+  #         # anything on a review.
+  #         settle: 2m
+
+  # -- Existing ConfigMap holding the file under the `config.yaml` key; takes precedence over `file`.
+  existingConfigMap: ""
+  # -- How often each replica re-reads the file (Go duration).
+  reloadInterval: 10s
+  # -- Log level: debug, info, warn or error.
+  logLevel: info
+  # -- Log format: json or text.
+  logFormat: json
+  # -- Review jobs one worker replica runs at once (KRITIK_REVIEW_WORKERS); follow-ups share the count. A review or index job holds at most one runner pod, so runner pods never exceed the replicas working jobs × (reviewWorkers + indexWorkers).
+  reviewWorkers: 2
+  # -- Index jobs one worker replica runs at once (KRITIK_INDEX_WORKERS), rate-limited apart from reviews.
+  indexWorkers: 1
+  # -- Extra raw env vars merged into every role's container (advanced).
+  extraEnv: []
+  # - name: KRITIK_LEADER_RETRY_INTERVAL
+  #   value: 30s
+
+# Three Postgres connection strings, each from its own Secret. The
+# application role must not own the tables (row-level security), the owner
+# role runs migrations and applies configuration on the leader, and the
+# runner role is handed to runner Jobs and can only write its own run. On
+# CloudNativePG, declare `app` and `runner` under `spec.managed.roles` and
+# use the bootstrap owner as `owner`; see the README.
+database:
+  app:
+    # -- (required) Secret holding the application role's connection URI.
+    existingSecret: ""
+    # -- Key in that Secret.
+    key: uri
+    # -- Name of the application role, asserted at startup (not superuser, no BYPASSRLS, owns nothing).
+    role: kritik_app
+  owner:
+    # -- (required for roles.all / roles.worker) Secret holding the owner role's connection URI, used only by the leader for migrations and configuration sync.
+    existingSecret: ""
+    # -- Key in that Secret.
+    key: uri
+  runner:
+    # -- (required for roles.all / roles.worker) Secret holding the runner role's connection URI; referenced by runner Jobs, never read by the worker.
+    existingSecret: ""
+    # -- Key in that Secret.
+    key: uri
+    # -- Name of the runner role, granted only what runner Jobs need.
+    role: kritik_runner
+
+# The deployment-wide embedder that builds the vector index and powers the
+# similar-code context stage. All of `baseUrl`, `model`, `dims` and a key must
+# be set together; leaving `model` empty turns indexing off and reviews run
+# without vector retrieval. Changing model or dims later is refused unless
+# `reindexOnModelChange` is set, because it rebuilds every repository.
+embedding:
+  # -- OpenAI-compatible embeddings endpoint (OpenRouter serves Voyage's code models).
+  baseUrl: https://openrouter.ai/api/v1
+  # -- Embedding model id; empty disables indexing.
+  model: ""
+  # -- Vector dimension, at most 4000.
+  dims: 1024
+  # -- API key, rendered into a chart-managed Secret. Prefer `existingSecret`.
+  apiKey: ""
+  # -- Existing Secret holding the API key.
+  existingSecret: ""
+  # -- Key in that Secret.
+  existingSecretKey: api-key
+  # -- Rebuild the index when the model or dimension changes instead of refusing to start.
+  reindexOnModelChange: false
+  # -- Max inputs per embedding request.
+  maxBatch: 64
+  # -- Max characters per embedding request.
+  maxBatchChars: 200000
+  # -- Max characters per input; longer inputs are truncated.
+  maxItemChars: 16000
+
+# Secrets the configuration file references by path (GitHub App private keys
+# and webhook secrets, provider API keys). Each entry mounts one Secret,
+# read-only, at `mountPath` in every role's pods; the file then points at
+# `<mountPath>/<key>`.
+# -- Secrets mounted as files for the configuration file to reference.
+secretMounts: []
+# - name: bot
+#   secretName: kritik-bot
+#   mountPath: /var/run/secrets/kritik/bot
+# - name: providers
+#   secretName: kritik-providers
+#   mountPath: /var/run/secrets/kritik/providers
+
+# Runner Jobs: one pod per review or index run, created by the worker in the
+# release namespace from the same image, running as a service account with
+# no permissions and a database role that can only touch its own run. The
+# worker's Role reaches every Secret in the release namespace, so install
+# kritik into a namespace of its own.
+runner:
+  # -- Image for runner Jobs; empty uses the chart's image. The release's `-tools` tag (e.g. `ghcr.io/home-operations/kritik:1.2.3-tools`) adds curl, fd and rg for an agentic review's `agent.commands`.
+  image: ""
+  # -- How long a finished Job stays for kubectl before Kubernetes removes it (Go duration); the run row keeps everything the Job knew.
+  ttl: 1h
+  # -- RuntimeClass for runner Jobs (e.g. `gvisor`, `kata`). Advised: a runner parses untrusted repository content and, in agentic mode, runs what the model asks; a sandboxed runtime keeps it from the node's kernel. Empty uses the cluster default.
+  runtimeClassName: ""
+  serviceAccount:
+    # -- Create the runner ServiceAccount (no permissions, no token mounted).
+    create: true
+    # -- Runner ServiceAccount name; generated from the release name if empty.
+    name: ""
+    # -- Annotations for the runner ServiceAccount.
+    annotations: {}
+
+gateway:
+  # -- Serve the gateway on `all` and `worker` pods: the forward proxy runner Jobs are handed as `HTTPS_PROXY`, allowing only the hosts the configuration file names (forges, `egress.allowHosts`), so runner pods need no direct internet egress (ADR-0008), and the model endpoint an agentic runner calls with a per-run token, so no provider key enters a runner pod (ADR-0004). Agentic reviews are refused without it.
+  enabled: true
+  # -- Gateway port on the pods and its Service.
+  port: 8082
+
+serviceAccount:
+  # -- Create the ServiceAccount the roles run as.
+  create: true
+  # -- Automount the API token. The worker needs it to create runner Jobs; a pure ingest topology could turn it off.
+  automount: true
+  # -- Annotations for the ServiceAccount.
+  annotations: {}
+  # -- ServiceAccount name; generated from the release name if empty.
+  name: ""
+
+rbac:
+  # -- Create the Role and RoleBinding the worker needs: Jobs in the release namespace, their pods and logs, and the Secrets it hands them. Nothing cluster-wide.
+  create: true
+
+# -- Annotations added to every Deployment (e.g. `reloader.stakater.com/auto: "true"`). Pod-level annotations go in `podAnnotations`.
+deploymentAnnotations: {}
+# -- Annotations added to the pods.
+podAnnotations: {}
+# -- Labels added to the pods.
+podLabels: {}
+
+# -- Pod-level securityContext (non-root uid/gid 65532, RuntimeDefault seccomp).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container securityContext (no privilege escalation, read-only root filesystem, drops ALL capabilities).
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  # -- Service type for the webhook listener.
+  type: ClusterIP
+  # -- Webhook port (`POST /hooks/{installation}`), served by `all` and `ingest` pods.
+  port: 8080
+  # -- Metrics and probe port, served by every pod.
+  metricsPort: 8081
+  # -- Dashboard port, served by `all` (once `web.url` is set) and `web` pods.
+  webPort: 8083
+
+ingress:
+  # -- Expose the webhook listener via an Ingress.
+  enabled: false
+  # -- IngressClass name.
+  className: ""
+  # -- Ingress annotations.
+  annotations: {}
+  # -- Ingress hosts and their paths.
+  hosts:
+    - host: kritik.example.com
+      paths:
+        - path: /hooks
+          pathType: Prefix
+  # -- Ingress TLS configuration.
+  tls: []
+  # The dashboard's own Ingress, separate from the webhook listener's above.
+  web:
+    # -- Expose the dashboard via an Ingress.
+    enabled: false
+    # -- IngressClass name.
+    className: ""
+    # -- Ingress annotations.
+    annotations: {}
+    # -- Ingress hosts and their paths.
+    hosts:
+      - host: dash.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    # -- Ingress TLS configuration.
+    tls: []
+
+# Gateway API HTTPRoute, an alternative to `ingress` for the webhook listener.
+httpRoute:
+  # -- Expose the webhook listener via a Gateway API HTTPRoute.
+  enabled: false
+  # -- HTTPRoute apiVersion; empty defaults to gateway.networking.k8s.io/v1.
+  apiVersion: ""
+  # -- HTTPRoute annotations.
+  annotations: {}
+  # -- HTTPRoute labels.
+  labels: {}
+  # -- Gateways (and listeners) this route attaches to.
+  parentRefs: []
+  # -- Hostnames matched against the Host header (templated).
+  hostnames: []
+  # -- Match conditions for the route.
+  matches:
+    - path:
+        type: PathPrefix
+        value: /hooks
+  # The dashboard's own HTTPRoute, separate from the webhook listener's above.
+  web:
+    # -- Expose the dashboard via a Gateway API HTTPRoute.
+    enabled: false
+    # -- HTTPRoute apiVersion; empty defaults to gateway.networking.k8s.io/v1.
+    apiVersion: ""
+    # -- HTTPRoute annotations.
+    annotations: {}
+    # -- HTTPRoute labels.
+    labels: {}
+    # -- Gateways (and listeners) this route attaches to.
+    parentRefs: []
+    # -- Hostnames matched against the Host header (templated).
+    hostnames: []
+    # -- Match conditions for the route.
+    matches:
+      - path:
+          type: PathPrefix
+          value: /
+
+# NetworkPolicies (off by default): one for the service pods (ingress to the
+# webhook and metrics ports; egress to DNS, the forges and models over the
+# egress ports, and Postgres) and one for runner pods (egress only: DNS, the
+# git remote over the egress ports, and Postgres). The Postgres port is
+# allowed to any peer because the database may live in another namespace.
+networkPolicy:
+  # -- Create the NetworkPolicies.
+  enabled: false
+  # -- Allow DNS egress (UDP/TCP 53).
+  allowDNS: true
+  # -- TCP ports the service pods may egress to for forges and model endpoints. Runner pods get these only when the gateway is disabled; with it, they reach the gateway alone.
+  egressPorts:
+    - 443
+  # -- Postgres port allowed for egress.
+  postgresPort: 5432
+
+# KRITIK_DASHBOARD_KEY is the AES-256 key that seals every dashboard-managed
+# tenant's credentials (installation tokens, App keys, webhook secrets) at
+# rest; it has nothing to do with sessions. Wired onto every non-runner role
+# and required there once a dashboard tenant exists. To rotate it, move the
+# old value into oldKeysSecret (KRITIK_DASHBOARD_OLD_KEYS), which only opens
+# values sealed under it, and keep it there until every value has been
+# written again. Losing a key that still seals a value makes those
+# credentials unreadable, and the pod then fails to start.
+dashboard:
+  keySecret:
+    # -- Secret holding the key that seals dashboard tenants' credentials (`openssl rand -base64 32`); rotate via oldKeysSecret, as losing it makes those credentials unreadable and the pod fail to start.
+    name: ""
+    # -- Key in that Secret.
+    key: key
+  oldKeysSecret:
+    # -- (optional) Secret holding retired sealing keys, comma-separated, only to open values sealed under them.
+    name: ""
+    # -- Key in that Secret.
+    key: old-keys
+
+# -- Pod resource requests/limits shared by every role; `roles.<role>.resources` overrides per role.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# -- Liveness probe, on the metrics port.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  periodSeconds: 20
+# -- Readiness probe, on the metrics port. A replica is ready once it has a database connection and its listeners are up.
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: metrics
+  periodSeconds: 10
+# -- Startup probe, on the metrics port. The liveness and readiness probes wait until it passes, so a pod still opening its listeners is not reported unready; it allows a minute.
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  periodSeconds: 2
+  failureThreshold: 30
+
+# -- Grace period for a clean shutdown: the worker stops taking jobs and lets running ones finish for up to 30s, and its gateway lets model steps in flight finish for up to 2m.
+terminationGracePeriodSeconds: 150
+
+monitoring:
+  serviceMonitor:
+    # -- Create a Prometheus Operator ServiceMonitor for every role's metrics (requires its CRDs).
+    enabled: false
+    # -- Scrape interval.
+    interval: 30s
+    # -- Scrape timeout.
+    scrapeTimeout: 10s
+    # -- ServiceMonitor labels.
+    labels: {}
+    # -- ServiceMonitor annotations.
+    annotations: {}
+    # -- Prometheus metric relabelings.
+    metricRelabelings: []
+    # -- Prometheus relabelings.
+    relabelings: []
+
+podDisruptionBudget:
+  # -- Create a PodDisruptionBudget per role with more than one replica.
+  enabled: false
+  # -- Maximum pods of a role that may be unavailable, as a count or percentage.
+  # @schema
+  # type: [integer, string]
+  # @schema
+  maxUnavailable: 1
+
+# -- Node selector for pod scheduling.
+nodeSelector: {}
+# -- Tolerations for pod scheduling.
+tolerations: []
+# -- Affinity rules for pod scheduling.
+affinity: {}
+# -- PriorityClass for the pods. Empty uses the cluster default.
+priorityClassName: ""
+
+# -- Additional volumes on every Deployment.
+volumes: []
+# -- Additional volume mounts on every container.
+volumeMounts: []

@@ -1,0 +1,549 @@
+package webapi
+
+import (
+	"context"
+	"errors"
+	"maps"
+	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/home-operations/kritik/internal/auth"
+	"github.com/home-operations/kritik/internal/config"
+	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/home-operations/kritik/internal/repoconfig"
+	"github.com/home-operations/kritik/internal/store"
+	"github.com/home-operations/kritik/internal/tasks"
+)
+
+// recentIndexRuns is how many index runs a repository's detail lists.
+const recentIndexRuns = 20
+
+// registerReads mounts the read-only API.
+func (s *Server) registerReads(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/v1/me", s.handler(s.getMe))
+	mux.HandleFunc("GET /api/v1/tenants", s.handler(s.listTenants))
+	mux.HandleFunc("GET /api/v1/operator/tenants", s.handler(s.listOperatorTenants))
+	mux.HandleFunc("GET /api/v1/operator/instance", s.handler(s.listInstanceSettings))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}", s.tenant(s.getTenant))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/repos", s.tenant(s.listRepos))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/repos/{owner}/{repo}", s.tenant(s.getRepo))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/index-runs", s.tenant(s.listIndexRuns))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/pulls", s.tenant(s.listPulls))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/pulls/{owner}/{repo}/{number}", s.tenant(s.getPull))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/followups", s.tenant(s.listFollowups))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/followups/{commentId}/transcript", s.tenant(s.getFollowupTranscript))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/reviews/{id}", s.tenant(s.getReview))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/reviews/{id}/diff", s.tenant(s.getReviewDiff))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/reviews/{id}/transcript", s.tenant(s.getReviewTranscript))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/reviews/{id}/raw", s.tenant(s.getReviewRaw))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/usage", s.tenant(s.getUsage))
+	mux.HandleFunc("GET /api/v1/tenants/{slug}/queue", s.tenant(s.listQueue))
+}
+
+func (s *Server) getMe(w http.ResponseWriter, r *http.Request) error {
+	p := auth.PrincipalFrom(r.Context())
+	me := Me{
+		Account:  account(p.Account),
+		Operator: p.Operator, Tenants: []TenantMembership{},
+	}
+	for _, t := range readable(s.current.Get(), p) {
+		me.Tenants = append(me.Tenants, TenantMembership{Slug: t.Slug, Role: roleOn(p, t.ID()), ManagedBy: t.Origin()})
+	}
+	writeJSON(w, http.StatusOK, me)
+	return nil
+}
+
+// readable lists the file's tenants p may read, in file order.
+func readable(file *configfile.File, p *auth.Principal) []*configfile.Tenant {
+	var out []*configfile.Tenant
+	for i := range file.Tenants {
+		if p.CanRead(file.Tenants[i].ID()) {
+			out = append(out, &file.Tenants[i])
+		}
+	}
+	return out
+}
+
+func (s *Server) listTenants(w http.ResponseWriter, r *http.Request) error {
+	p := auth.PrincipalFrom(r.Context())
+	file := s.current.Get()
+	out := []TenantSummary{}
+	for _, t := range readable(file, p) {
+		sum, err := s.tenantSummary(r.Context(), file, t, roleOn(p, t.ID()))
+		if err != nil {
+			return err
+		}
+		out = append(out, sum)
+	}
+	writeJSON(w, http.StatusOK, out)
+	return nil
+}
+
+func (s *Server) tenantSummary(ctx context.Context, file *configfile.File, t *configfile.Tenant, role auth.Role) (TenantSummary, error) {
+	var stats store.TenantStats
+	err := s.store.WithTenant(ctx, t.ID(), func(tx pgx.Tx) error {
+		var err error
+		stats, err = store.ReadTenantStats(ctx, tx)
+		return err
+	})
+	if err != nil {
+		return TenantSummary{}, err
+	}
+	return TenantSummary{
+		Slug: t.Slug, ManagedBy: t.Origin(), Role: role, Installations: stats.Installations, Repositories: stats.Repositories,
+		Reviews7d: stats.Reviews7d, Usage: monthUsage(stats.Month, file.Settings(t, "", "").Limits),
+	}, nil
+}
+
+func monthUsage(m store.MonthUsage, l configfile.Limits) MonthUsage {
+	return MonthUsage{
+		Tokens: m.Tokens, CostUSD: m.CostUSD, TokensPerMonth: l.TokensPerMonth,
+		ReviewsToday: m.ReviewsToday, ReviewsPerDay: l.ReviewsPerDay,
+	}
+}
+
+// listOperatorTenants lists every tenant of the running configuration and
+// every dashboard tenant stored but not part of it. It is reported as a
+// missing route to anyone but an operator.
+func (s *Server) listOperatorTenants(w http.ResponseWriter, r *http.Request) error {
+	p := auth.PrincipalFrom(r.Context())
+	if !p.Operator {
+		return errNotFound("route")
+	}
+	ctx := r.Context()
+	file := s.current.Get()
+	stored, err := s.store.DashboardTenants(ctx)
+	if err != nil {
+		return err
+	}
+	revisions := map[string]int64{}
+	for _, d := range stored {
+		revisions[d.Slug] = d.Revision
+	}
+	out := []OperatorTenant{}
+	for i := range file.Tenants {
+		t := &file.Tenants[i]
+		sum, err := s.tenantSummary(ctx, file, t, auth.RoleAdmin)
+		if err != nil {
+			return err
+		}
+		out = append(out, OperatorTenant{TenantSummary: sum, Live: true, Revision: revisions[t.Slug]})
+		delete(revisions, t.Slug)
+	}
+	for _, d := range stored {
+		if rev, ok := revisions[d.Slug]; ok {
+			out = append(out, OperatorTenant{
+				Slug: d.Slug, ManagedBy: configfile.OriginDashboard, Role: auth.RoleAdmin,
+				Revision: rev,
+			})
+		}
+	}
+	for _, sk := range file.Skipped() {
+		out = append(out, OperatorTenant{Slug: sk.Slug, ManagedBy: configfile.OriginFile, Role: auth.RoleAdmin, Conflict: sk.Reason})
+	}
+	writeJSON(w, http.StatusOK, out)
+	return nil
+}
+
+func (s *Server) getTenant(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+	ctx := r.Context()
+	var month store.MonthUsage
+	if err := s.read(ctx, t, func(tx pgx.Tx) error {
+		var err error
+		month, err = store.ReadMonthUsage(ctx, tx)
+		return err
+	}); err != nil {
+		return err
+	}
+	settings := t.file.Settings(t.tenant, "", "")
+	d := TenantDetail{
+		Slug: t.tenant.Slug, ManagedBy: t.tenant.Origin(), Role: t.role(), Installations: []Installation{},
+		Models: models(settings.Models), Limits: limits(settings.Limits), Filter: filterSource(settings),
+		Usage: monthUsage(month, settings.Limits),
+	}
+	for i := range t.tenant.Installations {
+		d.Installations = append(d.Installations, installation(&t.tenant.Installations[i]))
+	}
+	writeJSON(w, http.StatusOK, d)
+	return nil
+}
+
+func installation(in *configfile.Installation) Installation {
+	out := Installation{
+		Name: in.Name, Forge: in.Forge, Host: in.Host, Account: in.Account, CredentialKind: CredentialToken,
+		HookPath: "/hooks/" + in.Name,
+		Credentials: CredentialsSet{
+			Token: in.TokenValue().Value() != "", GitToken: in.GitTokenValue().Value() != "",
+			WebhookSecret: in.WebhookSecretValue().Value() != "",
+		},
+	}
+	if in.App != nil {
+		out.CredentialKind = CredentialApp
+		out.Credentials.ClientID = in.App.ClientIDValue() != ""
+		out.Credentials.PrivateKey = in.App.PrivateKeyValue().Value() != ""
+	}
+	return out
+}
+
+func models(m configfile.Models) Models { return Models{Review: m.Review, Fallback: m.Fallback} }
+
+func limits(l configfile.Limits) Limits {
+	return Limits{Concurrency: l.Concurrency, ReviewsPerDay: l.ReviewsPerDay, TokensPerMonth: l.TokensPerMonth}
+}
+
+func filterSource(s configfile.Settings) string {
+	if s.Filter == nil {
+		return ""
+	}
+	return s.Filter.Source()
+}
+
+func (s *Server) listRepos(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+	page, err := parsePage(r)
+	if err != nil {
+		return err
+	}
+	ctx := r.Context()
+	var rows []store.RepoRow
+	var next *store.Cursor
+	if err := s.read(ctx, t, func(tx pgx.Tx) error {
+		rows, next, err = store.ListRepos(ctx, tx, page)
+		return err
+	}); err != nil {
+		return err
+	}
+	items := make([]Repository, len(rows))
+	for i, row := range rows {
+		items[i] = repository(row)
+	}
+	writeJSON(w, http.StatusOK, newPage(items, next))
+	return nil
+}
+
+func repository(r store.RepoRow) Repository {
+	out := Repository{
+		ID: r.ID, FullName: r.FullName, Installation: r.Installation, Enabled: r.Enabled, ManagedBy: r.ManagedBy,
+		DefaultBranch: r.DefaultBranch,
+		Index:         IndexState{ActiveCommit: r.ActiveCommit, ActiveAt: r.ActiveAt, LastRunStatus: r.LastIndexStatus, LastRunAt: r.LastIndexAt},
+	}
+	if r.LastReview != nil {
+		out.LastReview = &ReviewRef{ID: r.LastReview.ID, Status: r.LastReview.Status, CreatedAt: r.LastReview.CreatedAt}
+	}
+	return out
+}
+
+// findRepo resolves {owner}/{repo}, and ?installation= when a tenant has
+// the same repository under two installations.
+func findRepo(ctx context.Context, tx pgx.Tx, r *http.Request) (store.RepoRow, error) {
+	return lookupRepo(ctx, tx, r.PathValue("owner")+"/"+r.PathValue("repo"), r.URL.Query().Get("installation"))
+}
+
+// lookupRepo resolves a repository by name and, when several installations
+// hold it, by installation: a name that stays ambiguous is a 409 listing
+// them, never a guess.
+func lookupRepo(ctx context.Context, tx pgx.Tx, name, installation string) (store.RepoRow, error) {
+	row, err := store.FindRepo(ctx, tx, name, installation)
+	if errors.Is(err, store.ErrNotFound) {
+		return row, errNotFound("repository")
+	}
+	if e, ok := errors.AsType[*store.AmbiguousRepoError](err); ok {
+		return row, errStatus(http.StatusConflict, CodeAmbiguous, "several installations hold this repository; pass ?installation=",
+			ambiguousRepoDetails{Installations: e.Installations})
+	}
+	return row, err
+}
+
+func (s *Server) getRepo(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+	ctx := r.Context()
+	var row store.RepoRow
+	var runs []store.IndexRunRow
+	var file *store.RepoFileRow
+	var taskConfig *store.TaskConfigRow
+	if err := s.read(ctx, t, func(tx pgx.Tx) error {
+		var err error
+		if row, err = findRepo(ctx, tx, r); err != nil {
+			return err
+		}
+		if runs, _, err = store.ListIndexRuns(ctx, tx, row.ID, store.Page{Limit: recentIndexRuns}); err != nil {
+			return err
+		}
+		f, err := store.LastRepoFile(ctx, tx, row.ID)
+		switch {
+		case err == nil:
+			file = &f
+		case !errors.Is(err, store.ErrNotFound):
+			return err
+		}
+		tc, err := store.RepoTaskConfig(ctx, tx, row.ID)
+		switch {
+		case err == nil:
+			taskConfig = &tc
+		case !errors.Is(err, store.ErrNotFound):
+			return err
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	settings := t.file.Settings(t.tenant, row.Installation, row.FullName)
+	d := RepoDetail{
+		Repository: repository(row), Settings: repoSettings(settings), Sources: t.file.Sources(t.tenant, row.Installation, row.FullName),
+		RepoConfig: repoConfig(settings, file), IndexRuns: indexRuns(runs),
+	}
+	var taskDoc *string
+	switch {
+	case taskConfig != nil:
+		d.TasksSource, d.TasksCommit, taskDoc = TasksSourceDefaultBranch, taskConfig.Commit, taskConfig.Doc
+	case file != nil:
+		d.TasksSource, d.TasksCommit, taskDoc = TasksSourceLastReview, file.Commit, file.Doc
+	default:
+		d.TasksSource = TasksSourceLastReview
+	}
+	d.Tasks, d.TaskNotes, d.TasksIgnored = repoTasks(settings, taskDoc)
+	writeJSON(w, http.StatusOK, d)
+	return nil
+}
+
+// repoConfig applies the .kritik.yaml a review read to the operator's
+// settings as they are now; nil when no review has read one.
+func repoConfig(settings configfile.Settings, row *store.RepoFileRow) *RepoConfig {
+	if row == nil {
+		return nil
+	}
+	var doc []byte
+	if row.Doc != nil {
+		doc = []byte(*row.Doc)
+	}
+	m, err := repoconfig.Merge(doc, settings)
+	out := &RepoConfig{
+		ReviewID: row.ReviewID, Commit: row.Commit, Found: row.Doc != nil, Settings: repoSettings(m.Settings),
+		SkipPaths: nonNil(m.Skip.OnlyPaths), Dropped: nonNil(m.Dropped),
+	}
+	if m.InRepoFilter != nil {
+		out.Filter = m.InRepoFilter.Source()
+	}
+	if err != nil {
+		out.Ignored = err.Error()
+	}
+	return out
+}
+
+// repoTasks resolves the tasks that run for the repository from the
+// operator's settings and the repository's .kritik.yaml, nil when there is
+// none. A file that does not parse leaves the operator's tasks, as it does
+// for a run, and ignored says why.
+func repoTasks(settings configfile.Settings, file *string) (defs []TaskDef, notes []TaskNote, ignored string) {
+	var doc []byte
+	if file != nil {
+		doc = []byte(*file)
+	}
+	m, err := repoconfig.Merge(doc, settings)
+	if err != nil {
+		ignored = err.Error()
+	}
+	named := func(ts []tasks.Task, name string) bool {
+		return slices.ContainsFunc(ts, func(t tasks.Task) bool { return t.Name == name })
+	}
+	defs = make([]TaskDef, len(m.Tasks))
+	for i, t := range m.Tasks {
+		d := TaskDef{
+			Name: t.Name, Source: configfile.SourceRepository, If: t.If, Mode: string(t.RunMode()), Triggers: []string{}, Actions: []string{},
+		}
+		switch {
+		case named(settings.Tasks, t.Name):
+			d.Source = configfile.SourceFile
+		case named(settings.DashboardTasks, t.Name):
+			d.Source = configfile.SourceDashboard
+		}
+		for _, tr := range t.On {
+			d.Triggers = append(d.Triggers, tr.Names()...)
+		}
+		a := t.Actions
+		for _, k := range []struct {
+			kind string
+			set  bool
+		}{
+			{tasks.ActionComment, a.Comment != nil && a.Comment.PostMode() != tasks.CommentNone},
+			{tasks.ActionLabels, a.Labels != nil},
+			{tasks.ActionState, a.State != nil},
+			{tasks.ActionAssign, a.Assign != nil},
+			{tasks.ActionReviewers, a.Reviewers != nil},
+			{tasks.ActionInlineComments, a.InlineComments != nil},
+		} {
+			if k.set {
+				d.Actions = append(d.Actions, k.kind)
+			}
+		}
+		defs[i] = d
+	}
+	notes = make([]TaskNote, len(m.TaskNotes))
+	for i, n := range m.TaskNotes {
+		notes[i] = TaskNote{Task: n.Task, What: n.What, Reason: n.Reason}
+	}
+	return defs, notes, ignored
+}
+
+func repoSettings(s configfile.Settings) RepoSettings {
+	return RepoSettings{
+		Enabled: s.Enabled, Mode: s.Mode, Models: models(s.Models), Filter: filterSource(s), Forks: s.Forks,
+		Ignore: nonNil(slices.Clone(s.Ignore)), SettleSeconds: int64(s.Settle.Seconds()), MaxDeltaFiles: s.Incremental.MaxDeltaFiles,
+		Review: ReviewBlock{
+			Instructions: nonNil(s.Review.Instructions), RequireSuggestedFix: s.Review.RequireSuggestedFix, Templates: s.Review.Templates,
+			MinSeverity: s.Review.MinSeverity, InlineComments: s.Review.InlineComments, Context: nonNil(s.Review.Context),
+		},
+		Agent: AgentLimits{
+			MaxSteps: s.Agent.MaxSteps, MaxToolOutputBytes: s.Agent.MaxToolOutputBytes, MaxTokens: s.Agent.MaxTokens,
+			TimeoutSeconds: int64(s.Agent.Timeout.Seconds()), Commands: nonNil(s.Agent.Commands),
+			CommandTimeoutSeconds: int64(s.Agent.CommandTimeout.Seconds()),
+		},
+		Limits: limits(s.Limits),
+		Allow:  allowBounds(s.Allow),
+	}
+}
+
+func allowBounds(a configfile.Allow) AllowBounds {
+	seconds := func(d *time.Duration) *int64 {
+		if d == nil {
+			return nil
+		}
+		return new(int64(d.Seconds()))
+	}
+	return AllowBounds{
+		Modes: a.Modes, Models: a.Models, Commands: a.Commands, SettleSeconds: seconds(a.Settle),
+		Agent: AllowAgentBounds{
+			MaxSteps: a.Agent.MaxSteps, MaxToolOutputBytes: a.Agent.MaxToolOutputBytes, MaxTokens: a.Agent.MaxTokens,
+			TimeoutSeconds: seconds(a.Agent.Timeout),
+		},
+	}
+}
+
+func indexRuns(rows []store.IndexRunRow) []IndexRun {
+	out := make([]IndexRun, len(rows))
+	for i, x := range rows {
+		out[i] = IndexRun{
+			ID: x.ID, Repository: x.Repository, CommitSHA: x.CommitSHA, BaseSHA: x.BaseSHA, EmbedModel: x.EmbedModel, Mode: x.Mode,
+			Status: x.Status, Trigger: x.Trigger, ChunkCount: x.ChunkCount, Error: x.Error, CreatedAt: x.CreatedAt, FinishedAt: x.FinishedAt,
+		}
+	}
+	return out
+}
+
+// repoFilter resolves ?repo=owner/name to a repository id, "" without one.
+func repoFilter(ctx context.Context, tx pgx.Tx, r *http.Request) (string, error) {
+	name := r.URL.Query().Get("repo")
+	if name == "" {
+		return "", nil
+	}
+	row, err := lookupRepo(ctx, tx, name, r.URL.Query().Get("installation"))
+	return row.ID, err
+}
+
+func (s *Server) listIndexRuns(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+	page, err := parsePage(r)
+	if err != nil {
+		return err
+	}
+	ctx := r.Context()
+	var rows []store.IndexRunRow
+	var next *store.Cursor
+	if err := s.read(ctx, t, func(tx pgx.Tx) error {
+		repoID, err := repoFilter(ctx, tx, r)
+		if err != nil {
+			return err
+		}
+		rows, next, err = store.ListIndexRuns(ctx, tx, repoID, page)
+		return err
+	}); err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, newPage(indexRuns(rows), next))
+	return nil
+}
+
+func (s *Server) listInstanceSettings(w http.ResponseWriter, r *http.Request) error {
+	if !auth.PrincipalFrom(r.Context()).Operator {
+		return errNotFound("route")
+	}
+	writeJSON(w, http.StatusOK, instanceSettings(s.current.Get(), s.env))
+	return nil
+}
+
+// instanceSettings are the settings no tenant owns: this process's
+// environment, then the file's instance blocks.
+func instanceSettings(f *configfile.File, env []config.EnvVar) []InstanceSetting {
+	out := []InstanceSetting{}
+	add := func(section, key, value string, source configfile.Source) {
+		out = append(out, InstanceSetting{Section: section, Key: key, Value: value, Source: source})
+	}
+	from := func(set bool) configfile.Source {
+		if set {
+			return configfile.SourceFile
+		}
+		return configfile.SourceDefault
+	}
+	for _, e := range env {
+		source := configfile.SourceDefault
+		if e.Set {
+			source = configfile.SourceEnv
+		}
+		add("environment", e.Name, withoutCredentials(e.Value), source)
+	}
+	for _, name := range slices.Sorted(maps.Keys(f.Providers)) {
+		p := f.Providers[name]
+		value := string(p.Type)
+		if p.BaseURL != "" {
+			value += " at " + withoutCredentials(p.BaseURL)
+		}
+		if p.APIKeyValue().Value() == "" {
+			value += ", no API key"
+		}
+		add("providers", name, value, configfile.SourceFile)
+	}
+	add("polling", "interval", f.PollInterval().String(), from(f.Polling.Interval != nil))
+	add("polling", "lookback", f.PollLookback().String(), from(f.Polling.Lookback > 0))
+	add("indexing", "onboardWindow", strconv.Itoa(f.OnboardWindow()), from(f.Indexing.OnboardWindow > 0))
+	add("retention", "disabledIndexGrace", f.DisabledIndexGrace().String(), from(f.Retention.DisabledIndexGrace > 0))
+	add("retention", "transcripts", f.Retention.TranscriptsOrDefault().String(), from(f.Retention.Transcripts > 0))
+	deadline, _ := f.RunnerFor(nil)
+	runner := f.Defaults.Runner
+	add("defaults", "runner.activeDeadlineSeconds", deadline.String(), from(runner != nil && runner.ActiveDeadlineSeconds > 0))
+	for _, t := range f.Tools {
+		add("tools", t.Name, t.Image+" ("+strings.Join(t.Provides(), ", ")+")", configfile.SourceFile)
+	}
+	add("egress", "allowHosts", listOrNone(f.Egress.AllowHosts), from(len(f.Egress.AllowHosts) > 0))
+	for _, sp := range f.Web.SignIn {
+		add("web", "signIn."+sp.Name, string(sp.Type), configfile.SourceFile)
+	}
+	add("web", "operators", strconv.Itoa(len(f.Web.Operators)), from(len(f.Web.Operators) > 0))
+	ttl := f.Web.SessionTTL
+	if ttl == 0 {
+		ttl = configfile.DefaultSessionTTL
+	}
+	add("web", "sessionTTL", ttl.String(), from(f.Web.SessionTTL > 0))
+	add("web", "dashboardForgeHosts", strings.Join(f.DashboardForgeHosts(), ", "), from(len(f.Web.DashboardForgeHosts) > 0))
+	return out
+}
+
+// withoutCredentials is s with the credentials of a URL it is removed: an
+// endpoint may carry its password.
+func withoutCredentials(s string) string {
+	u, err := url.Parse(s)
+	if err != nil || u.User == nil {
+		return s
+	}
+	u.User = nil
+	return u.String() + " (credentials hidden)"
+}
+
+func listOrNone(xs []string) string {
+	if len(xs) == 0 {
+		return "none"
+	}
+	return strings.Join(xs, ", ")
+}

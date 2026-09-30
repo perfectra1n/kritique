@@ -1,0 +1,7 @@
+.git
+.github
+cover.out
+*.md
+docs
+**/node_modules
+internal/web/dist
