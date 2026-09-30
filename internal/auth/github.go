@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // githubScopes read the profile, its verified emails and org memberships.

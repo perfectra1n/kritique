@@ -25,16 +25,16 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/executor"
-	"github.com/home-operations/kritik/internal/gitfetch"
-	"github.com/home-operations/kritik/internal/ingest"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/runner"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/transcript"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/ingest"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/transcript"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 const agenticConfigYAML = `
@@ -236,17 +236,17 @@ func newAgenticHarness(t *testing.T) *agenticHarness {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	appStore, err := store.Open(ctx, store.Options{
-		AppURL: env(t, "KRITIK_TEST_APP_URL"), OwnerURL: env(t, "KRITIK_TEST_OWNER_URL"),
+		AppURL: env(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: env(t, "KRITIQUE_TEST_OWNER_URL"),
 		Logger: logger,
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(appStore.Close)
-	if err := appStore.Migrate(ctx, "kritik_app", "kritik_runner"); err != nil {
+	if err := appStore.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	runnerStore, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIK_TEST_RUNNER_URL"), Logger: logger})
+	runnerStore, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: logger})
 	if err != nil {
 		t.Fatalf("Open runner: %v", err)
 	}
@@ -259,7 +259,7 @@ func newAgenticHarness(t *testing.T) *agenticHarness {
 	t.Setenv("TEST_SECRET", "model-key")
 	// Credentials in the provider's URL, which the SDK prints in its errors,
 	// must not reach a runner either.
-	providerURL := strings.Replace(srv.URL, "http://", "http://kritik:provider-secret@", 1)
+	providerURL := strings.Replace(srv.URL, "http://", "http://kritique:provider-secret@", 1)
 	if h.file, err = configfile.Parse([]byte(fmt.Sprintf(agenticConfigYAML, providerURL))); err != nil {
 		t.Fatal(err)
 	}
@@ -448,13 +448,13 @@ func checkAgentSubmits(t *testing.T, h *agenticHarness) {
 	sticky := h.lf.comments[commentBase+1]
 	h.lf.mu.Unlock()
 	if len(inline) != 1 || !strings.Contains(inline[0], "b is unused") || comments != 1 ||
-		!strings.Contains(sticky, "/main.go#L3) b is unused") || forgeStatus != "success: kritik: 1 finding(s)" {
+		!strings.Contains(sticky, "/main.go#L3) b is unused") || forgeStatus != "success: kritique: 1 finding(s)" {
 		t.Fatalf("inline=%v comments=%d status=%q sticky:\n%s", inline, comments, forgeStatus, sticky)
 	}
 	h.sm.mu.Lock()
 	auth, system := h.sm.auth[0], h.sm.systems[0]
 	h.sm.mu.Unlock()
-	if auth != "Bearer model-key" || !strings.HasPrefix(system, "You are kritik") {
+	if auth != "Bearer model-key" || !strings.HasPrefix(system, "You are kritique") {
 		t.Fatalf("auth=%q system=%.40q", auth, system)
 	}
 	h.fc.mu.Lock()
@@ -822,7 +822,7 @@ func (e *hookExecutor) Run(ctx context.Context, spec executor.Spec) executor.Res
 	select {
 	case <-time.After(hold):
 	case <-ctx.Done():
-		return executor.Result{JobName: "kritik-run-held", Err: context.Cause(ctx)}
+		return executor.Result{JobName: "kritique-run-held", Err: context.Cause(ctx)}
 	}
 	res := e.inner.Run(ctx, spec)
 	e.mu.Lock()
@@ -846,7 +846,7 @@ func (e *hookExecutor) runDetached(ctx context.Context, spec executor.Spec) exec
 	case <-ctx.Done():
 		cause := context.Cause(ctx)
 		time.AfterFunc(300*time.Millisecond, func() { icancel(cause) })
-		return executor.Result{JobName: "kritik-run-deleted", Err: cause}
+		return executor.Result{JobName: "kritique-run-deleted", Err: cause}
 	}
 }
 
@@ -932,7 +932,7 @@ func checkAgentKeyMasked(t *testing.T, h *agenticHarness) {
 	h.lf.mu.Lock()
 	sticky := h.lf.comments[commentBase+1]
 	h.lf.mu.Unlock()
-	if !strings.Contains(sticky, "by kritik with agent-model.") {
+	if !strings.Contains(sticky, "by kritique with agent-model.") {
 		t.Fatalf("sticky:\n%s", sticky)
 	}
 	// The provider refused the step, so nothing was spent.
@@ -952,7 +952,7 @@ func checkAgentFiltered(t *testing.T, h *agenticHarness) {
 	h.sm.mu.Lock()
 	before := h.sm.requests
 	h.sm.mu.Unlock()
-	base := h.commit(t, ".kritik.yaml", "filter: '!pr.body.contains(\"[skip-review]\")'\n")
+	base := h.commit(t, ".kritique.yaml", "filter: '!pr.body.contains(\"[skip-review]\")'\n")
 	h.lf.setBase(base)
 	next := h.commit(t, "main.go", "package main\n\nfunc b() {}\n\nfunc f() {}\n")
 	h.lf.mu.Lock()
@@ -981,7 +981,7 @@ func checkAgentFiltered(t *testing.T, h *agenticHarness) {
 	h.lf.mu.Lock()
 	forgeStatus := h.lf.status
 	h.lf.mu.Unlock()
-	if forgeStatus != "success: kritik: skipped (filtered by .kritik.yaml)" {
+	if forgeStatus != "success: kritique: skipped (filtered by .kritique.yaml)" {
 		t.Fatalf("forge status = %q", forgeStatus)
 	}
 }
@@ -1184,7 +1184,7 @@ func checkRunnerOnlySkip(t *testing.T, h *agenticHarness) {
 	h.lf.mu.Lock()
 	forgeStatus := h.lf.status
 	h.lf.mu.Unlock()
-	if forgeStatus != "success: kritik: skipped (patch unchanged since the last review)" {
+	if forgeStatus != "success: kritique: skipped (patch unchanged since the last review)" {
 		t.Fatalf("forge status = %q", forgeStatus)
 	}
 }

@@ -11,17 +11,17 @@ const ROUTES: Route[] = [
   { name: 'operator' },
   { name: 'tenant', slug: 'acme' },
   { name: 'repos', slug: 'acme' },
-  { name: 'repo', slug: 'acme', owner: 'kritik', repo: 'kritik' },
+  { name: 'repo', slug: 'acme', owner: 'kritique', repo: 'kritique' },
   { name: 'pulls', slug: 'acme' },
-  { name: 'pull', slug: 'acme', owner: 'kritik', repo: 'kritik', number: 42 },
+  { name: 'pull', slug: 'acme', owner: 'kritique', repo: 'kritique', number: 42 },
   { name: 'review', slug: 'acme', id: 'r1' },
   { name: 'review', slug: 'acme', id: 'r1', tab: 'diff' },
   { name: 'queue', slug: 'acme' },
   { name: 'usage', slug: 'acme' },
   { name: 'followups', slug: 'acme' },
   { name: 'taskRuns', slug: 'acme' },
-  { name: 'taskRuns', slug: 'acme', owner: 'kritik', repo: 'kritik' },
-  { name: 'taskRuns', slug: 'acme', owner: 'kritik', repo: 'kritik', installation: 'acme-forgejo' },
+  { name: 'taskRuns', slug: 'acme', owner: 'kritique', repo: 'kritique' },
+  { name: 'taskRuns', slug: 'acme', owner: 'kritique', repo: 'kritique', installation: 'acme-forgejo' },
   { name: 'taskRun', slug: 'acme', id: 'tr-1' },
   { name: 'admin', slug: 'acme' },
   { name: 'admin', slug: 'acme', section: 'tokens' },
@@ -30,8 +30,8 @@ const ROUTES: Route[] = [
   { name: 'tenant', slug: 'a/b c#d' },
   { name: 'repo', slug: 'acme', owner: 'weird/owner', repo: 're po' },
   // an installation, naming which of several holding owner/repo is meant.
-  { name: 'repo', slug: 'acme', owner: 'kritik', repo: 'kritik', installation: 'acme-forgejo' },
-  { name: 'pull', slug: 'acme', owner: 'kritik', repo: 'kritik', number: 42, installation: 'a b&c' },
+  { name: 'repo', slug: 'acme', owner: 'kritique', repo: 'kritique', installation: 'acme-forgejo' },
+  { name: 'pull', slug: 'acme', owner: 'kritique', repo: 'kritique', number: 42, installation: 'a b&c' },
 ];
 
 test.describe('routes: parse(href(r)) === r', () => {

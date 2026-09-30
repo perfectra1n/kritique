@@ -7,9 +7,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/tasks"
-	"github.com/home-operations/kritik/internal/transcript"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
 func (s *Server) registerTasks(mux *http.ServeMux) {

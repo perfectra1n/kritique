@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-25
-- **Amends:** [ADR-0002](0002-kritik-pr-review-service.md) §2.8 (storage)
+- **Amends:** [ADR-0002](0002-kritique-pr-review-service.md) §2.8 (storage)
   and §2.9 (the index): `pgvector` stays as the type provider, the index
   access method becomes VectorChord's `vchordrq`, and `vchord` joins
   `vector` as a required extension.
@@ -25,8 +25,8 @@ distances. It is what Immich moved to, TensorChord publishes a
 CloudNativePG image for it (`ghcr.io/tensorchord/cloudnative-vectorchord`,
 Postgres 18.6 with VectorChord 1.1.1 at the time of writing) and a scratch
 image that mounts as a CloudNativePG image-volume extension, and the
-operator running kritik's development cluster already uses it elsewhere.
-kritik is unreleased, so the switch costs no migration of anyone's data.
+operator running kritique's development cluster already uses it elsewhere.
+kritique is unreleased, so the switch costs no migration of anyone's data.
 
 ## 2. Decision
 
@@ -34,7 +34,7 @@ kritik is unreleased, so the switch costs no migration of anyone's data.
   halfvec_cosine_ops)` with default options: no partitioning, since the
   table stays far below the size at which VectorChord recommends `lists`,
   and the similarity query is unchanged (`ORDER BY embedding <=> $1
-  LIMIT n`). Nothing supports the HNSW index: kritik has no deployment
+  LIMIT n`). Nothing supports the HNSW index: kritique has no deployment
   to migrate, and its migrations were flattened into one schema file at
   the same time.
 - The similarity query runs with `SET LOCAL vchordrq.prefilter = on`: its
@@ -42,7 +42,7 @@ kritik is unreleased, so the switch costs no migration of anyone's data.
   cheap, which is when VectorChord recommends it, and with prefilter the
   index skips every chunk outside the repository's generation rather than
   ranking it first.
-- Startup requires both `vchord` and `vector` in `pg_extension`. kritik
+- Startup requires both `vchord` and `vector` in `pg_extension`. kritique
   still creates neither; on CloudNativePG the `Database` resource declares
   both and the `Cluster` loads `vchord` through `shared_preload_libraries`.
 - The integration suite and CI run against
@@ -52,13 +52,13 @@ kritik is unreleased, so the switch costs no migration of anyone's data.
 
 **Positive.** Full result counts for small repositories in a shared index
 without an HNSW-specific setting; faster index builds on onboarding and
-reindex; a prefilter that fits kritik's query exactly; the same extension
+reindex; a prefilter that fits kritique's query exactly; the same extension
 family the operator's other databases run.
 
 **Negative.** A second required extension and a `shared_preload_libraries`
 entry, so the stock CloudNativePG images no longer suffice: a deployment
 needs TensorChord's image or the image-volume extension. VectorChord is
-AGPL-3.0 / ELv2 licensed, which binds the database image, not kritik.
+AGPL-3.0 / ELv2 licensed, which binds the database image, not kritique.
 
 ## 4. Alternatives considered
 

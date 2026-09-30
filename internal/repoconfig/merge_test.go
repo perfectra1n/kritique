@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 func operator() configfile.Settings {
@@ -40,14 +40,14 @@ func TestMerge(t *testing.T) {
 		{
 			name: "the file narrows, appends instructions and replaces presentation",
 			doc: "enabled: false\nfilter: '!pr.draft'\nignore: [gen/**, vendor/**]\nskip:\n  onlyPaths: [docs/**]\n" +
-				"review:\n  instructions: [.kritik/rules.md, docs/rules.md, { path: .kritik/sql.md, paths: ['**/*.sql'] }]\n" +
-				"  templates:\n    inline: .kritik/inline.tmpl\n",
+				"review:\n  instructions: [.kritique/rules.md, docs/rules.md, { path: .kritique/sql.md, paths: ['**/*.sql'] }]\n" +
+				"  templates:\n    inline: .kritique/inline.tmpl\n",
 			want: func(s *configfile.Settings) {
 				s.Enabled, s.Ignore = false, []string{"vendor/**", "gen/**"}
-				s.Review.Instructions = []string{"docs/rules.md", ".kritik/rules.md", ".kritik/sql.md"}
-				s.Review.Templates.Inline = ".kritik/inline.tmpl"
+				s.Review.Instructions = []string{"docs/rules.md", ".kritique/rules.md", ".kritique/sql.md"}
+				s.Review.Templates.Inline = ".kritique/inline.tmpl"
 			},
-			filter: true, skip: []string{"docs/**"}, scoped: map[string][]string{".kritik/sql.md": {"**/*.sql"}},
+			filter: true, skip: []string{"docs/**"}, scoped: map[string][]string{".kritique/sql.md": {"**/*.sql"}},
 		},
 		{
 			name: "an operator's instruction stays unscoped", doc: "review:\n  instructions: [{ path: docs/rules.md, paths: ['**/*.sql'] }]\n",
@@ -68,11 +68,11 @@ func TestMerge(t *testing.T) {
 		},
 		{
 			name: "an unknown severity floor is dropped", doc: "review: { minSeverity: blocking }\n",
-			dropped: []string{`.kritik.yaml: review.minSeverity "blocking" was dropped; allowed: nit, important`},
+			dropped: []string{`.kritique.yaml: review.minSeverity "blocking" was dropped; allowed: nit, important`},
 		},
 		{
 			name: "requireSuggestedFix may only turn on", doc: "review:\n  requireSuggestedFix: false\n",
-			dropped: []string{".kritik.yaml: review.requireSuggestedFix false was dropped; allowed: true, since the operator requires a suggested fix"},
+			dropped: []string{".kritique.yaml: review.requireSuggestedFix false was dropped; allowed: true, since the operator requires a suggested fix"},
 		},
 		{
 			name: "with no bounds set, the operator's own values or lower",
@@ -85,13 +85,13 @@ func TestMerge(t *testing.T) {
 			name: "with no bounds set, anything else is dropped",
 			doc:  "mode: agentic\nmodels: { review: p/small, fallback: p/big }\nagent: { maxSteps: 31, timeout: 0s, commands: [rg, curl] }\nsettle: 3m\n",
 			dropped: []string{
-				`.kritik.yaml: mode "agentic" was dropped; allowed: single`,
-				`.kritik.yaml: models.review "p/small" was dropped; allowed: p/big`,
-				`.kritik.yaml: models.fallback "p/big" was dropped; allowed: none`,
-				`.kritik.yaml: agent.commands "curl" was dropped; allowed: rg`,
-				".kritik.yaml: agent.maxSteps 31 was dropped; allowed: above 0, at most 30",
-				".kritik.yaml: agent.timeout 0s was dropped; allowed: above 0, at most 10m0s",
-				".kritik.yaml: settle 3m0s was dropped; allowed: 0s to 2m0s",
+				`.kritique.yaml: mode "agentic" was dropped; allowed: single`,
+				`.kritique.yaml: models.review "p/small" was dropped; allowed: p/big`,
+				`.kritique.yaml: models.fallback "p/big" was dropped; allowed: none`,
+				`.kritique.yaml: agent.commands "curl" was dropped; allowed: rg`,
+				".kritique.yaml: agent.maxSteps 31 was dropped; allowed: above 0, at most 30",
+				".kritique.yaml: agent.timeout 0s was dropped; allowed: above 0, at most 10m0s",
+				".kritique.yaml: settle 3m0s was dropped; allowed: 0s to 2m0s",
 			},
 		},
 		{
@@ -112,8 +112,8 @@ func TestMerge(t *testing.T) {
 			name: "a value past its bound is dropped, not clamped", doc: "agent: { maxTokens: 9000 }\nsettle: 31m\n",
 			allow: configfile.Allow{Agent: configfile.AllowAgent{MaxTokens: new(int64(8000))}, Settle: new(30 * time.Minute)},
 			dropped: []string{
-				".kritik.yaml: agent.maxTokens 9000 was dropped; allowed: above 0, at most 8000",
-				".kritik.yaml: settle 31m0s was dropped; allowed: 0s to 30m0s",
+				".kritique.yaml: agent.maxTokens 9000 was dropped; allowed: above 0, at most 8000",
+				".kritique.yaml: settle 31m0s was dropped; allowed: 0s to 30m0s",
 			},
 		},
 		{name: "a secret reference does not decode", doc: "models: { review: { env: KEY } }\n", wantErr: "cannot unmarshal"},
@@ -186,7 +186,7 @@ func TestMergedCheck(t *testing.T) {
 		})
 	}
 	for r, want := range map[SkipReason]string{
-		SkipDisabled: "disabled in .kritik.yaml", SkipFiltered: "filtered by .kritik.yaml", SkipOnlyPaths: "only skipped paths changed",
+		SkipDisabled: "disabled in .kritique.yaml", SkipFiltered: "filtered by .kritique.yaml", SkipOnlyPaths: "only skipped paths changed",
 	} {
 		if !r.Valid() || r.Description() != want {
 			t.Fatalf("%q.Description() = %q, want %q", r, r.Description(), want)

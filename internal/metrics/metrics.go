@@ -1,4 +1,4 @@
-// Package metrics is every Prometheus series kritik exports beyond the Go
+// Package metrics is every Prometheus series kritique exports beyond the Go
 // runtime. One Metrics value is registered per process and shared by the
 // roles; a nil *Metrics records nothing, so tests need not register one.
 package metrics
@@ -48,68 +48,68 @@ const (
 func New(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		webhooks: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_webhooks_total", Help: "Webhook deliveries by installation and what became of them.",
+			Name: "kritique_webhooks_total", Help: "Webhook deliveries by installation and what became of them.",
 		}, []string{lblInstallation, lblOutcome}),
 		polls: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_polls_total", Help: "Backstop polls per installation, by outcome (ok, error).",
+			Name: "kritique_polls_total", Help: "Backstop polls per installation, by outcome (ok, error).",
 		}, []string{lblInstallation, lblOutcome}),
 		polled: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_polled_pull_requests_total", Help: "Open pull requests the backstop poll handed to ingest.",
+			Name: "kritique_polled_pull_requests_total", Help: "Open pull requests the backstop poll handed to ingest.",
 		}, []string{lblInstallation}),
 		reviews: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_reviews_total", Help: "Reviews finished, by terminal status.",
+			Name: "kritique_reviews_total", Help: "Reviews finished, by terminal status.",
 		}, []string{lblTenant, "status"}),
 		egress: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_egress_requests_total",
+			Name: "kritique_egress_requests_total",
 			Help: "Requests runner pods made through the gateway, by kind (connect, http) and outcome (allowed, refused, error).",
 		}, []string{lblKind, lblOutcome}),
 		transcripts: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_transcript_writes_total",
+			Name: "kritique_transcript_writes_total",
 			Help: "Model calls recorded for the transcript view, by kind (agent_step, review, fallback, followup) and outcome (ok, error).",
 		}, []string{lblKind, lblOutcome}),
 		reviewDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: "kritik_review_duration_seconds", Help: "Wall time of a review job from pickup to terminal status.",
+			Name: "kritique_review_duration_seconds", Help: "Wall time of a review job from pickup to terminal status.",
 			Buckets: []float64{5, 10, 20, 30, 60, 120, 300, 600, 900},
 		}, []string{lblTenant}),
 		followups: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_followups_total", Help: "Follow-up mentions handled, by outcome: answered, limited, ignored, failed.",
+			Name: "kritique_followups_total", Help: "Follow-up mentions handled, by outcome: answered, limited, ignored, failed.",
 		}, []string{lblTenant, lblOutcome}),
 		findings: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_findings_total", Help: "Findings posted, by severity.",
+			Name: "kritique_findings_total", Help: "Findings posted, by severity.",
 		}, []string{lblTenant, "severity"}),
 		contextChunks: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_context_chunks_total", Help: "Context chunks put in front of the model, by stage.",
+			Name: "kritique_context_chunks_total", Help: "Context chunks put in front of the model, by stage.",
 		}, []string{lblTenant, "stage"}),
 		indexRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_index_runs_total", Help: "Index runs finished, by mode and status.",
+			Name: "kritique_index_runs_total", Help: "Index runs finished, by mode and status.",
 		}, []string{lblTenant, "mode", "status"}),
 		indexChunks: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_index_chunks_total", Help: "Chunks embedded into the index.",
+			Name: "kritique_index_chunks_total", Help: "Chunks embedded into the index.",
 		}, []string{lblTenant}),
 		runnerRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_runner_runs_total", Help: "Runner Jobs finished, by kind and outcome.",
+			Name: "kritique_runner_runs_total", Help: "Runner Jobs finished, by kind and outcome.",
 		}, []string{lblTenant, "kind", lblOutcome}),
 		runnerDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: "kritik_runner_duration_seconds", Help: "Runner Job time from start to finish.",
+			Name: "kritique_runner_duration_seconds", Help: "Runner Job time from start to finish.",
 			Buckets: []float64{2, 5, 10, 20, 30, 60, 120, 300, 600, 900},
 		}, []string{"kind"}),
 		leaseWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: "kritik_lease_wait_seconds", Help: "Time spent waiting for a model concurrency slot.",
+			Name: "kritique_lease_wait_seconds", Help: "Time spent waiting for a model concurrency slot.",
 			Buckets: []float64{0.01, 0.1, 1, 5, 15, 30, 60, 120, 300},
 		}, []string{lblTenant, lblModel}),
 		reviewSnoozes: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_review_snoozes_total", Help: "Reviews put back on the queue because every model slot was held.",
+			Name: "kritique_review_snoozes_total", Help: "Reviews put back on the queue because every model slot was held.",
 		}, []string{lblTenant, lblModel}),
 		modelCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_model_calls_total", Help: "Model calls, by role and outcome.",
+			Name: "kritique_model_calls_total", Help: "Model calls, by role and outcome.",
 		}, []string{lblTenant, lblModel, lblRole, lblOutcome}),
 		modelTokens: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_model_tokens_total",
+			Name: "kritique_model_tokens_total",
 			Help: "Tokens spent, by role and direction (input, cached, output); " +
 				"cached is the part of input the provider served from its prompt cache.",
 		}, []string{lblTenant, lblModel, lblRole, "direction"}),
 		modelCost: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritik_model_cost_usd_total", Help: "Provider-reported cost in US dollars, by role.",
+			Name: "kritique_model_cost_usd_total", Help: "Provider-reported cost in US dollars, by role.",
 		}, []string{lblTenant, lblModel, lblRole}),
 	}
 	reg.MustRegister(m.webhooks, m.polls, m.polled, m.reviews, m.reviewDuration, m.followups, m.findings,

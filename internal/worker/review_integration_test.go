@@ -29,18 +29,18 @@ import (
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivertype"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/executor"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/gitfetch"
-	"github.com/home-operations/kritik/internal/ingest"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/jobtimeout"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/review"
-	"github.com/home-operations/kritik/internal/runner"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/ingest"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 func env(t *testing.T, key string) string {
@@ -150,7 +150,7 @@ func (l *localForge) CloneURL(string, string) string           { return l.dir }
 func (l *localForge) GitToken(context.Context) (string, error) { return "", nil }
 
 func (l *localForge) ReadGitToken(context.Context, string, string) (string, error) { return "", nil }
-func (l *localForge) BotLogin(context.Context) (string, error)                     { return "kritik[bot]", nil }
+func (l *localForge) BotLogin(context.Context) (string, error)                     { return "kritique[bot]", nil }
 
 func (l *localForge) BranchTip(context.Context, string, string, string) (string, string, error) {
 	l.mu.Lock()
@@ -212,7 +212,7 @@ func (l *localForge) FindComment(_ context.Context, _, _ string, _ int, _, marke
 func (l *localForge) CreateComment(_ context.Context, _, _ string, _ int, body string) (int64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.addComment("kritik[bot]", body), nil
+	return l.addComment("kritique[bot]", body), nil
 }
 
 // commentBase puts fake comment ids where GitHub's are: beyond int32.
@@ -454,7 +454,7 @@ func testRepo(t *testing.T) (dir, base, head string) {
 	// head (e.g. EnqueueReindex's BranchTip-resolved commit) still satisfies
 	// upload-pack's allowReachableSHA1InWant check instead of failing "not
 	// our ref".
-	if _, err := r.CreateTag("kritik-head", plumbing.NewHash(head), nil); err != nil {
+	if _, err := r.CreateTag("kritique-head", plumbing.NewHash(head), nil); err != nil {
 		t.Fatal(err)
 	}
 	return dir, base, head
@@ -467,14 +467,14 @@ func checkWriteBack(t *testing.T, lf *localForge, fc *fakeCompleter) {
 	comments, inline, forgeStatus := lf.comments, lf.inline, lf.status
 	lf.mu.Unlock()
 	sticky := comments[commentBase+1]
-	if len(comments) != 1 || !strings.HasPrefix(sticky, "<!-- kritik:pr-1 -->\n") ||
+	if len(comments) != 1 || !strings.HasPrefix(sticky, "<!-- kritique:pr-1 -->\n") ||
 		!strings.Contains(sticky, "- **[important]** [`main.go:1`](local://onedr0p/home-ops/") ||
 		!strings.Contains(sticky, "/main.go#L1) first line") || !strings.Contains(sticky, "**1 finding** · 0 blocking · 1 important · 0 nit") ||
 		!strings.Contains(sticky, "- Small and focused") || !strings.Contains(sticky, "_1 finding(s) were dropped (unanchored: 1)._") {
 		t.Fatalf("comments = %v", comments)
 	}
 	if len(inline) != 1 || inline[0].Line != 1 || !strings.Contains(inline[0].Body, "**[important]** **first line**") ||
-		!strings.Contains(inline[0].Body, "do this") || forgeStatus != "success: kritik: 1 finding(s)" {
+		!strings.Contains(inline[0].Body, "do this") || forgeStatus != "success: kritique: 1 finding(s)" {
 		t.Fatalf("inline = %+v status = %q", inline, forgeStatus)
 	}
 	fc.mu.Lock()
@@ -882,18 +882,18 @@ func checkFollowUps(
 		return len(lf.comments), lf.comments[commentBase+int64(len(lf.comments))]
 	}
 
-	id := mention("onedr0p", "@kritik why is b here?")
+	id := mention("onedr0p", "@kritique why is b here?")
 	if status, reason := waitFollowUp(id); status != "answered" {
 		t.Fatalf("status = %s (%s), want answered", status, reason)
 	}
-	if _, body := lastComment(); !strings.Contains(body, "Because b is new.") || !strings.Contains(body, "kritik follow-up with reviewer") {
+	if _, body := lastComment(); !strings.Contains(body, "Because b is new.") || !strings.Contains(body, "kritique follow-up with reviewer") {
 		t.Fatalf("reply = %q", body)
 	}
 	checkFollowUpTranscript(ctx, t, st, tenantID, id, fc)
 	fc.mu.Lock()
 	prompt := fc.users[len(fc.users)-1]
 	fc.mu.Unlock()
-	for _, want := range []string{"Thread, oldest first", "<!-- kritik:pr-1 -->", "--- onedr0p", "[answer this]", "diff --git a/main.go", "Findings kritik posted", "main.go:1 [important] first line: look here", "<description>\nAdds b.\n</description>"} {
+	for _, want := range []string{"Thread, oldest first", "<!-- kritique:pr-1 -->", "--- onedr0p", "[answer this]", "diff --git a/main.go", "Findings kritique posted", "main.go:1 [important] first line: look here", "<description>\nAdds b.\n</description>"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("follow-up prompt missing %q:\n%s", want, prompt)
 		}
@@ -906,7 +906,7 @@ func checkFollowUps(
 		t.Fatalf("reply id %d not recorded as a bigint", replyID)
 	}
 
-	id = mention("outsider", "@kritik and me?")
+	id = mention("outsider", "@kritique and me?")
 	if status, reason := waitFollowUp(id); status != "ignored" || !strings.Contains(reason, "write is required") {
 		t.Fatalf("outsider: status = %s (%s)", status, reason)
 	}
@@ -926,7 +926,7 @@ func checkFollowUps(
 	if err != nil {
 		t.Fatal(err)
 	}
-	id = mention("onedr0p", "@kritik again?")
+	id = mention("onedr0p", "@kritique again?")
 	if status, _ := waitFollowUp(id); status != "limited" {
 		t.Fatalf("status = %s, want limited", status)
 	}
@@ -934,7 +934,7 @@ func checkFollowUps(
 	if !strings.Contains(body, "limit of follow-ups") {
 		t.Fatalf("limit notice not posted, last comment = %q", body)
 	}
-	id = mention("onedr0p", "@kritik and again?")
+	id = mention("onedr0p", "@kritique and again?")
 	status, _ := waitFollowUp(id)
 	after, _ := lastComment()
 	// The mention itself is one comment; no notice follows it.
@@ -947,23 +947,23 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	appStore, err := store.Open(ctx, store.Options{
-		AppURL: env(t, "KRITIK_TEST_APP_URL"), OwnerURL: env(t, "KRITIK_TEST_OWNER_URL"),
+		AppURL: env(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: env(t, "KRITIQUE_TEST_OWNER_URL"),
 		Logger: logger,
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(appStore.Close)
-	if err := appStore.Migrate(ctx, "kritik_app", "kritik_runner"); err != nil {
+	if err := appStore.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if err := appStore.EnsureIndexSchema(ctx, "kritik_app", "fake-embed", 8, false); err != nil {
+	if err := appStore.EnsureIndexSchema(ctx, "kritique_app", "fake-embed", 8, false); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
-	if err := appStore.EnsureIndexSchema(ctx, "kritik_app", "other-model", 8, false); !errors.Is(err, store.ErrIndexSchemaMismatch) {
+	if err := appStore.EnsureIndexSchema(ctx, "kritique_app", "other-model", 8, false); !errors.Is(err, store.ErrIndexSchemaMismatch) {
 		t.Fatalf("a different embedding model must be refused without reindex, got %v", err)
 	}
-	runnerStore, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIK_TEST_RUNNER_URL"), Logger: logger})
+	runnerStore, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: logger})
 	if err != nil {
 		t.Fatalf("Open runner: %v", err)
 	}
@@ -1114,7 +1114,7 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 		checkSnoozeWhileSlotsHeld(ctx, t, appStore, dir, base, lf, dispatchPR, tenant.ID(), "test/reviewer")
 	})
 
-	t.Run("the merge-base .kritik.yaml skips, instructs and templates", func(t *testing.T) {
+	t.Run("the merge-base .kritique.yaml skips, instructs and templates", func(t *testing.T) {
 		checkRepoConfig(ctx, t, appStore, lf, fc, dir, base, dispatchPR, waitReview, tenant.ID())
 	})
 
@@ -1295,7 +1295,7 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 	}
 }
 
-// checkRepoConfig commits a .kritik.yaml with a skip rule, instructions
+// checkRepoConfig commits a .kritique.yaml with a skip rule, instructions
 // and a summary template onto a new merge base, then reviews pull requests
 // against it.
 func checkRepoConfig(
@@ -1327,20 +1327,20 @@ func checkRepoConfig(
 		}
 		return h.String()
 	}
-	cfgBase := commit("configure kritik", map[string]string{
-		".kritik.yaml": `filter: '!pr.labels.exists(l, l.name == "skip-review")'
+	cfgBase := commit("configure kritique", map[string]string{
+		".kritique.yaml": `filter: '!pr.labels.exists(l, l.name == "skip-review")'
 skip:
-  onlyPaths: ["docs/**", ".kritik.yaml"]
+  onlyPaths: ["docs/**", ".kritique.yaml"]
 review:
-  instructions: [".kritik/rules.md"]
+  instructions: [".kritique/rules.md"]
   templates:
-    summary: ".kritik/summary.md.tmpl"
+    summary: ".kritique/summary.md.tmpl"
 `,
-		".kritik/rules.md":        "Flag every TODO left in code.\n",
-		".kritik/summary.md.tmpl": "Custom summary for #{{ .Number }}: {{ .Result.Summary.Take }}\n",
+		".kritique/rules.md":        "Flag every TODO left in code.\n",
+		".kritique/summary.md.tmpl": "Custom summary for #{{ .Number }}: {{ .Result.Summary.Take }}\n",
 	})
 	docsHead := commit("docs", map[string]string{"docs/guide.md": "# Guide\n"})
-	loosened := commit("drop the skip rule", map[string]string{".kritik.yaml": "review: {}\n"})
+	loosened := commit("drop the skip rule", map[string]string{".kritique.yaml": "review: {}\n"})
 	lf.setBase(cfgBase)
 
 	fc.mu.Lock()
@@ -1363,7 +1363,7 @@ review:
 		lf.mu.Lock()
 		forgeStatus := lf.status
 		lf.mu.Unlock()
-		if forgeStatus != "success: kritik: skipped (only skipped paths changed)" || skipReason(head) != "only_skipped_paths" {
+		if forgeStatus != "success: kritique: skipped (only skipped paths changed)" || skipReason(head) != "only_skipped_paths" {
 			t.Fatalf("status = %q reason = %q", forgeStatus, skipReason(head))
 		}
 	}
@@ -1391,12 +1391,12 @@ review:
 	lf.mu.Lock()
 	var sticky string
 	for _, body := range lf.comments {
-		if strings.HasPrefix(body, "<!-- kritik:pr-3 -->\n") {
+		if strings.HasPrefix(body, "<!-- kritique:pr-3 -->\n") {
 			sticky = body
 		}
 	}
 	lf.mu.Unlock()
-	if !strings.HasPrefix(sticky, "<!-- kritik:pr-3 -->\nCustom summary for #3: Changes main.go.") {
+	if !strings.HasPrefix(sticky, "<!-- kritique:pr-3 -->\nCustom summary for #3: Changes main.go.") {
 		t.Fatalf("sticky comment for PR 3 = %q", sticky)
 	}
 
@@ -1409,7 +1409,7 @@ review:
 	lf.mu.Lock()
 	forgeStatus := lf.status
 	lf.mu.Unlock()
-	if forgeStatus != "success: kritik: skipped (filtered by .kritik.yaml)" {
+	if forgeStatus != "success: kritique: skipped (filtered by .kritique.yaml)" {
 		t.Fatalf("status = %q", forgeStatus)
 	}
 }
@@ -1555,7 +1555,7 @@ func checkIncrementalRecord(ctx context.Context, t *testing.T, appStore *store.S
 	lf.mu.Lock()
 	var sticky string
 	for _, body := range lf.comments {
-		if strings.HasPrefix(body, "<!-- kritik:pr-5 -->\n") {
+		if strings.HasPrefix(body, "<!-- kritique:pr-5 -->\n") {
 			sticky = body
 		}
 	}
@@ -1888,8 +1888,8 @@ func checkRequestCancelRunning(
 	lf.mu.Lock()
 	status := lf.status
 	lf.mu.Unlock()
-	if status != "error: kritik: review canceled" {
-		t.Fatalf("commit status = %q, want %q", status, "error: kritik: review canceled")
+	if status != "error: kritique: review canceled" {
+		t.Fatalf("commit status = %q, want %q", status, "error: kritique: review canceled")
 	}
 
 	var requestedAt sql.NullTime
@@ -2101,7 +2101,7 @@ func (g *gateExecutor) Run(ctx context.Context, spec executor.Spec) executor.Res
 	g.mu.Unlock()
 	if spec.Job.Kind == runner.KindIndex && beforeIndex != nil {
 		if err := beforeIndex(); err != nil {
-			return executor.Result{JobName: "kritik-run-failed", Err: err}
+			return executor.Result{JobName: "kritique-run-failed", Err: err}
 		}
 	}
 	if spec.Job.Kind != runner.KindReview {
@@ -2119,7 +2119,7 @@ func (g *gateExecutor) Run(ctx context.Context, spec executor.Spec) executor.Res
 	case <-ctx.Done():
 	}
 	<-ctx.Done()
-	return executor.Result{JobName: "kritik-run-blocked", Err: context.Cause(ctx)}
+	return executor.Result{JobName: "kritique-run-blocked", Err: context.Cause(ctx)}
 }
 
 func allowSHAFetch(t *testing.T, r *git.Repository) {
@@ -2200,8 +2200,8 @@ func checkJobEnded(
 		if n := countReviewsByStatus(ctx, t, appStore, tenantID, head, "running"); n != 0 {
 			t.Fatalf("running reviews for %s = %d, want 0", head, n)
 		}
-		if got := lf.lastStatus(); got != "error: kritik: review timed out" {
-			t.Fatalf("commit status = %q, want error: kritik: review timed out", got)
+		if got := lf.lastStatus(); got != "error: kritique: review timed out" {
+			t.Fatalf("commit status = %q, want error: kritique: review timed out", got)
 		}
 	})
 

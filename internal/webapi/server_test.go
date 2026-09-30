@@ -11,8 +11,8 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/home-operations/kritik/internal/auth"
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 const testConfig = `
@@ -23,21 +23,21 @@ tenants:
         forge: forgejo
         host: git.example
         account: alpha
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
   - slug: beta
     installations:
       - name: beta-bot
         forge: forgejo
         host: git.example
         account: beta
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
 `
 
 func testFile(t *testing.T) *configfile.File {
 	t.Helper()
-	t.Setenv("KRITIK_TEST_TOKEN", "tok")
+	t.Setenv("KRITIQUE_TEST_TOKEN", "tok")
 	f, err := configfile.Parse([]byte(testConfig))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -73,7 +73,7 @@ func newTestServer(t *testing.T, webURL string) *testServer {
 		t.Fatalf("auth.New: %v", err)
 	}
 	ui := fstest.MapFS{
-		"index.html":       {Data: []byte("<!doctype html><title>kritik</title>")},
+		"index.html":       {Data: []byte("<!doctype html><title>kritique</title>")},
 		"assets/app-1.js":  {Data: []byte("console.log(1)")},
 		"favicon.svg":      {Data: []byte("<svg/>")},
 		"assets/app-1.css": {Data: []byte("body{}")},
@@ -110,7 +110,7 @@ func decodeError(t *testing.T, w *httptest.ResponseRecorder) ErrorBody {
 }
 
 func TestAPIRequiresPrincipal(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	for _, path := range []string{"/api/v1/me", "/api/v1/tenants", "/api/v1/tenants/alpha/repos", "/api/events", "/api/nope"} {
 		t.Run(path, func(t *testing.T) {
 			w := ts.as(nil, httptest.NewRequest("GET", path, nil))
@@ -125,7 +125,7 @@ func TestAPIRequiresPrincipal(t *testing.T) {
 }
 
 func TestTenantScopeHidesUnreadableTenants(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	alphaMember := memberOf(t, ts.file, "alpha", auth.RoleMember)
 	paths := []string{
 		"/api/v1/tenants/%s", "/api/v1/tenants/%s/repos", "/api/v1/tenants/%s/repos/o/r", "/api/v1/tenants/%s/pulls",
@@ -188,7 +188,7 @@ func TestResolveTenant(t *testing.T) {
 }
 
 func TestMe(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	tests := []struct {
 		name     string
 		p        *auth.Principal
@@ -226,7 +226,7 @@ func TestMe(t *testing.T) {
 }
 
 func TestListTenantsWithNoneReadable(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	w := ts.as(&auth.Principal{}, httptest.NewRequest("GET", "/api/v1/tenants", nil))
 	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "[]" {
 		t.Fatalf("got %d %q, want 200 []", w.Code, w.Body)
@@ -234,7 +234,7 @@ func TestListTenantsWithNoneReadable(t *testing.T) {
 }
 
 func TestOperatorRouteHiddenFromNonOperators(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	w := ts.as(memberOf(t, ts.file, "alpha", auth.RoleAdmin), httptest.NewRequest("GET", "/api/v1/operator/tenants", nil))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", w.Code)
@@ -242,7 +242,7 @@ func TestOperatorRouteHiddenFromNonOperators(t *testing.T) {
 }
 
 func TestRequestValidation(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	p := memberOf(t, ts.file, "alpha", auth.RoleMember)
 	tests := []struct {
 		path string
@@ -270,7 +270,7 @@ func TestRequestValidation(t *testing.T) {
 }
 
 func TestUnknownRoutes(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	p := &auth.Principal{Operator: true}
 	for _, path := range []string{"/api/v1/nope", "/api/v2/tenants", "/auth/nope"} {
 		t.Run(path, func(t *testing.T) {
@@ -283,7 +283,7 @@ func TestUnknownRoutes(t *testing.T) {
 }
 
 func TestMutationsNeedSameOrigin(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	w := ts.as(&auth.Principal{Operator: true}, httptest.NewRequest("POST", "/api/v1/me", nil))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 from the same-origin check", w.Code)
@@ -291,7 +291,7 @@ func TestMutationsNeedSameOrigin(t *testing.T) {
 }
 
 func TestSecurityHeaders(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	for _, path := range []string{"/", "/api/v1/me", "/auth/providers"} {
 		t.Run(path, func(t *testing.T) {
 			w := ts.as(nil, httptest.NewRequest("GET", path, nil))
@@ -311,7 +311,7 @@ func TestSecurityHeaders(t *testing.T) {
 }
 
 func TestUICaching(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	tests := []struct {
 		path, cache string
 		status      int
@@ -335,7 +335,7 @@ func TestUICaching(t *testing.T) {
 }
 
 func TestUIServesFilesOnly(t *testing.T) {
-	for _, web := range []string{"https://kritik.example", "https://example.com/kritik/"} {
+	for _, web := range []string{"https://kritique.example", "https://example.com/kritique/"} {
 		ts := newTestServer(t, web)
 		base := strings.TrimSuffix(ts.srv.basePath, "/")
 		tests := []struct {
@@ -367,18 +367,18 @@ func TestUIServesFilesOnly(t *testing.T) {
 }
 
 func TestBasePath(t *testing.T) {
-	ts := newTestServer(t, "https://example.com/kritik/")
+	ts := newTestServer(t, "https://example.com/kritique/")
 	p := &auth.Principal{Operator: true}
 	tests := []struct {
 		name, path string
 		status     int
 		location   string
 	}{
-		{"bare prefix redirects", "/kritik", http.StatusMovedPermanently, "/kritik/"},
-		{"bare prefix keeps the query", "/kritik?x=1", http.StatusMovedPermanently, "/kritik/?x=1"},
-		{"ui under prefix", "/kritik/", http.StatusOK, ""},
-		{"asset under prefix", "/kritik/assets/app-1.js", http.StatusOK, ""},
-		{"api under prefix", "/kritik/api/v1/me", http.StatusOK, ""},
+		{"bare prefix redirects", "/kritique", http.StatusMovedPermanently, "/kritique/"},
+		{"bare prefix keeps the query", "/kritique?x=1", http.StatusMovedPermanently, "/kritique/?x=1"},
+		{"ui under prefix", "/kritique/", http.StatusOK, ""},
+		{"asset under prefix", "/kritique/assets/app-1.js", http.StatusOK, ""},
+		{"api under prefix", "/kritique/api/v1/me", http.StatusOK, ""},
 		{"api outside prefix", "/api/v1/me", http.StatusNotFound, ""},
 	}
 	for _, tt := range tests {
@@ -395,7 +395,7 @@ func TestBasePath(t *testing.T) {
 }
 
 func TestRecovererAnswers500(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	h := ts.srv.recoverer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("boom") }))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))

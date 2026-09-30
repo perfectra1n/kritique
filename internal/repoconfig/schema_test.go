@@ -10,14 +10,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // TestSchemaMatchesFile keeps the published JSON Schema's keys in step
-// with the types .kritik.yaml decodes into, object by object.
+// with the types .kritique.yaml decodes into, object by object.
 func TestSchemaMatchesFile(t *testing.T) {
-	raw, err := os.ReadFile("../../docs/kritik.schema.json")
+	raw, err := os.ReadFile("../../docs/kritique.schema.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func yamlKeys[T any]() []string {
 	return out
 }
 
-// TestFileFollowsPolicies checks the keys .kritik.yaml takes are the
+// TestFileFollowsPolicies checks the keys .kritique.yaml takes are the
 // settings the policy table gives the repository a rule for.
 func TestFileFollowsPolicies(t *testing.T) {
 	var ruled []string

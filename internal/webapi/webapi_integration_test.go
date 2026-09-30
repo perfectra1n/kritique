@@ -21,11 +21,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/home-operations/kritik/internal/auth"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/transcript"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
 func testEnv(t *testing.T, key string) string {
@@ -43,8 +43,8 @@ web:
     - name: corp
       type: oidc
       issuer: https://idp.example
-      clientId: kritik
-      clientSecret: { env: KRITIK_TEST_TOKEN }
+      clientId: kritique
+      clientSecret: { env: KRITIQUE_TEST_TOKEN }
   operators: ["corp:op-sub"]
 tenants:
   - slug: webapi-a
@@ -53,8 +53,8 @@ tenants:
         forge: forgejo
         host: git.example
         account: wa
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
     repositories:
       - name: wa/one
       - name: wa/two
@@ -64,8 +64,8 @@ tenants:
         forge: forgejo
         host: git.example
         account: wb
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
     repositories:
       - name: wb/one
 `
@@ -98,22 +98,22 @@ func newAPIEnv(t *testing.T) *apiEnv {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	st, err := store.Open(ctx, store.Options{
-		AppURL: testEnv(t, "KRITIK_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIK_TEST_OWNER_URL"),
+		AppURL: testEnv(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIQUE_TEST_OWNER_URL"),
 		Logger: logger,
 	})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritik_app", "kritik_runner"); err != nil {
+	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	owner, err := pgxpool.New(ctx, testEnv(t, "KRITIK_TEST_OWNER_URL"))
+	owner, err := pgxpool.New(ctx, testEnv(t, "KRITIQUE_TEST_OWNER_URL"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(owner.Close)
-	t.Setenv("KRITIK_TEST_TOKEN", "tok")
+	t.Setenv("KRITIQUE_TEST_TOKEN", "tok")
 	file, err := configfile.Parse([]byte(integrationConfig))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -122,7 +122,7 @@ func newAPIEnv(t *testing.T) *apiEnv {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
 	cur := configfile.NewCurrent(file)
-	webURL, _ := url.Parse("https://kritik.example")
+	webURL, _ := url.Parse("https://kritique.example")
 	h, err := auth.New(auth.Config{Store: st, Current: cur, WebURL: webURL, Logger: logger})
 	if err != nil {
 		t.Fatalf("auth.New: %v", err)
@@ -182,7 +182,7 @@ func (e *apiEnv) seedTenant(slug, repo string) seeded {
 	e.exec(`INSERT INTO context_packs (runner_run_id, tenant_id, head_sha, base_sha, patch_id, diff, changed_paths, stages, repo_files)
 		VALUES ($1, $2, 'head7', 'base7', 'patch7', $3, '{a.go}',
 			'[{"stage":"definitions","path":"b.go","start_line":1,"end_line":2,"text":"func F() {}"}]',
-			'{".kritik.yaml":"mode: agentic\n"}')`, s.runID, s.tenantID, "diff of "+slug)
+			'{".kritique.yaml":"mode: agentic\n"}')`, s.runID, s.tenantID, "diff of "+slug)
 	e.exec(`INSERT INTO agent_runs (runner_run_id, tenant_id, stop_reason, result, steps, tool_calls, timeline, model, sources)
 		VALUES ($1, $2, 'submitted', '{"findings":[]}', 2, '{"grep":1}',
 			'[{"index":0,"tools":["grep"],"duration_ms":5,"output_bytes":7,"input_tokens":10,"output_tokens":2}]', 'acme/large',
@@ -297,7 +297,7 @@ func (e *apiEnv) signIn(name, subject string, grants []store.Grant) {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	e.cookie[name] = &http.Cookie{Name: auth.SessionCookieName(&url.URL{Scheme: "https", Host: "kritik.example"}), Value: token}
+	e.cookie[name] = &http.Cookie{Name: auth.SessionCookieName(&url.URL{Scheme: "https", Host: "kritique.example"}), Value: token}
 }
 
 func (e *apiEnv) get(ctx context.Context, who, path string) (*http.Response, error) {

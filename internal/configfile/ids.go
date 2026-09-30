@@ -2,12 +2,12 @@ package configfile
 
 import "github.com/google/uuid"
 
-// namespace roots every deterministic identifier kritik derives. Tenants and
+// namespace roots every deterministic identifier kritique derives. Tenants and
 // installations get their ids from their names so that any role can address
 // them without a lookup that row-level security would forbid before the
 // tenant is known: the ingest role derives the tenant id from the
 // installation it was called for and opens the tenant transaction directly.
-var namespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://github.com/home-operations/kritik"))
+var namespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://github.com/perfectra1n/kritique"))
 
 // ID is the tenant's stable identifier, derived from its slug.
 func (t *Tenant) ID() string {

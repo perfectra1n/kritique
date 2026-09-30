@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/forge"
+	"github.com/perfectra1n/kritique/internal/forge"
 )
 
 // threadForge answers the comment listings from fixed comments and counts
@@ -29,12 +29,12 @@ func (f *threadForge) ListConversation(context.Context, string, string, int) ([]
 
 func TestFollowUpThread(t *testing.T) {
 	at := func(s int64) time.Time { return time.Unix(s, 0) }
-	root := forge.Comment{ID: 1, Body: "@kritik is this safe?", CreatedAt: at(1), Inline: true}
-	reply := forge.Comment{ID: 2, Body: "@kritik why?", CreatedAt: at(2), Inline: true, InReplyTo: 1}
+	root := forge.Comment{ID: 1, Body: "@kritique is this safe?", CreatedAt: at(1), Inline: true}
+	reply := forge.Comment{ID: 2, Body: "@kritique why?", CreatedAt: at(2), Inline: true, InReplyTo: 1}
 	other := forge.Comment{ID: 3, Body: "another thread", CreatedAt: at(3), Inline: true}
 	later := forge.Comment{ID: 4, Body: "a later reply", CreatedAt: at(4), Inline: true, InReplyTo: 1}
 	first := forge.Comment{ID: 10, Body: "first", CreatedAt: at(5)}
-	asking := forge.Comment{ID: 11, Body: "@kritik summarize", CreatedAt: at(6)}
+	asking := forge.Comment{ID: 11, Body: "@kritique summarize", CreatedAt: at(6)}
 	tests := []struct {
 		name       string
 		comment    forge.Comment

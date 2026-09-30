@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/jobs"
 )
 
 // Actions queues the work an admin can ask for from the dashboard, each in

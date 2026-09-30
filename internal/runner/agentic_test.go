@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/agent"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/contextpack"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/repoconfig"
-	"github.com/home-operations/kritik/internal/review"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/contextpack"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 const agentDiff = `diff --git a/main.go b/main.go
@@ -42,7 +42,7 @@ func TestAgentPrompt(t *testing.T) {
 		Context: []contextpack.Chunk{{Stage: contextpack.StageDefinition, Path: "util.go", StartLine: 1, EndLine: 2, Text: "func u() {}"}},
 		Scope:   review.ScopeFull,
 	}
-	files := repoconfig.Files{"docs/rules.md": "Operator rules.", ".kritik/rules.md": "Repository rules."}
+	files := repoconfig.Files{"docs/rules.md": "Operator rules.", ".kritique/rules.md": "Repository rules."}
 	tests := []struct {
 		name         string
 		paths        []string
@@ -53,12 +53,12 @@ func TestAgentPrompt(t *testing.T) {
 	}{
 		{name: "the named instructions and strictness", paths: []string{"docs/rules.md"},
 			scope: review.ScopeFull, instructions: []string{"Operator rules."}, strict: true},
-		{name: "instructions in the order named", paths: []string{".kritik/rules.md", "docs/rules.md"},
+		{name: "instructions in the order named", paths: []string{".kritique/rules.md", "docs/rules.md"},
 			scope: review.ScopeFull, instructions: []string{"Repository rules.", "Operator rules."}, strict: true},
-		{name: "an instruction scoped to paths the change does not touch is left out", paths: []string{"docs/rules.md", ".kritik/rules.md"},
-			scoped: map[string][]string{".kritik/rules.md": {"web/**"}}, scope: review.ScopeFull, instructions: []string{"Operator rules."}, strict: true},
-		{name: "one scoped to a path it touches is kept", paths: []string{"docs/rules.md", ".kritik/rules.md"},
-			scoped: map[string][]string{".kritik/rules.md": {"*.go"}}, scope: review.ScopeFull,
+		{name: "an instruction scoped to paths the change does not touch is left out", paths: []string{"docs/rules.md", ".kritique/rules.md"},
+			scoped: map[string][]string{".kritique/rules.md": {"web/**"}}, scope: review.ScopeFull, instructions: []string{"Operator rules."}, strict: true},
+		{name: "one scoped to a path it touches is kept", paths: []string{"docs/rules.md", ".kritique/rules.md"},
+			scoped: map[string][]string{".kritique/rules.md": {"*.go"}}, scope: review.ScopeFull,
 			instructions: []string{"Operator rules.", "Repository rules."}, strict: true},
 		{name: "incremental adds the delta and the prior findings", scope: review.ScopeIncremental, strict: true},
 	}

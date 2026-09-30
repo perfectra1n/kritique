@@ -10,12 +10,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/repoconfig"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/taskrun"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/taskrun"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // Service is the store-backed Dispatcher: every write happens in one
@@ -42,14 +42,14 @@ const (
 )
 
 // ActionBaseline is the poller's synthetic action for a pull request that
-// predates kritik's knowing its installation: it is recorded, not reviewed.
+// predates kritique's knowing its installation: it is recorded, not reviewed.
 const ActionBaseline = "baseline"
 
 // pullRequestActions are the pull request actions that record the pull
 // request, each saying whether it also starts a review; "poll" and
 // ActionBaseline are the poller's synthetic ones. The review job starts at
 // once: the worker waits out the repository's settle time (jobs.Settles),
-// since .kritik.yaml may set it.
+// since .kritique.yaml may set it.
 var pullRequestActions = map[string]bool{
 	"opened":           true,
 	"reopened":         true,
@@ -105,7 +105,7 @@ const jobTaskDispatch = "task_dispatch"
 // tasks stores a delivery some task could run on and enqueues the job that
 // resolves which do. Only a forge's own delivery is offered: the poller's
 // synthetic events carry no event name. Resolving the repository's tasks
-// reads its .kritik.yaml through the forge, so it is the job's to do, as
+// reads its .kritique.yaml through the forge, so it is the job's to do, as
 // is the loop guard, which needs the installation's bot login; here only
 // the operator's settings are consulted (see taskrun.Candidate).
 func (s *Service) tasks(ctx context.Context, req Request) (bool, error) {

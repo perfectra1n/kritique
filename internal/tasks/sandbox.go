@@ -39,7 +39,7 @@ var errSandbox = errors.New("tasks: template sandbox")
 // reservedPrefix names the functions the sandbox adds; templates may not
 // use it.
 const (
-	reservedPrefix = "__kritik_"
+	reservedPrefix = "__kritique_"
 	iterName       = reservedPrefix + "iter"
 )
 

@@ -8,9 +8,9 @@ import (
 
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
 )
 
 // timeoutConfigYAMLTemplate takes globex's runner.activeDeadlineSeconds, so

@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritik/internal/auth"
-	"github.com/home-operations/kritik/internal/config"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/sealbox"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/config"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/sealbox"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Config wires a Server.

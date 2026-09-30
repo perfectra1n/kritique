@@ -9,12 +9,12 @@ cancel a review in progress, or reindex a repository's embeddings, from the
 dashboard rather than the forge.
 
 Enable it with role `web` (a dedicated listener) or `all` (which also serves
-it once `KRITIK_WEB_URL` is set, alongside the other roles); `KRITIK_WEB_ADDR`
-is where it listens (default `:8083`), and `KRITIK_WEB_URL` is its
+it once `KRITIQUE_WEB_URL` is set, alongside the other roles); `KRITIQUE_WEB_ADDR`
+is where it listens (default `:8083`), and `KRITIQUE_WEB_URL` is its
 externally reachable origin — an absolute `http(s)` URL with no query or
 fragment, required for the web role, used to build sign-in callback URLs and
 the session cookie's scope. In the chart, `roles.web.enabled` turns the role
-on, `web.url` sets `KRITIK_WEB_URL`, and `web.port` matches `KRITIK_WEB_ADDR`'s
+on, `web.url` sets `KRITIQUE_WEB_URL`, and `web.port` matches `KRITIQUE_WEB_ADDR`'s
 port (8083 by default); `ingress.web` and `httpRoute.web` are the Ingress and
 Gateway API HTTPRoute for it, and `dashboard.keySecret` names the Secret
 holding the sealing key (below).
@@ -29,7 +29,7 @@ may sign in and who of them may operate the instance:
   `forgejo` or `gitea`, a `clientId`, and a `clientSecret` (a secret
   reference: `env`, `file` or `sealed`). Every provider must allow the
   callback URL
-  `<KRITIK_WEB_URL>/auth/callback/<name>`. For example:
+  `<KRITIQUE_WEB_URL>/auth/callback/<name>`. For example:
 
   ```yaml
   web:
@@ -37,7 +37,7 @@ may sign in and who of them may operate the instance:
       - name: sso
         type: oidc
         issuer: https://idp.example.com
-        clientId: kritik-dashboard
+        clientId: kritique-dashboard
         clientSecret: { env: OIDC_CLIENT_SECRET }
         scopes: [openid, email, profile]
       - name: github
@@ -76,14 +76,14 @@ may sign in and who of them may operate the instance:
   deletes dashboard tenants from the operator console and is the only one
   who may set the operator-only fields below. The console also lists the
   instance settings read-only, each with its source: the web process's
-  environment, the configuration file, or kritik's default. A secret shows
+  environment, the configuration file, or kritique's default. A secret shows
   only whether it is set, and a URL's credentials are hidden.
 - `sessionTTL` — how long a dashboard session lasts, between 5 minutes and
   30 days; defaults to 12 hours.
 - `dashboardForgeHosts` — the forge hosts a dashboard-managed tenant's
   installations may use. Every installation host is also an allowed runner
   egress host, so this bounds what a tenant admin, who did not write the
-  operator's file, can point kritik at; empty means `github.com` plus
+  operator's file, can point kritique at; empty means `github.com` plus
   whatever hosts the file's own installations already use. No wildcards.
 
 ## Roles
@@ -141,11 +141,11 @@ first held it, even once that tenant is gone.
 ## Sealing key
 
 A dashboard-managed tenant's secrets are sealed at rest with an instance
-key, `KRITIK_DASHBOARD_KEY` / `dashboard.keySecret`: generate one with
+key, `KRITIQUE_DASHBOARD_KEY` / `dashboard.keySecret`: generate one with
 `openssl rand -base64 32`. To rotate it, move the old value into
-`KRITIK_DASHBOARD_OLD_KEYS` / `dashboard.oldKeysSecret` (comma-separated,
+`KRITIQUE_DASHBOARD_OLD_KEYS` / `dashboard.oldKeysSecret` (comma-separated,
 accepted only to open values already sealed under it), and set a freshly
-generated value as `KRITIK_DASHBOARD_KEY`. A value sealed under an old key
+generated value as `KRITIQUE_DASHBOARD_KEY`. A value sealed under an old key
 is re-sealed under the current one the next time it is written, not
 eagerly on rotation, so keep an old key listed until every value under it
 has been touched at least once.
@@ -163,18 +163,18 @@ visible to every member of the tenant it belongs to, not only admins.
 - A dashboard tenant that fails to merge into the configuration at boot
   fails startup the same as a bad configuration file: fix the offending
   row or the file. A merge or apply failure after boot instead keeps the
-  last good configuration running and raises the `kritik_config_error`
+  last good configuration running and raises the `kritique_config_error`
   gauge (labelled `merge` or `apply`) until a later attempt succeeds.
 - A file tenant whose slug or installation name a dashboard tenant already
   holds is left out of the running configuration, at boot or on reload,
   while every other tenant runs: the operator console lists it with the
-  reason and `kritik_config_error{stage="merge"}` stays at 1. Rename either
+  reason and `kritique_config_error{stage="merge"}` stays at 1. Rename either
   side, or delete the dashboard tenant, to bring it back.
 - A secret referenced by `file:` is only re-read when the configuration
   file itself changes, not on the referenced file's own schedule: rotate
   the file, then touch or reapply the configuration to pick it up.
 - An `email:` operator, or an email invite, is only as trustworthy as the
-  forge or IdP's own email verification — kritik does not verify addresses
+  forge or IdP's own email verification — kritique does not verify addresses
   itself, it trusts what the sign-in reports.
 - The web role only ever holds the application database DSN, never the
   owner DSN a migration or leader election needs, and refuses to start if

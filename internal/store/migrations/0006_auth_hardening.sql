@@ -1,7 +1,7 @@
 -- Dashboard sign-in hardening (ADR-0009 §§2.4, 2.7).
 
 -- A login state is bound to the browser that started it: browser_hash is the
--- SHA-256 of a random value held in that browser's kritik_login cookie, so a
+-- SHA-256 of a random value held in that browser's kritique_login cookie, so a
 -- callback URL replayed into another browser (login CSRF) cannot complete.
 -- In-flight states from before this column existed cannot be bound, and
 -- expire within minutes anyway, so they are dropped.

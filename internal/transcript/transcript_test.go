@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/model"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 func user(text string) model.Message { return model.Message{Role: model.RoleUser, Text: text} }

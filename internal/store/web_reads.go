@@ -350,7 +350,7 @@ func ListIndexRuns(ctx context.Context, tx pgx.Tx, repositoryID string, p Page) 
 	return items, next, nil
 }
 
-// RepoFileRow is the repository's .kritik.yaml as the last review that ran
+// RepoFileRow is the repository's .kritique.yaml as the last review that ran
 // read it: the review, the merge base it read the file at, and the file,
 // nil when there was none there.
 type RepoFileRow struct {
@@ -359,12 +359,12 @@ type RepoFileRow struct {
 	Doc      *string
 }
 
-// LastRepoFile reads the .kritik.yaml the repository's last review with a
+// LastRepoFile reads the .kritique.yaml the repository's last review with a
 // context pack read; ErrNotFound when no review has one yet.
 func LastRepoFile(ctx context.Context, tx pgx.Tx, repositoryID string) (RepoFileRow, error) {
 	var row RepoFileRow
 	err := tx.QueryRow(ctx, `
-		SELECT r.id, c.base_sha, c.repo_files ->> '.kritik.yaml'
+		SELECT r.id, c.base_sha, c.repo_files ->> '.kritique.yaml'
 		FROM reviews r JOIN pull_requests p ON p.id = r.pull_request_id
 		JOIN runner_runs rr ON rr.review_id = r.id JOIN context_packs c ON c.runner_run_id = rr.id
 		WHERE p.repository_id = $1 ORDER BY c.created_at DESC LIMIT 1`, repositoryID).Scan(&row.ReviewID, &row.Commit, &row.Doc)

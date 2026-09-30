@@ -20,14 +20,14 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/executor"
-	"github.com/home-operations/kritik/internal/ingest"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/tasks"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/ingest"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 const agenticTaskConfigYAML = `
@@ -161,15 +161,15 @@ func newAgenticTaskHarness(t *testing.T, slug, extraContext string, embedder mod
 	t.Helper()
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIK_TEST_APP_URL"), OwnerURL: env(t, "KRITIK_TEST_OWNER_URL"), Logger: logger})
+	st, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: env(t, "KRITIQUE_TEST_OWNER_URL"), Logger: logger})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritik_app", "kritik_runner"); err != nil {
+	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	runnerStore, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIK_TEST_RUNNER_URL"), Logger: logger})
+	runnerStore, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: logger})
 	if err != nil {
 		t.Fatalf("Open runner: %v", err)
 	}
@@ -388,15 +388,15 @@ func checkAgenticTaskRecords(t *testing.T, h *taskHarness, taskRunID, runnerRunI
 func TestSearchIndexHits(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIK_TEST_APP_URL"), OwnerURL: env(t, "KRITIK_TEST_OWNER_URL"), Logger: logger})
+	st, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: env(t, "KRITIQUE_TEST_OWNER_URL"), Logger: logger})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritik_app", "kritik_runner"); err != nil {
+	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if err := st.EnsureIndexSchema(ctx, "kritik_app", "fake-embed", 8, false); err != nil {
+	if err := st.EnsureIndexSchema(ctx, "kritique_app", "fake-embed", 8, false); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
 	t.Setenv("TEST_PEM", "pem")
@@ -443,7 +443,7 @@ type indexChunk struct{ path, text string }
 func seedIndex(t *testing.T, st *store.Store, tenantID, repoID string) []indexChunk {
 	t.Helper()
 	ctx := context.Background()
-	if err := st.EnsureIndexSchema(ctx, "kritik_app", "fake-embed", 8, false); err != nil {
+	if err := st.EnsureIndexSchema(ctx, "kritique_app", "fake-embed", 8, false); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
 	chunks := []indexChunk{

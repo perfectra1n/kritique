@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // fakeForge records the writes a plan makes, in order, failing those named
@@ -62,7 +62,7 @@ func (f *fakeForge) CreateReview(_ context.Context, _, _ string, _ int, head str
 }
 
 func (f *fakeForge) FindComment(_ context.Context, _, _ string, _ int, login, marker string) (int64, error) {
-	if login != "kritik[bot]" {
+	if login != "kritique[bot]" {
 		return 0, errors.New("wrong login")
 	}
 	f.calls = append(f.calls, "FindComment "+marker)
@@ -167,7 +167,7 @@ func TestPost(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := &fakeForge{found: tt.found, comments: map[int64]string{}}
-			id, err := Post(context.Background(), f, Target{Number: 7}, "triage", "kritik[bot]", tt.mode, "report")
+			id, err := Post(context.Background(), f, Target{Number: 7}, "triage", "kritique[bot]", tt.mode, "report")
 			if err != nil || id != tt.id || !reflect.DeepEqual(f.calls, tt.calls) {
 				t.Fatalf("Post = %d, %v; calls %q", id, err, f.calls)
 			}
@@ -178,7 +178,7 @@ func TestPost(t *testing.T) {
 		})
 	}
 	f := &fakeForge{fail: map[string]bool{"CreateComment": true}}
-	if _, err := Post(context.Background(), f, Target{}, "triage", "kritik[bot]", tasks.CommentAppend, "x"); err == nil {
+	if _, err := Post(context.Background(), f, Target{}, "triage", "kritique[bot]", tasks.CommentAppend, "x"); err == nil {
 		t.Fatal("a refused comment must be an error")
 	}
 }

@@ -13,7 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // plainOpener opens "sealed:<plain>" to <plain>.
@@ -236,8 +236,8 @@ const swapFileTenant = `
       - name: swap-bot
         forge: forgejo
         account: swap
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
     repositories:
       - name: swap/one
 `

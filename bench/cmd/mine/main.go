@@ -23,7 +23,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/home-operations/kritik/bench"
+	"github.com/perfectra1n/kritique/bench"
 )
 
 var (

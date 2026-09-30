@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/transcript"
+	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
 // Valid reports whether s is one of the task run statuses.

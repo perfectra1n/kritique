@@ -165,7 +165,7 @@ ALTER TABLE reviews DROP CONSTRAINT reviews_status_check;
 ALTER TABLE reviews ADD CONSTRAINT reviews_status_check
     CHECK (status IN ('running', 'prepared', 'completed', 'superseded', 'skipped', 'capped', 'failed', 'canceled'));
 
--- kritik_notify_event publishes one row's change on the kritik_events
+-- kritique_notify_event publishes one row's change on the kritique_events
 -- channel for the dashboard's live views: the kind is baked into the
 -- trigger via TG_ARGV[0], and the id and (where the row has one) review_id
 -- are read generically through jsonb so one function serves every table,
@@ -173,11 +173,11 @@ ALTER TABLE reviews ADD CONSTRAINT reviews_status_check
 -- yields SQL NULL for a column that isn't there). No SECURITY DEFINER is
 -- needed: pg_notify requires no privilege beyond reading NEW, so this also
 -- fires correctly when the writer is the runner role.
-CREATE FUNCTION kritik_notify_event() RETURNS trigger AS $$
+CREATE FUNCTION kritique_notify_event() RETURNS trigger AS $$
 DECLARE
     row_json jsonb := to_jsonb(NEW);
 BEGIN
-    PERFORM pg_notify('kritik_events', jsonb_build_object(
+    PERFORM pg_notify('kritique_events', jsonb_build_object(
         'tenant_id', row_json ->> 'tenant_id',
         'kind', TG_ARGV[0],
         'id', row_json ->> 'id',
@@ -187,7 +187,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- kritik_notify_review, kritik_notify_runner_run and kritik_notify_index_run
+-- kritique_notify_review, kritique_notify_runner_run and kritique_notify_index_run
 -- are split into separate INSERT/UPDATE triggers rather than one combined
 -- "INSERT OR UPDATE ... WHEN (TG_OP = 'INSERT' OR ...)" trigger: a trigger's
 -- WHEN clause is parsed as a plain boolean expression over OLD/NEW, and
@@ -195,59 +195,59 @@ $$ LANGUAGE plpgsql;
 -- body) is not a resolvable column there, so it fails with "column tg_op
 -- does not exist". An unconditional INSERT trigger plus a column-comparing
 -- UPDATE trigger has the same effect without referencing TG_OP.
-CREATE TRIGGER kritik_notify_review_insert
+CREATE TRIGGER kritique_notify_review_insert
     AFTER INSERT ON reviews
     FOR EACH ROW
-    EXECUTE FUNCTION kritik_notify_event('review');
+    EXECUTE FUNCTION kritique_notify_event('review');
 
-CREATE TRIGGER kritik_notify_review_update
+CREATE TRIGGER kritique_notify_review_update
     AFTER UPDATE ON reviews
     FOR EACH ROW
     WHEN (OLD.status IS DISTINCT FROM NEW.status)
-    EXECUTE FUNCTION kritik_notify_event('review');
+    EXECUTE FUNCTION kritique_notify_event('review');
 
-CREATE TRIGGER kritik_notify_runner_run_insert
+CREATE TRIGGER kritique_notify_runner_run_insert
     AFTER INSERT ON runner_runs
     FOR EACH ROW
-    EXECUTE FUNCTION kritik_notify_event('runner_run');
+    EXECUTE FUNCTION kritique_notify_event('runner_run');
 
-CREATE TRIGGER kritik_notify_runner_run_update
+CREATE TRIGGER kritique_notify_runner_run_update
     AFTER UPDATE ON runner_runs
     FOR EACH ROW
     WHEN (OLD.phase IS DISTINCT FROM NEW.phase)
-    EXECUTE FUNCTION kritik_notify_event('runner_run');
+    EXECUTE FUNCTION kritique_notify_event('runner_run');
 
-CREATE TRIGGER kritik_notify_index_run_insert
+CREATE TRIGGER kritique_notify_index_run_insert
     AFTER INSERT ON index_runs
     FOR EACH ROW
-    EXECUTE FUNCTION kritik_notify_event('index_run');
+    EXECUTE FUNCTION kritique_notify_event('index_run');
 
-CREATE TRIGGER kritik_notify_index_run_update
+CREATE TRIGGER kritique_notify_index_run_update
     AFTER UPDATE ON index_runs
     FOR EACH ROW
     WHEN (OLD.status IS DISTINCT FROM NEW.status)
-    EXECUTE FUNCTION kritik_notify_event('index_run');
+    EXECUTE FUNCTION kritique_notify_event('index_run');
 
-CREATE TRIGGER kritik_notify_followup
+CREATE TRIGGER kritique_notify_followup
     AFTER INSERT OR UPDATE ON followups
     FOR EACH ROW
-    EXECUTE FUNCTION kritik_notify_event('followup');
+    EXECUTE FUNCTION kritique_notify_event('followup');
 
-CREATE TRIGGER kritik_notify_model_call
+CREATE TRIGGER kritique_notify_model_call
     AFTER INSERT ON model_calls
     FOR EACH ROW
-    EXECUTE FUNCTION kritik_notify_event('model_call');
+    EXECUTE FUNCTION kritique_notify_event('model_call');
 
--- kritik_notify_config publishes the tenant slug whenever a dashboard-edited
+-- kritique_notify_config publishes the tenant slug whenever a dashboard-edited
 -- tenant spec changes, so the leader can re-apply it without polling.
-CREATE FUNCTION kritik_notify_config() RETURNS trigger AS $$
+CREATE FUNCTION kritique_notify_config() RETURNS trigger AS $$
 BEGIN
-    PERFORM pg_notify('kritik_config', NEW.slug);
+    PERFORM pg_notify('kritique_config', NEW.slug);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER kritik_notify_dashboard_tenant
+CREATE TRIGGER kritique_notify_dashboard_tenant
     AFTER INSERT OR UPDATE ON dashboard_tenants
     FOR EACH ROW
-    EXECUTE FUNCTION kritik_notify_config();
+    EXECUTE FUNCTION kritique_notify_config();

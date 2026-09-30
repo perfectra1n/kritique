@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// This file is the OpenAI chat completions wire format as kritik's model
+// This file is the OpenAI chat completions wire format as kritique's model
 // gateway serves it (ADR-0004): the part of it the OpenAI adapter sends and
 // reads, decoded into a StepRequest and encoded from a StepResponse, so a
 // runner's adapter can talk to the gateway and the gateway can answer

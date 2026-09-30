@@ -9,7 +9,7 @@ type ConfigDriftGauge struct{ g prometheus.Gauge }
 // NewConfigDriftGauge registers the gauge on reg.
 func NewConfigDriftGauge(reg prometheus.Registerer) *ConfigDriftGauge {
 	g := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "kritik_config_drift",
+		Name: "kritique_config_drift",
 		Help: "1 when this replica's configuration file differs from the one the leader applied, else 0.",
 	})
 	reg.MustRegister(g)
@@ -49,7 +49,7 @@ type ConfigErrorGauge struct{ g *prometheus.GaugeVec }
 // NewConfigErrorGauge registers the gauge on reg, with every stage at 0.
 func NewConfigErrorGauge(reg prometheus.Registerer) *ConfigErrorGauge {
 	g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "kritik_config_error",
+		Name: "kritique_config_error",
 		Help: "1 while the latest attempt at a stage (merge, apply) of loading the configuration failed, " +
 			"or the merge left a file tenant out, else 0.",
 	}, []string{"stage"})

@@ -28,13 +28,13 @@ func TestMetricsRecordAndNilIsSafe(t *testing.T) {
 	m.ModelCall("onedr0p", "openai/gpt-6-sol", "review", "ok", 1706, 1574, 83, 0.005029)
 	m.ModelCall("onedr0p", "openai/gpt-6-sol", "review", "error", 0, 0, 0, 0)
 
-	want := `# HELP kritik_model_tokens_total Tokens spent, by role and direction (input, cached, output); cached is the part of input the provider served from its prompt cache.
-# TYPE kritik_model_tokens_total counter
-kritik_model_tokens_total{direction="cached",model="openai/gpt-6-sol",role="review",tenant="onedr0p"} 1574
-kritik_model_tokens_total{direction="input",model="openai/gpt-6-sol",role="review",tenant="onedr0p"} 1706
-kritik_model_tokens_total{direction="output",model="openai/gpt-6-sol",role="review",tenant="onedr0p"} 83
+	want := `# HELP kritique_model_tokens_total Tokens spent, by role and direction (input, cached, output); cached is the part of input the provider served from its prompt cache.
+# TYPE kritique_model_tokens_total counter
+kritique_model_tokens_total{direction="cached",model="openai/gpt-6-sol",role="review",tenant="onedr0p"} 1574
+kritique_model_tokens_total{direction="input",model="openai/gpt-6-sol",role="review",tenant="onedr0p"} 1706
+kritique_model_tokens_total{direction="output",model="openai/gpt-6-sol",role="review",tenant="onedr0p"} 83
 `
-	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "kritik_model_tokens_total"); err != nil {
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "kritique_model_tokens_total"); err != nil {
 		t.Fatal(err)
 	}
 	if n := testutil.CollectAndCount(m.modelCalls); n != 2 {

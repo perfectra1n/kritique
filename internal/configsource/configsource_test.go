@@ -17,10 +17,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/sealbox"
-	"github.com/home-operations/kritik/internal/server"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/sealbox"
+	"github.com/perfectra1n/kritique/internal/server"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 const fileYAML = `
@@ -207,7 +207,7 @@ func TestLoad(t *testing.T) {
 	})
 }
 
-// mergeGauge is the merge stage of the kritik_config_error gauge on reg.
+// mergeGauge is the merge stage of the kritique_config_error gauge on reg.
 func mergeGauge(t *testing.T, reg *prometheus.Registry) float64 {
 	t.Helper()
 	families, err := reg.Gather()

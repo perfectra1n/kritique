@@ -10,7 +10,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // A tenant spec in the API is the JSON form of a tenant entry in the file,

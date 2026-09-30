@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/forge/forgejo"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/forge/forgejo"
 )
 
 // forgejoConfigYAML is the smallest valid Forgejo installation: a token, no

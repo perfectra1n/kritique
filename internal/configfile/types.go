@@ -1,5 +1,5 @@
 // Package configfile loads the declarative configuration file: the model
-// providers, defaults, tenants, installations and repositories kritik
+// providers, defaults, tenants, installations and repositories kritique
 // manages. Process configuration (addresses, database, log level) is
 // environment variables and lives in internal/config.
 //
@@ -15,15 +15,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/prfilter"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/prfilter"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // ProviderType selects the model adapter a provider uses.
 type ProviderType = model.ProviderType
 
-// Provider types kritik implements. Each accepts a baseUrl, so any gateway
+// Provider types kritique implements. Each accepts a baseUrl, so any gateway
 // compatible with the OpenAI or Anthropic API is a provider.
 const (
 	ProviderOpenRouter = model.ProviderOpenRouter
@@ -34,7 +34,7 @@ const (
 // Forge identifies which forge an installation talks to.
 type Forge string
 
-// Forges kritik supports.
+// Forges kritique supports.
 const (
 	ForgeGitHub  Forge = "github"
 	ForgeGitLab  Forge = "gitlab"
@@ -208,13 +208,13 @@ type Overrides struct {
 	// narrower scope writes replaces the broader scope's of that name, and
 	// one with enabled false switches it off.
 	Tasks []tasks.Task `yaml:"tasks,omitempty"`
-	// Allow bounds what the repository's own .kritik.yaml may choose.
+	// Allow bounds what the repository's own .kritique.yaml may choose.
 	Allow Allow `yaml:"allow,omitempty"`
 
 	filter *prfilter.Program
 }
 
-// Allow bounds what a repository's .kritik.yaml may choose (ADR-0010
+// Allow bounds what a repository's .kritique.yaml may choose (ADR-0010
 // §2.5), bound by bound: one written at a narrower scope replaces the
 // broader scope's, even when empty. A bound written nowhere leaves a
 // repository only the operator's own mode, model and commands, and limits

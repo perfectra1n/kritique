@@ -1,4 +1,4 @@
--- The .kritik.yaml a task dispatch last resolved at the repository's
+-- The .kritique.yaml a task dispatch last resolved at the repository's
 -- default branch tip (ADR-0012), so the dashboard lists the tasks that run
 -- rather than those of the file a review read at a merge base.
 -- task_config_sha is '' until a dispatch has resolved one;

@@ -12,10 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // contextForge serves an issue, its thread, files by path and a search.

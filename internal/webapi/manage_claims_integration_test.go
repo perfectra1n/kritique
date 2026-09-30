@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // claimSpec is a dashboard tenant with one installation per name.

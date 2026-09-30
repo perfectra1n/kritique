@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/auth"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 func decodeSpec(t *testing.T, spec string) *configfile.Tenant {

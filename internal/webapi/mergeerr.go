@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 var (

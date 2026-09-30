@@ -1,4 +1,4 @@
-# AGENTS.md: kritik
+# AGENTS.md: kritique
 
 Guidance for AI coding agents (and humans) writing Go in this repository. This
 file is meant to be identical, or nearly so, across every Go service/CLI in

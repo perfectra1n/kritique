@@ -12,9 +12,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/auth"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // metaPath is the one API route served without a session.
@@ -52,7 +52,7 @@ var (
 	errOperatorOnly       = errStatus(http.StatusForbidden, CodeForbidden, "this needs an instance operator", nil)
 	errFileManaged        = errStatus(http.StatusForbidden, CodeFileManaged, "this tenant is declared in the configuration file", nil)
 	errManagementDisabled = errStatus(http.StatusServiceUnavailable, CodeManagementDisabled,
-		"dashboard tenants cannot be written: KRITIK_DASHBOARD_KEY is not set", nil)
+		"dashboard tenants cannot be written: KRITIQUE_DASHBOARD_KEY is not set", nil)
 	errDashboardSlugTaken = errStatus(http.StatusConflict, CodeSlugTaken, "a dashboard tenant with this slug already exists", slugPath)
 	errRevisionConflict   = errStatus(http.StatusConflict, CodeRevisionConflict,
 		"the tenant was changed by another write; reload it and try again", nil)

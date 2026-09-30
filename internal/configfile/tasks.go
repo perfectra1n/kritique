@@ -8,7 +8,7 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // TaskBounds bound tasks (ADR-0012), bound by bound like the rest of

@@ -1,21 +1,31 @@
 <div align="center">
 
-# kritik
+# kritique
 
 **Repository-aware AI pull request review for GitHub, Forgejo and Gitea.**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/home-operations/kritik/ci.yaml?branch=main&label=ci)](https://github.com/home-operations/kritik/actions/workflows/ci.yaml)
-[![Release](https://img.shields.io/github/actions/workflow/status/home-operations/kritik/release.yaml?branch=main&label=release)](https://github.com/home-operations/kritik/actions/workflows/release.yaml)
-[![License](https://img.shields.io/github/license/home-operations/kritik)](https://github.com/home-operations/kritik/blob/main/LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/perfectra1n/kritique/ci.yaml?branch=main&label=ci)](https://github.com/perfectra1n/kritique/actions/workflows/ci.yaml)
+[![Release](https://img.shields.io/github/actions/workflow/status/perfectra1n/kritique/release.yaml?branch=main&label=release)](https://github.com/perfectra1n/kritique/actions/workflows/release.yaml)
+[![License](https://img.shields.io/github/license/perfectra1n/kritique)](https://github.com/perfectra1n/kritique/blob/main/LICENSE)
 
 </div>
 
 > [!WARNING]
-> kritik is not production ready. It is under active development and has no
+> kritique is not production ready. It is under active development and has no
 > release yet: configuration, the database schema and the APIs change without
 > notice, and there is no upgrade path from one commit to the next.
 
-kritik indexes a repository, reviews each pull request against that context,
+> [!NOTE]
+> kritique is a fork of [home-operations/kritik](https://github.com/home-operations/kritik),
+> continued from the head of
+> [home-operations/kritik#84](https://github.com/home-operations/kritik/pull/84)
+> (event tasks, commit `45824e5`), after upstream took a different direction.
+> The full upstream history is kept. Everything named `kritik` was renamed to
+> `kritique`: the Go module, binary, Helm chart, `.kritique.yaml`, `KRITIQUE_*`
+> environment variables and database roles. kritique cannot be dropped in as a
+> replacement for a kritik deployment.
+
+kritique indexes a repository, reviews each pull request against that context,
 posts one sticky summary comment plus inline findings and a commit status, and
 answers follow-ups when the bot is @-mentioned. One deployment serves any
 number of forge accounts, and every index and review job runs in its own
@@ -46,7 +56,7 @@ Kubernetes Job pod that holds no secrets.
   per-tenant concurrency, daily review and monthly token caps. The provider
   key never enters a runner pod: the agent reaches its model through the
   worker's gateway.
-- **Repository overrides.** A `.kritik.yaml`, read from the merge-base, can
+- **Repository overrides.** A `.kritique.yaml`, read from the merge-base, can
   narrow the operator's settings and bring its own instructions and comment
   templates.
 - **Dashboard.** Sign-in, dashboard-managed tenants, live review state, full
@@ -57,8 +67,8 @@ so the configuration refuses a `gitlab` installation until there is.
 
 ## Installing
 
-kritik ships as an OCI Helm chart, `oci://ghcr.io/home-operations/charts/kritik`.
-The chart's [README](charts/kritik/README.md) lists every value and shows the
+kritique ships as an OCI Helm chart, `oci://ghcr.io/perfectra1n/charts/kritique`.
+The chart's [README](charts/kritique/README.md) lists every value and shows the
 CloudNativePG setup for the three database roles. In short: a Postgres with
 [VectorChord](https://github.com/tensorchord/VectorChord) (and the pgvector it
 builds on) loaded, with an owner, an application and a runner role, the
@@ -69,7 +79,7 @@ configuration file under `config.file`, the secrets it references under
 
 Security notes:
 
-- Install kritik into a namespace of its own: runner Jobs run in the release
+- Install kritique into a namespace of its own: runner Jobs run in the release
   namespace, and the worker's Role can create, patch and delete every Secret
   there, though it can never get or list one.
 - Keep the egress gateway on (the chart's default) with a NetworkPolicy:
@@ -98,15 +108,15 @@ same events.
 
 ## Documentation
 
-- [Chart values](charts/kritik/README.md)
-- [`.kritik.yaml` reference](docs/repository-config.md)
+- [Chart values](charts/kritique/README.md)
+- [`.kritique.yaml` reference](docs/repository-config.md)
 - [Dashboard](docs/dashboard.md): sign-in, roles, the sealing key and
   transcript retention
 - [Metrics](docs/metrics.md)
 - [Development](docs/development.md): building, testing, evaluation and the
   cluster loop
 - [Architecture decision records](docs/adr/), starting with
-  [ADR-0002](docs/adr/0002-kritik-pr-review-service.md)
+  [ADR-0002](docs/adr/0002-kritique-pr-review-service.md)
 
 ## License
 

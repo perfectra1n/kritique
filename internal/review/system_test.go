@@ -79,7 +79,7 @@ func TestDecideScope(t *testing.T) {
 
 func TestAgenticSystemPrompt(t *testing.T) {
 	got := AgenticSystemPrompt([]string{"Check errors."}, nil)
-	if !strings.HasPrefix(got, "You are kritik") || strings.Contains(got, "You see the diff of the change and nothing else") {
+	if !strings.HasPrefix(got, "You are kritique") || strings.Contains(got, "You see the diff of the change and nothing else") {
 		t.Fatalf("the agentic prompt must not claim the diff is all it sees:\n%s", got)
 	}
 	for _, want := range []string{"read_file", "grep", "list_files", "verify", "only to lines the diff shows",

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 func TestCursorRoundTrip(t *testing.T) {

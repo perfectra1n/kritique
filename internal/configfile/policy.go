@@ -15,7 +15,7 @@ const (
 	ScopeRepository Scope = "repository"
 )
 
-// RepoRule is what a repository's own .kritik.yaml may do with a setting.
+// RepoRule is what a repository's own .kritique.yaml may do with a setting.
 type RepoRule string
 
 // Repository rules. The empty rule is none: the file cannot name the
@@ -46,7 +46,7 @@ const (
 // Policy is one row of the table that says who may write a repository
 // setting (ADR-0010 §2.4, §2.7): the scopes the operator writes it at,
 // whether a tenant admin may write it too on a dashboard tenant, and what
-// the repository's .kritik.yaml may do with it. The dashboard's write API
+// the repository's .kritique.yaml may do with it. The dashboard's write API
 // enforces it and serves it for the UI to render from, and the keys the
 // repository file takes follow it. Instance settings are the file's alone
 // and not in it.

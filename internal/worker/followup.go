@@ -14,14 +14,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/contextpack"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/repoconfig"
-	"github.com/home-operations/kritik/internal/review"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/contextpack"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Follow-up bounds: mentions answered per pull request per hour before a
@@ -355,7 +355,7 @@ func (f *followUp) reviewRecord(ctx context.Context) (reviewRecord, error) {
 	return rec, err
 }
 
-// repoConfig applies the .kritik.yaml at the pull request's merge base to
+// repoConfig applies the .kritique.yaml at the pull request's merge base to
 // the follow-up's settings, so it answers with the repository's model and
 // instructions, and reads the instruction files from the same commit. It
 // returns why the file stops the follow-up, or "".

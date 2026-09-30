@@ -32,13 +32,13 @@ shape that text. It also says what to do about the residual risk: give
 each tenant its own key with a spending limit, and on Forgejo a read-only
 git token.
 
-That residual risk is real and lives outside kritik. A provider key in a
+That residual risk is real and lives outside kritique. A provider key in a
 pod that parses untrusted repositories can be read by anyone who can read
 the pod's Secret or exec into it, and a prompt injection that talks the
 model into calling a tool with the key in its arguments would place it in
 `agent_runs` and the log tail, which is why ADR-0003 masks secrets out of
 stored logs. Spend on a leaked key is bounded by the provider's limit, not
-by kritik's caps, and one key per tenant is a recommendation the operator
+by kritique's caps, and one key per tenant is a recommendation the operator
 may not follow. The single-shot path never had this exposure: the worker
 called the model and the runner only ever produced a context pack.
 
@@ -52,7 +52,7 @@ cost of one listener.
 ### 2.1 The gateway
 
 The worker (and `all`) serves a third listener, the `gateway` port
-(`KRITIK_GATEWAY_ADDR`, default `:8082`), with one purpose: forward a
+(`KRITIQUE_GATEWAY_ADDR`, default `:8082`), with one purpose: forward a
 runner's model calls to the tenant's provider. The endpoint speaks the
 OpenAI chat completions wire format, request and response, streaming
 included, because that is what ADR-0003's `openai` and `openrouter`
@@ -88,7 +88,7 @@ DNS, the git remote, Postgres and the gateway.
 The worker mints a token per run when it creates the run row: 32 random
 bytes, presented as `krk_<hex>`, stored only as its SHA-256 in a
 `gateway_tokens` table with the run, tenant, review and repository ids
-and an expiry (the Job deadline plus `KRITIK_GATEWAY_TOKEN_TTL`, default
+and an expiry (the Job deadline plus `KRITIQUE_GATEWAY_TOKEN_TTL`, default
 one hour). The table has no row-level security on purpose: it is looked
 up by the token's hash before any tenant is known, holding the token is
 the authorisation, and a row reveals only the ids of the run it belongs
@@ -97,7 +97,7 @@ tokens on every revocation.
 
 The token travels to the pod the way ADR-0003 §2.9 already delivers the
 git token and the job document: a key of the run's Secret. The job
-document gains `model.gatewayUrl` (`KRITIK_GATEWAY_URL`, the in-cluster
+document gains `model.gatewayUrl` (`KRITIQUE_GATEWAY_URL`, the in-cluster
 address of the worker's gateway Service) and loses the provider key and
 base URL; `model.provider`, the model names and pricing stay so the
 runner can keep its own usage estimate for the stop decision. A runner
@@ -121,7 +121,7 @@ see.
 
 The chart adds a `gateway` container port on `all` and `worker` pods, a
 `<release>-gateway` Service selecting them, and the gateway port to the
-worker's NetworkPolicy ingress and the runner's egress. `KRITIK_GATEWAY_URL`
+worker's NetworkPolicy ingress and the runner's egress. `KRITIQUE_GATEWAY_URL`
 defaults to that Service's cluster address. A split topology therefore
 has a fourth Service; the `ingest` role does not serve the gateway.
 
@@ -134,18 +134,18 @@ has a fourth Service; the `ingest` role does not serve the gateway.
    one, the key removed from the document, the chart's Service and
    policies, and the integration test for agentic mode rerun through the
    gateway.
-3. `KRITIK_GATEWAY_URL` becomes required for agentic mode; a document
+3. `KRITIQUE_GATEWAY_URL` becomes required for agentic mode; a document
    without it is refused at load, so no deployment can fall back to a key
    in the pod by omission.
 
 ### 2.6 As built (2026-09-25)
 
-The three rollout steps landed as one change, since kritik has no release
+The three rollout steps landed as one change, since kritique has no release
 a key in the pod would have to stay compatible with. Where the build
 differs from the text above:
 
 - **Every provider through the worker's adapter.** The endpoint decodes a
-  chat completions request into kritik's own step request and answers it
+  chat completions request into kritique's own step request and answers it
   through the tenant's provider adapter, the one single mode uses, then
   encodes the result as a chat completion, with the cost and serving
   provider in `usage` the way OpenRouter reports them. `openai` and
@@ -157,7 +157,7 @@ differs from the text above:
   the key, because the gateway reports each step's cost and applies the
   same-provider fallback itself. A document without a gateway is refused,
   so an agentic runner never runs single shot, and the worker refuses an
-  agentic review when `KRITIK_GATEWAY_URL` is empty.
+  agentic review when `KRITIQUE_GATEWAY_URL` is empty.
 - **`gateway_tokens` carries the grant.** Beside the ids and the expiry, a
   row holds the model and fallback references the run may call and its
   budget and spend, so a step is checked against the run's own grant, not
@@ -198,7 +198,7 @@ differs from the text above:
 ## 3. Consequences
 
 **Positive.** No provider credential in any pod that touches repository
-content; spend is bounded by kritik's caps rather than the provider's;
+content; spend is bounded by kritique's caps rather than the provider's;
 usage and cost are recorded where leases and caps live, in one place for
 both modes; the runner needs no provider-specific code; a leaked run
 token is worthless after the run.
@@ -221,7 +221,7 @@ the single-shot path.
   the interim state through rollout step 1.
 - **A budgeted virtual key from an external proxy (LiteLLM).** Moves the
   problem to another component and puts per-tenant budgets outside
-  kritik's leases and usage rows. A deployment that runs LiteLLM can still
+  kritique's leases and usage rows. A deployment that runs LiteLLM can still
   point the worker's provider at it; the runner only ever sees the
   gateway.
 - **Loop in the worker with tools served by the runner.** Discussed in

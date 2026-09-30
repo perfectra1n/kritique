@@ -10,17 +10,17 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/agent"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/executor"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/jobtimeout"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/repoconfig"
-	"github.com/home-operations/kritik/internal/review"
-	"github.com/home-operations/kritik/internal/runner"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // agentDeadline bounds an agentic runner Job: the tenant's runner deadline,
@@ -86,7 +86,7 @@ func (w *Review) agentAdmit(
 		return admission{}, statusSkipped, "no review model is configured for this repository", nil
 	}
 	if w.GatewayURL == "" {
-		return admission{}, statusFailed, "agentic mode needs the model gateway (KRITIK_GATEWAY_URL)", nil
+		return admission{}, statusFailed, "agentic mode needs the model gateway (KRITIQUE_GATEWAY_URL)", nil
 	}
 	if _, ok := file.Providers[ref.Provider()]; !ok {
 		return admission{}, statusFailed, fmt.Sprintf("worker: provider %q is not in the configuration", ref.Provider()), nil
@@ -380,13 +380,13 @@ func (p *publishPhase) skippedStatus(ctx context.Context, reason string) {
 		desc = "patch unchanged since the last review"
 	}
 	owner, repo, _ := strings.Cut(p.pr.repository, "/")
-	if err := p.client.SetStatus(ctx, owner, repo, p.pr.headSHA, forge.StatusSuccess, "kritik: skipped ("+desc+")"); err != nil {
+	if err := p.client.SetStatus(ctx, owner, repo, p.pr.headSHA, forge.StatusSuccess, "kritique: skipped ("+desc+")"); err != nil {
 		p.logger.Warn("commit status not set", "error", err)
 	}
 }
 
 // incomplete replaces the sticky comment with one saying why this head was
-// not fully reviewed, in kritik's own template, and records what the run
+// not fully reviewed, in kritique's own template, and records what the run
 // spent.
 func (p *publishPhase) incomplete(ctx context.Context, reason string, resp model.CompletionResponse) error {
 	body, _ := review.RenderSummary(ctx, review.Templates{}, review.RenderData{
@@ -397,7 +397,7 @@ func (p *publishPhase) incomplete(ctx context.Context, reason string, resp model
 		return err
 	}
 	owner, repo, _ := strings.Cut(p.pr.repository, "/")
-	if err := p.client.SetStatus(ctx, owner, repo, p.pr.headSHA, forge.StatusSuccess, "kritik: review incomplete ("+reason+")"); err != nil {
+	if err := p.client.SetStatus(ctx, owner, repo, p.pr.headSHA, forge.StatusSuccess, "kritique: review incomplete ("+reason+")"); err != nil {
 		p.logger.Warn("commit status not set", "error", err)
 	}
 	return p.persist(ctx, review.Result{}, nil, resp, roleReview, commentID)

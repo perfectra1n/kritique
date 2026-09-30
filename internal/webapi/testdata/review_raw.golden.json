@@ -1,6 +1,6 @@
 {
   "repoFiles": {
-    ".kritik.yaml": "mode: agentic\n"
+    ".kritique.yaml": "mode: agentic\n"
   },
   "stages": [
     {

@@ -16,8 +16,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/runner"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/runner"
 )
 
 const (
@@ -42,21 +42,21 @@ func spec() Spec {
 }
 
 func TestJobSpec(t *testing.T) {
-	k := &Kube{Namespace: "kritik", Image: "ttl.sh/x:1h", ServiceAccount: "kritik-runner", DatabaseSecret: "kritik-postgres-runner", DatabaseSecretKey: "uri",
-		GatewayURL: "http://kritik-gateway:8082", RuntimeClass: "gvisor", TTL: 10 * time.Minute}
+	k := &Kube{Namespace: "kritique", Image: "ttl.sh/x:1h", ServiceAccount: "kritique-runner", DatabaseSecret: "kritique-postgres-runner", DatabaseSecretKey: "uri",
+		GatewayURL: "http://kritique-gateway:8082", RuntimeClass: "gvisor", TTL: 10 * time.Minute}
 	j := k.job(spec())
-	if j.Name != "kritik-run-01234567" || j.Namespace != "kritik" {
+	if j.Name != "kritique-run-01234567" || j.Namespace != "kritique" {
 		t.Fatalf("name/namespace = %s/%s", j.Name, j.Namespace)
 	}
 	if *j.Spec.ActiveDeadlineSeconds != 300 || *j.Spec.TTLSecondsAfterFinished != 600 || *j.Spec.BackoffLimit != 0 {
 		t.Fatalf("deadline/ttl/backoff = %d/%d/%d", *j.Spec.ActiveDeadlineSeconds, *j.Spec.TTLSecondsAfterFinished, *j.Spec.BackoffLimit)
 	}
-	if j.Labels["kritik.home-operations.com/tenant"] != "acme" || j.Annotations["kritik.home-operations.com/head-sha"] != headSHA ||
-		j.Spec.Template.Labels["kritik.home-operations.com/role"] != "runner" {
+	if j.Labels["kritique.perfectra1n.github.io/tenant"] != "acme" || j.Annotations["kritique.perfectra1n.github.io/head-sha"] != headSHA ||
+		j.Spec.Template.Labels["kritique.perfectra1n.github.io/role"] != "runner" {
 		t.Fatalf("labels/annotations = %v %v", j.Labels, j.Annotations)
 	}
 	pod := j.Spec.Template.Spec
-	if pod.ServiceAccountName != "kritik-runner" || *pod.AutomountServiceAccountToken || pod.RestartPolicy != corev1.RestartPolicyNever {
+	if pod.ServiceAccountName != "kritique-runner" || *pod.AutomountServiceAccountToken || pod.RestartPolicy != corev1.RestartPolicyNever {
 		t.Fatalf("pod spec = %+v", pod)
 	}
 	c := pod.Containers[0]
@@ -64,9 +64,9 @@ func TestJobSpec(t *testing.T) {
 		t.Fatalf("container = %+v", c)
 	}
 	checkRunnerEnv(t, c.Env)
-	checkProxyEnv(t, c.Env, "http://kritik-gateway:8082")
+	checkProxyEnv(t, c.Env, "http://kritique-gateway:8082")
 	checkSpecMount(t, pod, c)
-	if env := (&Kube{Namespace: "kritik", Image: "x"}).job(spec()).Spec.Template.Spec.Containers[0].Env; slices.ContainsFunc(env,
+	if env := (&Kube{Namespace: "kritique", Image: "x"}).job(spec()).Spec.Template.Spec.Containers[0].Env; slices.ContainsFunc(env,
 		func(e corev1.EnvVar) bool { return e.Name == "HTTPS_PROXY" }) {
 		t.Fatal("a Kube without a gateway must hand the runner no proxy")
 	}
@@ -79,7 +79,7 @@ func TestJobSpec(t *testing.T) {
 	if pod.RuntimeClassName == nil || *pod.RuntimeClassName != "gvisor" {
 		t.Fatalf("runtimeClassName = %v, want gvisor", pod.RuntimeClassName)
 	}
-	if bare := (&Kube{Namespace: "kritik", Image: "x"}).job(spec()).Spec.Template.Spec; bare.RuntimeClassName != nil {
+	if bare := (&Kube{Namespace: "kritique", Image: "x"}).job(spec()).Spec.Template.Spec; bare.RuntimeClassName != nil {
 		t.Fatal("a Kube without a RuntimeClass must leave the pod on the default runtime")
 	}
 }
@@ -93,7 +93,7 @@ func TestJobSpecMountsTools(t *testing.T) {
 		{Name: "helm", Image: "registry.example/helm:3", Path: "/usr/bin"},
 		{Name: "flate", Image: "registry.example/flate@sha256:0123"},
 	}
-	pod := (&Kube{Namespace: "kritik", Image: "x"}).job(s).Spec.Template.Spec
+	pod := (&Kube{Namespace: "kritique", Image: "x"}).job(s).Spec.Template.Spec
 	images := map[string]string{}
 	for _, v := range pod.Volumes {
 		if v.Image != nil {
@@ -108,17 +108,17 @@ func TestJobSpecMountsTools(t *testing.T) {
 	for _, m := range c.VolumeMounts {
 		mounts[m.Name] = m
 	}
-	if m := mounts["tool-helm"]; m.MountPath != "/opt/kritik/tools/helm" || m.SubPath != "usr/bin" || !m.ReadOnly {
+	if m := mounts["tool-helm"]; m.MountPath != "/opt/kritique/tools/helm" || m.SubPath != "usr/bin" || !m.ReadOnly {
 		t.Fatalf("helm mount = %+v", m)
 	}
-	if m := mounts["tool-flate"]; m.MountPath != "/opt/kritik/tools/flate" || m.SubPath != "" || !m.ReadOnly {
+	if m := mounts["tool-flate"]; m.MountPath != "/opt/kritique/tools/flate" || m.SubPath != "" || !m.ReadOnly {
 		t.Fatalf("flate mount = %+v", m)
 	}
-	want := "/opt/kritik/tools/helm:/opt/kritik/tools/flate:" + imagePath
+	want := "/opt/kritique/tools/helm:/opt/kritique/tools/flate:" + imagePath
 	if i := slices.IndexFunc(c.Env, func(e corev1.EnvVar) bool { return e.Name == "PATH" }); i < 0 || c.Env[i].Value != want {
 		t.Fatalf("PATH = %v, want %s", c.Env, want)
 	}
-	bare := (&Kube{Namespace: "kritik", Image: "x"}).job(spec()).Spec.Template.Spec.Containers[0]
+	bare := (&Kube{Namespace: "kritique", Image: "x"}).job(spec()).Spec.Template.Spec.Containers[0]
 	if slices.ContainsFunc(bare.Env, func(e corev1.EnvVar) bool { return e.Name == "PATH" }) {
 		t.Fatal("a run without tools must keep the image's own PATH")
 	}
@@ -132,7 +132,7 @@ func checkProxyEnv(t *testing.T, vars []corev1.EnvVar, gateway string) {
 	for _, e := range vars {
 		env[e.Name] = e.Value
 	}
-	if env["HTTPS_PROXY"] != gateway || env["HTTP_PROXY"] != gateway || env["NO_PROXY"] != "localhost,127.0.0.1,kritik-gateway" {
+	if env["HTTPS_PROXY"] != gateway || env["HTTP_PROXY"] != gateway || env["NO_PROXY"] != "localhost,127.0.0.1,kritique-gateway" {
 		t.Fatalf("proxy env = %v", env)
 	}
 }
@@ -145,10 +145,10 @@ func checkRunnerEnv(t *testing.T, vars []corev1.EnvVar) {
 	for _, e := range vars {
 		env[e.Name] = e
 	}
-	if e, ok := env["KRITIK_RUN_SPEC_FILE"]; !ok || e.Value != "/var/run/kritik/spec.json" {
-		t.Fatalf("KRITIK_RUN_SPEC_FILE = %+v", e)
+	if e, ok := env["KRITIQUE_RUN_SPEC_FILE"]; !ok || e.Value != "/var/run/kritique/spec.json" {
+		t.Fatalf("KRITIQUE_RUN_SPEC_FILE = %+v", e)
 	}
-	if _, ok := env["KRITIK_RUN_SPEC"]; ok {
+	if _, ok := env["KRITIQUE_RUN_SPEC"]; ok {
 		t.Fatal("the job document must not travel as a variable")
 	}
 	for _, e := range vars {
@@ -159,22 +159,22 @@ func checkRunnerEnv(t *testing.T, vars []corev1.EnvVar) {
 	for name, want := range map[string]struct {
 		key      string
 		optional bool
-	}{"KRITIK_GIT_TOKEN": {"git-token", false}, "KRITIK_GATEWAY_TOKEN": {"gateway-token", true}} {
+	}{"KRITIQUE_GIT_TOKEN": {"git-token", false}, "KRITIQUE_GATEWAY_TOKEN": {"gateway-token", true}} {
 		ref := env[name].ValueFrom
-		if ref == nil || ref.SecretKeyRef == nil || ref.SecretKeyRef.Name != "kritik-run-01234567" || ref.SecretKeyRef.Key != want.key ||
+		if ref == nil || ref.SecretKeyRef == nil || ref.SecretKeyRef.Name != "kritique-run-01234567" || ref.SecretKeyRef.Key != want.key ||
 			(ref.SecretKeyRef.Optional != nil && *ref.SecretKeyRef.Optional) != want.optional {
 			t.Fatalf("%s = %+v", name, env[name])
 		}
 	}
-	for _, name := range []string{"KRITIK_RUN_KIND", "KRITIK_RUN_ID", "KRITIK_CLONE_URL", "KRITIK_HEAD_SHA", "KRITIK_BASE_SHA", "KRITIK_IGNORE"} {
+	for _, name := range []string{"KRITIQUE_RUN_KIND", "KRITIQUE_RUN_ID", "KRITIQUE_CLONE_URL", "KRITIQUE_HEAD_SHA", "KRITIQUE_BASE_SHA", "KRITIQUE_IGNORE"} {
 		if _, ok := env[name]; ok {
 			t.Fatalf("%s is replaced by the job document", name)
 		}
 	}
-	if ref := env["KRITIK_DATABASE_URL"].ValueFrom.SecretKeyRef; ref.Name != "kritik-postgres-runner" || ref.Key != "uri" {
+	if ref := env["KRITIQUE_DATABASE_URL"].ValueFrom.SecretKeyRef; ref.Name != "kritique-postgres-runner" || ref.Key != "uri" {
 		t.Fatalf("db env = %+v", ref)
 	}
-	for _, name := range []string{"KRITIK_EMBED_API_KEY", "KRITIK_DATABASE_OWNER_URL", "OPENROUTER_API_KEY"} {
+	for _, name := range []string{"KRITIQUE_EMBED_API_KEY", "KRITIQUE_DATABASE_OWNER_URL", "OPENROUTER_API_KEY"} {
 		if _, leaked := env[name]; leaked {
 			t.Fatalf("%s must never reach a runner pod", name)
 		}
@@ -188,7 +188,7 @@ func checkSpecMount(t *testing.T, pod corev1.PodSpec, c corev1.Container) {
 	var mounted bool
 	for _, m := range c.VolumeMounts {
 		if m.Name == "spec" {
-			mounted = m.MountPath == "/var/run/kritik" && m.ReadOnly
+			mounted = m.MountPath == "/var/run/kritique" && m.ReadOnly
 		}
 	}
 	var vol *corev1.SecretVolumeSource
@@ -197,7 +197,7 @@ func checkSpecMount(t *testing.T, pod corev1.PodSpec, c corev1.Container) {
 			vol = v.Secret
 		}
 	}
-	if !mounted || vol == nil || vol.SecretName != "kritik-run-01234567" || len(vol.Items) != 1 ||
+	if !mounted || vol == nil || vol.SecretName != "kritique-run-01234567" || len(vol.Items) != 1 ||
 		vol.Items[0].Key != "run-spec.json" || vol.Items[0].Path != "spec.json" {
 		t.Fatalf("spec mount = %v, volume = %+v", mounted, vol)
 	}
@@ -218,7 +218,7 @@ func TestKubeRunRejectsOversizedSpecBeforeCreatingAnything(t *testing.T) {
 
 func TestKubeRunWaitsForCompletion(t *testing.T) {
 	client := fake.NewSimpleClientset()
-	k := &Kube{Client: client, Namespace: "kritik", Image: "img", ServiceAccount: "sa", DatabaseSecret: "s", DatabaseSecretKey: "uri", Poll: 10 * time.Millisecond}
+	k := &Kube{Client: client, Namespace: "kritique", Image: "img", ServiceAccount: "sa", DatabaseSecret: "s", DatabaseSecretKey: "uri", Poll: 10 * time.Millisecond}
 	ctx := t.Context()
 	done := make(chan Result, 1)
 	go func() { done <- k.Run(ctx, spec()) }()
@@ -227,7 +227,7 @@ func TestKubeRunWaitsForCompletion(t *testing.T) {
 	var name string
 	for i := 0; i < 100 && name == ""; i++ {
 		time.Sleep(5 * time.Millisecond)
-		jobs, _ := client.BatchV1().Jobs("kritik").List(ctx, metav1.ListOptions{})
+		jobs, _ := client.BatchV1().Jobs("kritique").List(ctx, metav1.ListOptions{})
 		if len(jobs.Items) == 1 {
 			name = jobs.Items[0].Name
 		}
@@ -235,15 +235,15 @@ func TestKubeRunWaitsForCompletion(t *testing.T) {
 	if name == "" {
 		t.Fatal("job was not created")
 	}
-	_, _ = client.CoreV1().Pods("kritik").Create(ctx, &corev1.Pod{
-		Name: name + "-abcde", Namespace: "kritik", Labels: map[string]string{"job-name": name},
+	_, _ = client.CoreV1().Pods("kritique").Create(ctx, &corev1.Pod{
+		Name: name + "-abcde", Namespace: "kritique", Labels: map[string]string{"job-name": name},
 		Spec: corev1.PodSpec{NodeName: "k8s-1"},
 		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{
 			Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}}}},
 	}, metav1.CreateOptions{})
-	j, _ := client.BatchV1().Jobs("kritik").Get(ctx, name, metav1.GetOptions{})
+	j, _ := client.BatchV1().Jobs("kritique").Get(ctx, name, metav1.GetOptions{})
 	j.Status.Succeeded = 1
-	_, _ = client.BatchV1().Jobs("kritik").UpdateStatus(ctx, j, metav1.UpdateOptions{})
+	_, _ = client.BatchV1().Jobs("kritique").UpdateStatus(ctx, j, metav1.UpdateOptions{})
 
 	select {
 	case res := <-done:
@@ -273,7 +273,7 @@ func TestKubeRunDeletesTheJobWhenCancelled(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after cancellation")
 	}
-	jobs, _ := client.BatchV1().Jobs("kritik").List(t.Context(), metav1.ListOptions{})
+	jobs, _ := client.BatchV1().Jobs("kritique").List(t.Context(), metav1.ListOptions{})
 	if len(jobs.Items) != 0 {
 		t.Fatalf("the orphaned Job must be deleted, %d left", len(jobs.Items))
 	}
@@ -281,21 +281,21 @@ func TestKubeRunDeletesTheJobWhenCancelled(t *testing.T) {
 
 func TestKubeRunReportsFailure(t *testing.T) {
 	client := fake.NewSimpleClientset()
-	k := &Kube{Client: client, Namespace: "kritik", Image: "img", ServiceAccount: "sa", DatabaseSecret: "s", DatabaseSecretKey: "uri", Poll: 10 * time.Millisecond}
+	k := &Kube{Client: client, Namespace: "kritique", Image: "img", ServiceAccount: "sa", DatabaseSecret: "s", DatabaseSecretKey: "uri", Poll: 10 * time.Millisecond}
 	ctx := t.Context()
 	done := make(chan Result, 1)
 	go func() { done <- k.Run(ctx, spec()) }()
 	var j *batchv1.Job
 	for i := 0; i < 100 && j == nil; i++ {
 		time.Sleep(5 * time.Millisecond)
-		jobs, _ := client.BatchV1().Jobs("kritik").List(ctx, metav1.ListOptions{})
+		jobs, _ := client.BatchV1().Jobs("kritique").List(ctx, metav1.ListOptions{})
 		if len(jobs.Items) == 1 {
 			j = &jobs.Items[0]
 		}
 	}
 	j.Status.Failed = 1
 	j.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "DeadlineExceeded"}}
-	_, _ = client.BatchV1().Jobs("kritik").UpdateStatus(ctx, j, metav1.UpdateOptions{})
+	_, _ = client.BatchV1().Jobs("kritique").UpdateStatus(ctx, j, metav1.UpdateOptions{})
 	res := <-done
 	if res.Err == nil {
 		t.Fatal("a failed job must produce an error")
@@ -303,14 +303,14 @@ func TestKubeRunReportsFailure(t *testing.T) {
 }
 
 func newKube(client *fake.Clientset) *Kube {
-	return &Kube{Client: client, Namespace: "kritik", Image: "img", ServiceAccount: "sa", DatabaseSecret: "s", DatabaseSecretKey: "uri", Poll: 10 * time.Millisecond}
+	return &Kube{Client: client, Namespace: "kritique", Image: "img", ServiceAccount: "sa", DatabaseSecret: "s", DatabaseSecretKey: "uri", Poll: 10 * time.Millisecond}
 }
 
 // waitJob returns the Job once Run has created it.
 func waitJob(t *testing.T, client *fake.Clientset) *batchv1.Job {
 	t.Helper()
 	for range 400 {
-		jobs, _ := client.BatchV1().Jobs("kritik").List(t.Context(), metav1.ListOptions{})
+		jobs, _ := client.BatchV1().Jobs("kritique").List(t.Context(), metav1.ListOptions{})
 		if len(jobs.Items) == 1 {
 			return &jobs.Items[0]
 		}
@@ -330,7 +330,7 @@ func TestKubeRunSecretLifecycle(t *testing.T) {
 
 	var sec *corev1.Secret
 	for range 400 {
-		s, err := client.CoreV1().Secrets("kritik").Get(t.Context(), j.Name, metav1.GetOptions{})
+		s, err := client.CoreV1().Secrets("kritique").Get(t.Context(), j.Name, metav1.GetOptions{})
 		if err == nil && len(s.OwnerReferences) == 1 {
 			sec = s
 			break
@@ -347,7 +347,7 @@ func TestKubeRunSecretLifecycle(t *testing.T) {
 	if err != nil || got.Head != headSHA || got.Base != baseSHA || strings.Join(got.Ignore, ",") != "vendor/**,**/*.lock" {
 		t.Fatalf("run spec = %+v, %v", got, err)
 	}
-	if sec.Labels["kritik.home-operations.com/role"] != "runner" || sec.Labels["kritik.home-operations.com/tenant"] != "acme" {
+	if sec.Labels["kritique.perfectra1n.github.io/role"] != "runner" || sec.Labels["kritique.perfectra1n.github.io/tenant"] != "acme" {
 		t.Fatalf("secret labels = %v", sec.Labels)
 	}
 	ref := sec.OwnerReferences[0]
@@ -378,7 +378,7 @@ func TestKubeRunDeletesSecretWhenJobCreateFails(t *testing.T) {
 	if res.Err == nil || !strings.Contains(res.Err.Error(), "quota exceeded") {
 		t.Fatalf("err = %v", res.Err)
 	}
-	secrets, _ := client.CoreV1().Secrets("kritik").List(t.Context(), metav1.ListOptions{})
+	secrets, _ := client.CoreV1().Secrets("kritique").List(t.Context(), metav1.ListOptions{})
 	if len(secrets.Items) != 0 {
 		t.Fatalf("secret left behind: %v", secrets.Items)
 	}
@@ -398,8 +398,8 @@ func TestKubeRunCancelDeletesJobInForeground(t *testing.T) {
 	done := make(chan Result, 1)
 	go func() { done <- k.Run(ctx, spec()) }()
 	j := waitJob(t, client)
-	_, _ = client.CoreV1().Pods("kritik").Create(t.Context(), &corev1.Pod{
-		Name: j.Name + "-abcde", Namespace: "kritik", Labels: map[string]string{"job-name": j.Name},
+	_, _ = client.CoreV1().Pods("kritique").Create(t.Context(), &corev1.Pod{
+		Name: j.Name + "-abcde", Namespace: "kritique", Labels: map[string]string{"job-name": j.Name},
 	}, metav1.CreateOptions{})
 	cancel(cause)
 
@@ -454,7 +454,7 @@ func TestKubeRunDeletesJobWhenCreateFailsOnCancel(t *testing.T) {
 	}
 	var jobDeleted, secretDeleted bool
 	for _, a := range client.Actions() {
-		if d, ok := a.(k8stesting.DeleteAction); ok && d.GetName() == "kritik-run-01234567" {
+		if d, ok := a.(k8stesting.DeleteAction); ok && d.GetName() == "kritique-run-01234567" {
 			switch a.GetResource().Resource {
 			case "jobs":
 				jobDeleted = true
@@ -477,8 +477,8 @@ func TestKubeRunCleansUpWhenOwnerPatchFails(t *testing.T) {
 	if res.Err == nil || !strings.Contains(res.Err.Error(), "conflict") {
 		t.Fatalf("err = %v", res.Err)
 	}
-	jobs, _ := client.BatchV1().Jobs("kritik").List(t.Context(), metav1.ListOptions{})
-	secrets, _ := client.CoreV1().Secrets("kritik").List(t.Context(), metav1.ListOptions{})
+	jobs, _ := client.BatchV1().Jobs("kritique").List(t.Context(), metav1.ListOptions{})
+	secrets, _ := client.CoreV1().Secrets("kritique").List(t.Context(), metav1.ListOptions{})
 	if len(jobs.Items) != 0 || len(secrets.Items) != 0 {
 		t.Fatalf("left behind: %d jobs, %d secrets", len(jobs.Items), len(secrets.Items))
 	}
@@ -517,10 +517,10 @@ func TestFinishKeepsTheTailOfTheLog(t *testing.T) {
 				opts, _ = a.(k8stesting.GenericAction).GetValue().(*corev1.PodLogOptions)
 				return true, &runtime.Unknown{Raw: []byte(tt.logs)}, nil
 			})
-			_, _ = client.CoreV1().Pods("kritik").Create(t.Context(), &corev1.Pod{
-				Name: "kritik-run-01234567-abcde", Namespace: "kritik", Labels: map[string]string{"job-name": "kritik-run-01234567"},
+			_, _ = client.CoreV1().Pods("kritique").Create(t.Context(), &corev1.Pod{
+				Name: "kritique-run-01234567-abcde", Namespace: "kritique", Labels: map[string]string{"job-name": "kritique-run-01234567"},
 			}, metav1.CreateOptions{})
-			res := Result{JobName: "kritik-run-01234567"}
+			res := Result{JobName: "kritique-run-01234567"}
 			newKube(client).finish(t.Context(), &res, secrets)
 			if opts == nil || opts.TailLines == nil || *opts.TailLines != logTailLines || opts.LimitBytes == nil || *opts.LimitBytes != logReadBytes {
 				t.Fatalf("log options = %+v", opts)

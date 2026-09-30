@@ -15,7 +15,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // Verification outcomes. Callers map any non-nil error to HTTP 401.

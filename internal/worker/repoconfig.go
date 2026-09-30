@@ -11,26 +11,26 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/repoconfig"
-	"github.com/home-operations/kritik/internal/review"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
-// Effective is a repository's settings once its .kritik.yaml is applied.
+// Effective is a repository's settings once its .kritique.yaml is applied.
 // Settings.Review names the files the runner reads; Instructions,
 // Templates and References hold their contents once it has.
 type Effective struct {
 	repoconfig.Merged
-	// Found is whether the repository has a .kritik.yaml.
+	// Found is whether the repository has a .kritique.yaml.
 	Found        bool
 	Instructions []string
 	Templates    review.Templates
 	References   []review.Reference
 }
 
-// readRepoConfig reads .kritik.yaml at ref through the forge: nil when the
+// readRepoConfig reads .kritique.yaml at ref through the forge: nil when the
 // repository has none, and nil with a note when it is too large to use.
 func readRepoConfig(ctx context.Context, client forge.Client, owner, repo, ref string) ([]byte, []string, error) {
 	doc, err := client.FileAt(ctx, owner, repo, ref, repoconfig.FileName)
@@ -45,7 +45,7 @@ func readRepoConfig(ctx context.Context, client forge.Client, owner, repo, ref s
 	return doc, nil, nil
 }
 
-// effective applies doc, the merge-base .kritik.yaml or nil when there is
+// effective applies doc, the merge-base .kritique.yaml or nil when there is
 // none, onto the operator's settings (see repoconfig.Merge). The notes say
 // which of the file's values were dropped, or why the whole file was
 // ignored.
@@ -59,7 +59,7 @@ func effective(settings configfile.Settings, doc []byte) (Effective, []string) {
 }
 
 // repoFiles are the paths the runner reads from the merge base: the files
-// the settings name, and .kritik.yaml itself, which the review's context
+// the settings name, and .kritique.yaml itself, which the review's context
 // pack keeps a copy of.
 func (e *Effective) repoFiles() []string {
 	paths := e.Review.Referenced()
@@ -117,7 +117,7 @@ func settleLeft(trigger string, settle time.Duration, created, now time.Time) ti
 	return created.Add(settle).Sub(now)
 }
 
-// skipByRepo ends a review the merge-base .kritik.yaml disables or filters
+// skipByRepo ends a review the merge-base .kritique.yaml disables or filters
 // out before a runner is spent on it, with a success status saying why. It
 // reports whether it ended the review, with the error of recording that.
 func (w *Review) skipByRepo(ctx context.Context, e earlyEnd, eff *Effective, client forge.Client, owner, repo string) (bool, error) {
@@ -142,7 +142,7 @@ func (w *Review) skipByRepo(ctx context.Context, e earlyEnd, eff *Effective, cli
 	if err := w.end(ctx, e, statusSkipped, ""); err != nil {
 		return true, err
 	}
-	desc := "kritik: skipped (" + reason.Description() + ")"
+	desc := "kritique: skipped (" + reason.Description() + ")"
 	if err := client.SetStatus(ctx, owner, repo, e.args.HeadSHA, forge.StatusSuccess, desc); err != nil {
 		e.logger.Warn("commit status not set", "error", err)
 	}

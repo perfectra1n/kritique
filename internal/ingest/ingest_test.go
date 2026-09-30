@@ -14,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 const configYAML = `
@@ -179,7 +179,7 @@ func TestHandlerOffersIgnoredKindsToTasks(t *testing.T) {
 }
 
 // TestHandlerUndeclaredAccountLogLevel: an undeclared account's delivery of
-// a kind kritik acts on is worth a warning; one it ignores is not.
+// a kind kritique acts on is worth a warning; one it ignores is not.
 func TestHandlerUndeclaredAccountLogLevel(t *testing.T) {
 	stranger := `"repository":{"full_name":"stranger/x","default_branch":"main","owner":{"login":"stranger"}}`
 	tests := []struct {

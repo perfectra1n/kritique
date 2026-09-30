@@ -16,8 +16,8 @@ const onboardTenants = twoTenants + `
       - name: east-bot
         forge: forgejo
         account: east
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
     repositories:
       - name: east/busy
       - name: east/quiet
@@ -34,8 +34,8 @@ const onboardTenants = twoTenants + `
       - name: west-bot
         forge: forgejo
         account: west
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
     repositories:
       - name: west/one
       - name: west/old-failure

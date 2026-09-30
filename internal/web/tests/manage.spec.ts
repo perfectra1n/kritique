@@ -118,9 +118,9 @@ test.describe('tenant configuration', () => {
     await page.goto(`/${ADMIN}/config`);
     const inh = g.tenantConfig.inherited;
     await expect(page.locator('[data-path="models.review"]')).toHaveAttribute('placeholder', `inherits ${inh.tenant.models.review} from the config file`);
-    await expect(page.locator('[data-path="settle"]')).toHaveAttribute('placeholder', "inherits 30s from kritik's default");
+    await expect(page.locator('[data-path="settle"]')).toHaveAttribute('placeholder', "inherits 30s from kritique's default");
     await expect(page.locator('[data-path="repositories[0].mode"] option[value=""]')).toHaveText(`default: ${inh.repository.mode}`);
-    await expect(page.locator('[data-path="repositories[0].filter"]')).toHaveAttribute('placeholder', `inherits ${inh.repository.filter} from kritik's default`);
+    await expect(page.locator('[data-path="repositories[0].filter"]')).toHaveAttribute('placeholder', `inherits ${inh.repository.filter} from kritique's default`);
   });
 
   test('a 422 highlights and focuses the field its path names', async ({ page }) => {

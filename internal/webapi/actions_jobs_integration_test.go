@@ -20,10 +20,10 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"github.com/home-operations/kritik/internal/auth"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 const actionsConfig = `
@@ -32,8 +32,8 @@ web:
     - name: corp
       type: oidc
       issuer: https://idp.example
-      clientId: kritik
-      clientSecret: { env: KRITIK_TEST_TOKEN }
+      clientId: kritique
+      clientSecret: { env: KRITIQUE_TEST_TOKEN }
   operators: ["corp:aj-op"]
 tenants:
   - slug: aj-tenant
@@ -42,8 +42,8 @@ tenants:
         forge: forgejo
         host: git.example
         account: aj
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
     repositories:
       - name: aj/one
 `
@@ -69,22 +69,22 @@ func newActionsEnv(t *testing.T) *actionsEnv {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	st, err := store.Open(ctx, store.Options{
-		AppURL: testEnv(t, "KRITIK_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIK_TEST_OWNER_URL"),
+		AppURL: testEnv(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIQUE_TEST_OWNER_URL"),
 		Logger: logger,
 	})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritik_app", "kritik_runner"); err != nil {
+	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	owner, err := pgxpool.New(ctx, testEnv(t, "KRITIK_TEST_OWNER_URL"))
+	owner, err := pgxpool.New(ctx, testEnv(t, "KRITIQUE_TEST_OWNER_URL"))
 	if err != nil {
 		t.Fatalf("pgxpool.New: %v", err)
 	}
 	t.Cleanup(owner.Close)
-	t.Setenv("KRITIK_TEST_TOKEN", "tok")
+	t.Setenv("KRITIQUE_TEST_TOKEN", "tok")
 	file, err := configfile.Parse([]byte(actionsConfig))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -93,7 +93,7 @@ func newActionsEnv(t *testing.T) *actionsEnv {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
 	cur := configfile.NewCurrent(file)
-	webURL, _ := url.Parse("https://kritik.example")
+	webURL, _ := url.Parse("https://kritique.example")
 	h, err := auth.New(auth.Config{Store: st, Current: cur, WebURL: webURL, Logger: logger})
 	if err != nil {
 		t.Fatalf("auth.New: %v", err)
@@ -142,7 +142,7 @@ func (e *actionsEnv) signIn(name, subject string, grants []store.Grant) {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	e.cookie = &http.Cookie{Name: auth.SessionCookieName(&url.URL{Scheme: "https", Host: "kritik.example"}), Value: token}
+	e.cookie = &http.Cookie{Name: auth.SessionCookieName(&url.URL{Scheme: "https", Host: "kritique.example"}), Value: token}
 }
 
 func (e *actionsEnv) do(path string) (int, []byte) {
@@ -152,8 +152,8 @@ func (e *actionsEnv) do(path string) (int, []byte) {
 		e.t.Fatal(err)
 	}
 	req.AddCookie(e.cookie)
-	req.Header.Set("Origin", "https://kritik.example")
-	req.Header.Set("X-Kritik", "1")
+	req.Header.Set("Origin", "https://kritique.example")
+	req.Header.Set("X-Kritique", "1")
 	resp, err := e.http.Client().Do(req)
 	if err != nil {
 		e.t.Fatal(err)

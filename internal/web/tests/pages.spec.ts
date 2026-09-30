@@ -54,13 +54,13 @@ test('repositories filter and repository detail', async ({ page }) => {
   await expect(page.locator('#repo-pulls').locator('../..')).toContainText(g.pull.title);
 });
 
-test('repository settings say where each comes from and what .kritik.yaml chose', async ({ page }) => {
+test('repository settings say where each comes from and what .kritique.yaml chose', async ({ page }) => {
   await page.goto(`/${T}/repos/alpha/one`);
   const settings = page.locator('#repo-settings').locator('../..');
   const rc = g.repoDetail.repoConfig!;
   // The golden file chose another review model; the operator's is shown beside it.
   await expect(settings.getByText(rc.settings.models.review, { exact: true })).toBeVisible();
-  await expect(settings).toContainText(`(.kritik.yaml; the operator's is ${g.repoDetail.settings.models.review})`);
+  await expect(settings).toContainText(`(.kritique.yaml; the operator's is ${g.repoDetail.settings.models.review})`);
   await expect(settings).toContainText(`${g.repoDetail.settings.mode} (dashboard)`);
   await expect(settings).toContainText('Settle 30s (default)');
   const file = page.locator('#repo-file').locator('../..');
@@ -78,7 +78,7 @@ test('repository tasks list each definition, where it comes from, and what the b
   await expect(rows).toHaveCount(g.repoDetail.tasks.length);
   await expect(rows.nth(0)).toContainText(welcome!.name);
   await expect(rows.nth(0)).toContainText('config file');
-  await expect(rows.nth(1)).toContainText('.kritik.yaml');
+  await expect(rows.nth(1)).toContainText('.kritique.yaml');
   await expect(rows.nth(1)).toContainText(triage!.triggers.join(', '));
   await expect(rows.nth(1)).toContainText(triage!.if);
   await expect(rows.nth(1)).toContainText(triage!.actions.join(', '));
@@ -190,7 +190,7 @@ test.describe('review', () => {
 
     for (const [tab, text] of [
       ['Timeline', g.reviewDetail.runnerRun!.podName],
-      ['Raw', '.kritik.yaml'],
+      ['Raw', '.kritique.yaml'],
       ['Usage', 'Total'],
     ] as const) {
       await page.locator('.tabs').getByRole('link', { name: tab, exact: true }).click();
@@ -290,7 +290,7 @@ test('dark theme renders every page without console errors', async ({ page }) =>
     if (m.type() === 'error') errors.push(m.text());
   });
   page.on('pageerror', (e) => errors.push(e.message));
-  await page.addInitScript(() => localStorage.setItem('kritik-theme', 'dark'));
+  await page.addInitScript(() => localStorage.setItem('kritique-theme', 'dark'));
   for (const h of [T, `${T}/repos/alpha/one`, `${T}/pulls`, `${T}/reviews/rev-1/diff`, `${T}/reviews/rev-1/conversation`, `${T}/reviews/rev-1/timeline`, `${T}/usage`]) {
     await page.goto(`/${h}`);
     await expect(page.locator('.state-msg[aria-live]')).toHaveCount(0);

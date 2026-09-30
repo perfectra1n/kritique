@@ -1,7 +1,7 @@
 // Package forgejo implements forge.Client against a Forgejo instance's REST
 // API (https://<host>/api/v1), using only the standard library HTTP client:
 // Forgejo has no first-party Go SDK comparable to go-github, so requests and
-// responses are hand-rolled against the subset of the API kritik needs.
+// responses are hand-rolled against the subset of the API kritique needs.
 //
 // This client also serves Gitea installations (configfile.ForgeGitea):
 // Gitea and Forgejo share the same REST API, webhook payloads and headers,
@@ -25,8 +25,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // maxErrorBody bounds how much of a non-2xx response body an apiError

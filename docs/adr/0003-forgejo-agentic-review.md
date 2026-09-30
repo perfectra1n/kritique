@@ -7,19 +7,19 @@
   an agent prompt to the findings of §2.4, and
   [ADR-0008](0008-runner-tools.md), which adds a command tool to the agent
   of §2.6 and routes the runner pod's egress of §2.9 through the gateway,
-  and [ADR-0010](0010-configuration-layers.md), which lets `.kritik.yaml`
+  and [ADR-0010](0010-configuration-layers.md), which lets `.kritique.yaml`
   of §2.3 choose within operator bounds and has the worker read it first.
 - **Date:** 2026-09-24
 - **Amended:** 2026-09-26, to route `forge: gitea` through the Forgejo
   client of §2.1 rather than a separate implementation.
-- **Amends:** [ADR-0002](0002-kritik-pr-review-service.md) §2.6, §2.7, §2.11 and §2.12.
+- **Amends:** [ADR-0002](0002-kritique-pr-review-service.md) §2.6, §2.7, §2.11 and §2.12.
 
 ## 1. Context
 
 ADR-0002 shipped GitHub, a single structured completion per review, a
 hard-coded system prompt, a fixed findings schema and OpenRouter as the only
 provider. Organisations that already review pull requests with a CI-hosted
-agent on a self-hosted Forgejo cannot move to kritik, because it lacks:
+agent on a self-hosted Forgejo cannot move to kritique, because it lacks:
 
 - a Forgejo forge client (webhooks parse, but `BuildForge` refuses Forgejo);
 - review rules the repository owns, read from a ref the pull request cannot
@@ -42,7 +42,7 @@ A typed `net/http` client in `internal/forge/forgejo` implements
 on the Forgejo SDK, which binds a context to the client instead of each call.
 Inline findings are a pull review with event `COMMENT` and comments carrying
 `path` and `new_position`; the status is a commit status with context
-`kritik/review`; the bot is `GET /user`. `MergeBase` gains the pull request
+`kritique/review`; the bot is `GET /user`. `MergeBase` gains the pull request
 number so Forgejo can read the pull request's `merge_base`. Collaborator
 permissions normalise onto a typed `forge.Permission`. The poller serves every
 forge with a client. Forgejo's `synchronized` action is normalised to
@@ -69,9 +69,9 @@ OAuth provider as `type: forgejo`.
 `pr.body` joins the CEL filter's variables, the stored pull request row, and
 the prompt (as untrusted data).
 
-### 2.3 `.kritik.yaml`
+### 2.3 `.kritique.yaml`
 
-The runner reads `.kritik.yaml` and every file it names from the **merge-base
+The runner reads `.kritique.yaml` and every file it names from the **merge-base
 tree**, which is base-branch history the pull request cannot change, caps each
 file at 256 KiB and all of them at 1 MiB, and stores them with the context
 pack. The worker decodes it strictly and merges it onto the operator's
@@ -86,11 +86,11 @@ ignore: ["web/src/generated/**"]
 skip:
   onlyPaths: ["docs/**", "**/README.md", "**/CHANGELOG.md"]
 review:
-  instructions: [".kritik/rules.md"]
+  instructions: [".kritique/rules.md"]
   requireSuggestedFix: true
   templates:
-    summary: ".kritik/summary.md.j2"
-    inline: ".kritik/inline.md.j2"
+    summary: ".kritique/summary.md.j2"
+    inline: ".kritique/inline.md.j2"
 ```
 
 The in-repo filter and `skip.onlyPaths` (skip when every changed path
@@ -122,11 +122,11 @@ without one is dropped and counted. Existing rows map error → blocking,
 warning → important, info → nit.
 
 Rendering is [gonja](https://github.com/nikolalohinski/gonja) (Jinja2)
-templates. kritik embeds defaults for the summary and the inline comment; a
+templates. kritique embeds defaults for the summary and the inline comment; a
 repository may replace either. Repository templates run with no loader, so
 `include`, `import` and `extends` resolve nothing, under an output cap of
 64 KiB and a render deadline. A failing template falls back to the default
-and the summary says so. kritik prepends its own marker to the sticky comment,
+and the summary says so. kritique prepends its own marker to the sticky comment,
 so no template can hide it from sticky discovery.
 
 ### 2.5 Providers
@@ -186,7 +186,7 @@ each tenant its own key with a spending limit, and on Forgejo a read-only
 Runner Jobs run in the worker's namespace, and the worker's Role can create,
 patch and delete every Secret in it, which a Role cannot narrow to the run
 Secrets it names only at runtime. It has no `get` or `list`: the worker
-writes Secrets and never reads any. kritik should therefore get a namespace
+writes Secrets and never reads any. kritique should therefore get a namespace
 of its own, holding no Secrets but its own.
 
 ### 2.7 Incremental re-review
@@ -222,13 +222,13 @@ results reported back.
   also carries a prompt block: the pull request's metadata and text (the
   fields the repository filter sees), the operator's instruction paths and
   strictness, and the last completed review's findings. The runner applies
-  the merge-base `.kritik.yaml` with the same code as the worker and does not
+  the merge-base `.kritique.yaml` with the same code as the worker and does not
   run the agent for a review the worker will skip. It holds no secret.
   The runner rejects a version it does not know, or a field it does not
   know, rather than guessing.
 - **Transport and size.** The document is a key (`run-spec.json`) of the
   run's Secret, mounted read-only into the pod at
-  `/var/run/kritik/spec.json`, whose path `KRITIK_RUN_SPEC_FILE` names. An
+  `/var/run/kritique/spec.json`, whose path `KRITIQUE_RUN_SPEC_FILE` names. An
   environment variable was ruled out: Linux caps one environment string at
   128 KiB and JSON escaping can grow a body sixfold, so a large pull request
   would fail the Job on every retry with `E2BIG`. A Secret is capped at
@@ -247,7 +247,7 @@ results reported back.
   `runner_runs` rows older than 15 minutes whose `secret_swept_at` is unset
   and that either have `finished_at` or are older than the three-hour job
   cap (a worker that died never records an end, and no Job it started can
-  outlive its deadline by then), deletes Secret `kritik-run-<id8>` by name,
+  outlive its deadline by then), deletes Secret `kritique-run-<id8>` by name,
   treating NotFound as done, and stamps `secret_swept_at`. A row whose
   delete failed is left for the next pass. The sweep never lists or reads a
   Secret, so the worker's Role has no `get` or `list` on them.
@@ -271,7 +271,7 @@ results reported back.
 ## 3. Consequences
 
 - The findings schema, severities and the provider configuration change
-  incompatibly; kritik has not had a release that would make this costly.
+  incompatibly; kritique has not had a release that would make this costly.
 - Forgejo reaches the same acceptance list as GitHub in ADR-0002 §2.7.
 - Agentic reviews cost more per review and run longer; they are opt-in per
   repository in the operator's file only.

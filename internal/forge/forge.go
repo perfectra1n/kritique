@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // OpenPullRequest is a pull request as the forge lists it, in the same
@@ -70,21 +70,21 @@ type Issue struct {
 	URL   string
 }
 
-// StatusState is the outcome a commit status reports. kritik never reports
+// StatusState is the outcome a commit status reports. kritique never reports
 // failure for a review that ran: a review informs, it does not block.
 // StatusError is the one exception, for a review that did not run to a
 // verdict at all (canceled), which is not a finding to weigh.
 type StatusState string
 
-// States kritik reports.
+// States kritique reports.
 const (
 	StatusPending StatusState = "pending"
 	StatusSuccess StatusState = "success"
 	StatusError   StatusState = "error"
 )
 
-// StatusContext is the commit status context kritik reports under.
-const StatusContext = "kritik/review"
+// StatusContext is the commit status context kritique reports under.
+const StatusContext = "kritique/review"
 
 // MaxStatusDescription is the length, in characters, GitHub, and Forgejo
 // matching it, truncates a commit status description to.
@@ -179,7 +179,7 @@ type Client interface {
 	// CreateReview posts a non-blocking review with inline comments pinned
 	// to headSHA.
 	CreateReview(ctx context.Context, owner, repo string, number int, headSHA string, comments []InlineComment) error
-	// SetStatus sets the kritik commit status on sha.
+	// SetStatus sets the kritique commit status on sha.
 	SetStatus(ctx context.Context, owner, repo, sha string, state StatusState, description string) error
 	// LineRanges reports whether inline comments may span a range of
 	// lines, so a suggestion can replace more than one.

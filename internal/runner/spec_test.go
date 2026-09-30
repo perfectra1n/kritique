@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/home-operations/kritik/internal/repoconfig"
-	"github.com/home-operations/kritik/internal/review"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 const (
@@ -32,7 +32,7 @@ func agenticSpec() Spec {
 	s := reviewSpec()
 	s.Mode = ModeAgentic
 	s.Agent = &AgentLimits{MaxSteps: 30, MaxToolOutputBytes: 16 << 10, MaxTokens: 200000}
-	s.Model = &ModelEndpoint{GatewayURL: "http://kritik-gateway:8082", Model: "review"}
+	s.Model = &ModelEndpoint{GatewayURL: "http://kritique-gateway:8082", Model: "review"}
 	s.Prompt = &Prompt{
 		Repository: "acme/widgets",
 		PullRequest: repoconfig.PullRequest{Number: 7, Title: "Add b", Author: "octocat", Body: "Adds b.", BaseRef: "main", State: "open",
@@ -116,7 +116,7 @@ func TestSpecRoundTripKeepsAgentFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Mode != ModeAgentic || got.Agent.MaxSteps != 30 || got.Model.Model != "review" ||
-		got.Model.GatewayURL != "http://kritik-gateway:8082" || got.Prompt.PullRequest.Title != "Add b" || len(got.Prompt.Prior) != 1 {
+		got.Model.GatewayURL != "http://kritique-gateway:8082" || got.Prompt.PullRequest.Title != "Add b" || len(got.Prompt.Prior) != 1 {
 		t.Fatalf("round trip = %+v %+v %+v", got, got.Agent, got.Model)
 	}
 }

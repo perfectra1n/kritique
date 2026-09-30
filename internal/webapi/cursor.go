@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Page sizes: what a list returns without ?limit=, and the most it

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/model"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 // store records reqs as consecutive agent steps of run and decodes the

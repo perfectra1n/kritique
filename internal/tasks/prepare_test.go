@@ -34,7 +34,7 @@ func TestPrepare_Fails(t *testing.T) {
 		{"a prompt that does not parse", base + "prompt: p.md\n", map[string][]byte{"p.md": []byte("{{ .Subject")}, "prompt"},
 		{"a missing field on the sample", base + "promptInline: '{{ .Subject.Nope }}'\n", nil, "smoke test"},
 		{"a template call", base + "prompt: p.md\n", map[string][]byte{"p.md": []byte(`{{ template "x" }}`)}, "template is not available"},
-		{"a reserved name", base + "prompt: p.md\n", map[string][]byte{"p.md": []byte("{{ __kritik_iter 1 }}")}, "reserved"},
+		{"a reserved name", base + "prompt: p.md\n", map[string][]byte{"p.md": []byte("{{ __kritique_iter 1 }}")}, "reserved"},
 		{"a template over the size cap", base + "prompt: p.md\n", map[string][]byte{"p.md": []byte(strings.Repeat("x", MaxTemplateBytes+1))}, "limit"},
 		{"a prompt over its render cap", base + "promptInline: '{{ range 20000 }}{{ \"" + strings.Repeat("x", 20) + "\" }}{{ end }}'\n", nil,
 			"size limit"},

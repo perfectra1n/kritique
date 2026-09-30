@@ -146,7 +146,7 @@ const taskAttempts = 5
 
 // TaskDispatchArgs resolves the tasks one delivery may run, stored as the
 // task event EventID, and enqueues a TaskArgs for each that matches: ingest
-// stays cheap, since resolving reads the repository's .kritik.yaml
+// stays cheap, since resolving reads the repository's .kritique.yaml
 // through the forge.
 type TaskDispatchArgs struct {
 	TenantID     string `json:"tenant_id"`
@@ -163,7 +163,7 @@ func (TaskDispatchArgs) InsertOpts() river.InsertOpts {
 }
 
 // TaskArgs runs one task on one task event, with the task as the
-// repository's .kritik.yaml at ConfigSHA, the default branch tip it was
+// repository's .kritique.yaml at ConfigSHA, the default branch tip it was
 // matched at, defines it.
 type TaskArgs struct {
 	TenantID     string `json:"tenant_id"`

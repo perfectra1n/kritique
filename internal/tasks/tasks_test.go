@@ -27,8 +27,8 @@ context:
   search: [{name: code, query: "{{ .Subject.Title }}", k: 8}]
   related: [{name: dupes, query: "is:open {{ .Subject.Title }}", k: 5}]
   commands: [{name: owners, run: "cat .github/CODEOWNERS"}]
-system: .kritik/tasks/system.md.tmpl
-prompt: .kritik/tasks/triage.md.tmpl
+system: .kritique/tasks/system.md.tmpl
+prompt: .kritique/tasks/triage.md.tmpl
 fields:
   priority: {type: string, enum: [p0, p1, p2, p3]}
   area:     {type: string, enum: [api, web, runner, docs]}
@@ -37,7 +37,7 @@ fields:
 actions:
   comment:
     mode: sticky
-    template: .kritik/tasks/triage-comment.md.tmpl
+    template: .kritique/tasks/triage-comment.md.tmpl
     if: 'answer.fields.needsInfo || size(answer.labels.add) > 0'
   labels:
     propose: {add: ["bug", "enhancement", "area/*"], remove: ["needs-triage"]}
@@ -54,9 +54,9 @@ actions:
 // triageFiles are the files the triage example names.
 func triageFiles() map[string][]byte {
 	return map[string][]byte{
-		".kritik/tasks/system.md.tmpl":         []byte("Triage for {{ .Repo.Owner }}/{{ .Repo.Name }}."),
-		".kritik/tasks/triage.md.tmpl":         []byte("Triage {{ .Subject.Kind }} #{{ .Subject.Number }}: {{ .Subject.Title }}"),
-		".kritik/tasks/triage-comment.md.tmpl": []byte("{{ .Answer.Summary }} (priority {{ .Fields.priority }}; labels {{ join \", \" .Applied.AddLabels }})"),
+		".kritique/tasks/system.md.tmpl":         []byte("Triage for {{ .Repo.Owner }}/{{ .Repo.Name }}."),
+		".kritique/tasks/triage.md.tmpl":         []byte("Triage {{ .Subject.Kind }} #{{ .Subject.Number }}: {{ .Subject.Title }}"),
+		".kritique/tasks/triage-comment.md.tmpl": []byte("{{ .Answer.Summary }} (priority {{ .Fields.priority }}; labels {{ join \", \" .Applied.AddLabels }})"),
 	}
 }
 
@@ -99,8 +99,8 @@ func TestDecode(t *testing.T) {
 	if strings.Join(names, ",") != "priority,area,needsInfo,missing" {
 		t.Fatalf("fields in order %v", names)
 	}
-	if got := task.Files(); !reflect.DeepEqual(got, []string{".kritik/tasks/system.md.tmpl", ".kritik/tasks/triage.md.tmpl",
-		".kritik/tasks/triage-comment.md.tmpl"}) {
+	if got := task.Files(); !reflect.DeepEqual(got, []string{".kritique/tasks/system.md.tmpl", ".kritique/tasks/triage.md.tmpl",
+		".kritique/tasks/triage-comment.md.tmpl"}) {
 		t.Fatalf("Files() = %v", got)
 	}
 
@@ -408,7 +408,7 @@ func TestClip_Defaults(t *testing.T) {
 
 func TestStickyMarker(t *testing.T) {
 	t.Parallel()
-	if got := StickyMarker("triage"); got != "<!-- kritik:task:triage -->" {
+	if got := StickyMarker("triage"); got != "<!-- kritique:task:triage -->" {
 		t.Fatalf("StickyMarker = %q", got)
 	}
 }

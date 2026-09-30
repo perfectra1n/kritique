@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/jobtimeout"
-	"github.com/home-operations/kritik/internal/model"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 // fixture materialises testdata/full.yaml with its file references pointing
@@ -869,7 +869,7 @@ func TestRepositoryModeAgentReview(t *testing.T) {
       agent: { maxSteps: 12, maxToolOutputBytes: 4096, maxTokens: 250000, timeout: 3m, commands: [curl, rg], commandTimeout: 10s },
       incremental: { maxDeltaFiles: 5 },
       review: { instructions: [docs/rules.md], requireSuggestedFix: true,
-        templates: { summary: .kritik/summary.md.tmpl, inline: .kritik/inline.md.tmpl } } }`)))
+        templates: { summary: .kritique/summary.md.tmpl, inline: .kritique/inline.md.tmpl } } }`)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -880,10 +880,10 @@ func TestRepositoryModeAgentReview(t *testing.T) {
 			t.Fatalf("mode=%q agent=%+v incremental=%+v", s.Mode, s.Agent, s.Incremental)
 		}
 		if !s.Review.RequireSuggestedFix || len(s.Review.Instructions) != 1 || s.Review.Instructions[0] != "docs/rules.md" ||
-			s.Review.Templates.Summary != ".kritik/summary.md.tmpl" || s.Review.Templates.Inline != ".kritik/inline.md.tmpl" {
+			s.Review.Templates.Summary != ".kritique/summary.md.tmpl" || s.Review.Templates.Inline != ".kritique/inline.md.tmpl" {
 			t.Fatalf("review = %+v", s.Review)
 		}
-		if got := s.Review.Referenced(); strings.Join(got, ",") != "docs/rules.md,.kritik/summary.md.tmpl,.kritik/inline.md.tmpl" {
+		if got := s.Review.Referenced(); strings.Join(got, ",") != "docs/rules.md,.kritique/summary.md.tmpl,.kritique/inline.md.tmpl" {
 			t.Fatalf("referenced = %v", got)
 		}
 	})

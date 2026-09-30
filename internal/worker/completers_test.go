@@ -3,8 +3,8 @@ package worker
 import (
 	"testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/model"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 func TestCompletersRebuildOnChange(t *testing.T) {

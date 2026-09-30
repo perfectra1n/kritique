@@ -4,7 +4,7 @@ import "github.com/bmatcuk/doublestar/v4"
 
 // Matches reports whether in fires one of t's triggers and t's if holds
 // for it. A normalized trigger matches in.Event; a raw one matches
-// in.RawEvent whatever in.Event is. Whether the sender is kritik's own
+// in.RawEvent whatever in.Event is. Whether the sender is kritique's own
 // bot is the caller's to check.
 func (t *Task) Matches(in Input) (bool, error) {
 	fired := false

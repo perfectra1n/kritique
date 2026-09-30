@@ -1,4 +1,4 @@
-// Package tasks defines kritik's event-driven tasks: a trigger on a forge
+// Package tasks defines kritique's event-driven tasks: a trigger on a forge
 // event, a CEL guard, the context a run gathers, templated prompts, the
 // custom fields the model answers with and the actions its answer may lead
 // to. It parses and validates a task definition, clips it to the
@@ -464,7 +464,7 @@ const (
 )
 
 // Marker is the hidden text a sticky comment carries, with the task name.
-const Marker = "<!-- kritik:task:%s -->"
+const Marker = "<!-- kritique:task:%s -->"
 
 // StickyMarker is the marker of the named task's sticky comment.
 func StickyMarker(name string) string { return fmt.Sprintf(Marker, name) }

@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // ErrorCode is the machine-readable part of an API error.

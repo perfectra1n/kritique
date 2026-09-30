@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/agent"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 func taskSpec() Spec {
@@ -19,7 +19,7 @@ func taskSpec() Spec {
 		Version: SpecVersion, Kind: KindTask, RunID: "run-1", CloneURL: "https://forge.example.com/acme/widgets.git", Head: shaA,
 		Mode:  ModeAgentic,
 		Agent: &AgentLimits{MaxSteps: 5, MaxToolOutputBytes: 16 << 10, MaxTokens: 100000},
-		Model: &ModelEndpoint{GatewayURL: "http://kritik-gateway:8082", Model: "review"},
+		Model: &ModelEndpoint{GatewayURL: "http://kritique-gateway:8082", Model: "review"},
 		Task: &TaskPrompt{
 			Name: "triage", System: "system prompt", User: "Triage issue #7.", Schema: json.RawMessage(`{"type":"object"}`),
 			Tools: []string{"grep"}, Files: []TaskFiles{{Glob: "docs/*.md", Max: 1}},

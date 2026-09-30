@@ -131,7 +131,7 @@
     <header class="topbar">
       <a class="brand" href="#/">
         <img src="{basePath}/favicon.svg" width="22" height="22" alt="" />
-        <span class="wordmark">kritik</span>
+        <span class="wordmark">kritique</span>
       </a>
 
       <div class="spacer"></div>

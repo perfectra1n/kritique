@@ -1,0 +1,207 @@
+{{ template "chart.header" . }}
+
+{{- /* Hand-rolled badges instead of chart.badgesSection so release-please can
+stamp the version: its updater replaces only the first semver on an annotated
+line and would swallow a `-color` suffix as a prerelease, so each version badge
+uses the static/v1 query form (version followed by `&`), keeps the version out
+of its alt text, and carries its own annotation. */}}
+![Version](https://img.shields.io/static/v1?label=Version&message={{ .Version }}&color=informational&style=flat-square) <!-- x-release-please-version -->
+![Type: {{ .Type }}](https://img.shields.io/badge/Type-{{ .Type }}-informational?style=flat-square)
+![AppVersion](https://img.shields.io/static/v1?label=AppVersion&message={{ .AppVersion }}&color=informational&style=flat-square) <!-- x-release-please-version -->
+
+{{ template "chart.description" . }}
+
+{{ template "chart.homepageLine" . }}
+
+## Usage
+
+kritique ships as an OCI Helm chart. It needs a Postgres with
+[VectorChord](https://github.com/tensorchord/VectorChord) and pgvector, three
+roles, the configuration file, and the secrets the file references:
+
+```sh
+helm install kritique oci://ghcr.io/perfectra1n/charts/kritique \
+  --set database.app.existingSecret=kritique-postgres-app \
+  --set database.owner.existingSecret=kritique-postgres-credentials \
+  --set database.runner.existingSecret=kritique-postgres-runner \
+  --values my-values.yaml
+```
+
+where `my-values.yaml` carries `config.file` (the declarative configuration:
+providers, defaults, tenants with installations and repositories) and
+`secretMounts` for the GitHub App keys, webhook secrets and provider API
+keys the file references by path. Set `embedding.model` and a key to turn
+on the vector index and the similar-code context stage.
+
+### Database
+
+kritique separates three Postgres roles and refuses to start otherwise: the
+**owner** (runs migrations and applies configuration on the leader, must not
+be a superuser), the **application** role (`database.app.role`, must not own
+the tables so row-level security applies to it) and the **runner** role
+(`database.runner.role`, handed to runner Jobs, can only write its own run).
+The `vchord` (VectorChord) and `vector` (pgvector, whose types it builds on)
+extensions must exist before the first start, and `vchord` must be in
+`shared_preload_libraries`.
+
+On CloudNativePG, use TensorChord's image (`ghcr.io/tensorchord/cloudnative-vectorchord`,
+tagged `<postgres>-<vchord>`) or mount `ghcr.io/tensorchord/vchord-scratch` as an
+image-volume extension, load the library, make the bootstrap owner `owner`,
+declare the other two roles under `spec.managed.roles`, and let a `Database`
+resource create the extensions:
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kritique-postgres
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:18-standard-trixie
+  enableSuperuserAccess: false
+  bootstrap:
+    initdb:
+      database: kritique
+      owner: kritique
+      secret:
+        name: kritique-postgres-credentials
+  managed:
+    roles:
+      - name: kritique_app
+        login: true
+        passwordSecret:
+          name: kritique-postgres-app
+      - name: kritique_runner
+        login: true
+        passwordSecret:
+          name: kritique-postgres-runner
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: kritique
+spec:
+  name: kritique
+  owner: kritique
+  cluster:
+    name: kritique-postgres
+  extensions:
+    - name: vector
+      ensure: present
+    - name: vchord
+      ensure: present
+```
+
+with, on the `Cluster`:
+
+```yaml
+spec:
+  imageName: ghcr.io/tensorchord/cloudnative-vectorchord:18.6-1.1.1
+  postgresql:
+    shared_preload_libraries:
+      - vchord
+```
+
+Each `passwordSecret` is a basic-auth Secret; kritique reads a `uri` key from
+the Secrets named in `database.*.existingSecret`, so either use CNPG's
+generated `uri` for the owner or add one for the managed roles (an External
+Secrets `Password` generator plus a templated `uri` works).
+
+### Egress gateway
+
+Worker-capable pods serve a forward proxy on `gateway.port`, and runner Jobs
+are handed it as `HTTPS_PROXY` and `HTTP_PROXY`. With `networkPolicy.enabled`,
+a runner pod can then reach nothing but DNS, Postgres and that port: its git
+fetch and every command it runs go through the gateway, which allows a
+destination by hostname only. The forges of the file's installations are
+always allowed; `egress.allowHosts` in the configuration file adds the rest
+(registries, release APIs), and `egress.credentials` names hosts the gateway
+adds a bearer token to when a runner sends it a plain `http://` request, so
+the runner never holds the token:
+
+```yaml
+config:
+  file:
+    egress:
+      allowHosts:
+        - api.github.com
+        - "*.githubusercontent.com"
+        - ghcr.io
+      credentials:
+        api.github.com: { file: /var/run/secrets/kritique/github-token }
+```
+
+The same port is an agentic runner's model endpoint. The worker mints a
+token for each run, good for that run until its Job's deadline and revoked
+when it ends, and hands it to the pod in place of a provider key; the
+gateway answers each step through the tenant's provider with the key only
+the worker holds, refuses a step once the run's token budget or the
+tenant's `tokensPerMonth` is spent, and records the step's usage. Provider
+endpoints are therefore not in a runner's allowlist.
+
+`gateway.enabled: false` removes the listener and the Service and gives runner
+pods the `networkPolicy.egressPorts` to anywhere instead. Agentic reviews are
+refused without the gateway.
+
+### Runner tools
+
+An agentic repository's `agent.commands` lets the model run allowlisted
+binaries over a checkout of the head commit: to read a dependency bump's
+release notes and compare view with `curl`, or search with `rg` and `fd`.
+The chart's image has none of them, so no command is offered; point
+`runner.image` at the release's `-tools` tag, an Alpine image with all
+three. Every host `curl` reaches must pass the gateway, so add the
+release APIs and registries to `egress.allowHosts` (a GitHub
+installation already allows `github.com`):
+
+```yaml
+runner:
+  image: ghcr.io/perfectra1n/kritique:<version>-tools
+config:
+  file:
+    egress:
+      allowHosts: [api.github.com, "*.githubusercontent.com"]
+    tenants:
+      - slug: example
+        repositories:
+          - name: example/home-ops
+            mode: agentic
+            agent: { commands: [curl, fd, rg] }
+```
+
+A command runs without a shell, with an environment of `PATH`, its own
+`HOME` and the gateway, and the runner makes itself unreadable to it first,
+so a command cannot read the runner's credentials from `/proc`. The
+`-tools` image does have one, though, and `fd -x` or `rg --pre` can start
+it, and with it a script from the checkout: another reason to run runner
+Jobs under a sandboxed `runner.runtimeClassName`.
+
+### Runner sandbox
+
+Runner Jobs parse untrusted repository content and, in agentic mode, run what
+the model asks of them. Set `runner.runtimeClassName` to a sandboxed runtime
+the cluster offers (`gvisor` with runsc, or a Kata class) so a kernel
+vulnerability reachable from the pod is contained by the sandbox rather than
+the node. It is advised, not required: without it the pod's other bounds
+still hold (no long-lived secret, egress by hostname through the gateway,
+read-only root, no capabilities), but the container runtime alone separates
+it from the node.
+
+### Topology
+
+`roles.all` runs everything in one Deployment and is the usual shape. For a
+split, disable it and enable `roles.ingest` (webhooks) and `roles.worker`
+(queues, runner Jobs, leader duties) with their own replica counts. Any
+number of replicas may run; one holds the leader lock at a time.
+
+{{ template "chart.maintainersSection" . }}
+
+{{ template "chart.sourcesSection" . }}
+
+{{ template "chart.requirementsSection" . }}
+
+{{ template "chart.valuesSection" . }}
+
+---
+
+_This README is generated by [helm-docs](https://github.com/norwoodj/helm-docs) from `Chart.yaml` and `values.yaml`. Edit those (or `README.md.gotmpl`) and run `mise run generate`._

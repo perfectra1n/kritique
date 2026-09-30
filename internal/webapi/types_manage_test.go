@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"maps"
 
-	"github.com/home-operations/kritik/internal/auth"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 var goldenAccount = Account{ID: "acct-1", DisplayName: "Ada", Email: "ada@example.com", AvatarURL: "https://img.example/a.png"}
@@ -14,7 +14,7 @@ var goldenAccount = Account{ID: "acct-1", DisplayName: "Ada", Email: "ada@exampl
 func init() {
 	maps.Copy(goldens, map[string]any{
 		"meta": Meta{
-			Version: "v1.2.3", Management: true, WebURL: "https://kritik.example",
+			Version: "v1.2.3", Management: true, WebURL: "https://kritique.example",
 			SignIn: []auth.ProviderInfo{{Name: "corp", Type: configfile.SignInOIDC, DisplayName: "Corp"}},
 		},
 		"tenant_config": TenantConfig{

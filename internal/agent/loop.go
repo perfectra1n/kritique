@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/home-operations/kritik/internal/model"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 // Limits bounds a Run: how many steps it may take, how much of a tool's

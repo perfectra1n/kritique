@@ -4,7 +4,7 @@
 // delivered them. Review jobs are unique on the head SHA, so a head the
 // webhook already enqueued is skipped as a duplicate, never reviewed twice.
 // An installation's first poll records the pull requests last updated
-// before kritik knew the installation as a baseline instead of reviewing
+// before kritique knew the installation as a baseline instead of reviewing
 // them: no webhook for them was missed, and on a large install reviewing
 // them all would be one burst of model calls nobody asked for.
 package poller
@@ -18,12 +18,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/ingest"
-	"github.com/home-operations/kritik/internal/metrics"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/ingest"
+	"github.com/perfectra1n/kritique/internal/metrics"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // Forges builds a forge client per installation, as the worker does.

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/executor"
+	"github.com/perfectra1n/kritique/internal/executor"
 )
 
 func TestSmallHelpers(t *testing.T) {
@@ -40,14 +40,14 @@ func TestRunOutcomeAndMention(t *testing.T) {
 		}
 	}
 	mentions := map[string]bool{
-		"@kritik please":     true,
-		"hey @Kritik, why?":  true,
-		"email me@kritik.io": false,
-		"@kritikbot no":      false,
-		"no mention":         false,
+		"@kritique please":     true,
+		"hey @Kritique, why?":  true,
+		"email me@kritique.io": false,
+		"@kritiquebot no":      false,
+		"no mention":           false,
 	}
 	for body, want := range mentions {
-		if got := mentioned(body, "kritik"); got != want {
+		if got := mentioned(body, "kritique"); got != want {
 			t.Errorf("mentioned(%q) = %v, want %v", body, got, want)
 		}
 	}

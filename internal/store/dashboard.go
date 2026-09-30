@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // ErrDashboardConflict is a dashboard tenant write whose expected revision
@@ -78,7 +78,7 @@ func listDashboardTenants(
 // before it: dashboard_tenants has no constraint across rows, and two
 // tenants claiming one installation name would each merge on their own.
 func LockDashboardWrites(ctx context.Context, tx pgx.Tx) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('kritik:dashboard-tenants', 0))`); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('kritique:dashboard-tenants', 0))`); err != nil {
 		return fmt.Errorf("store: lock dashboard tenants: %w", err)
 	}
 	return nil
@@ -159,9 +159,9 @@ func (s *Store) DeleteDashboardTenant(ctx context.Context, tx pgx.Tx, slug strin
 		}
 		return fmt.Errorf("store: dashboard tenant %s: %w", slug, ErrNotFound)
 	}
-	// The kritik_config trigger fires on insert and update only; a delete
+	// The kritique_config trigger fires on insert and update only; a delete
 	// announces itself, delivered on commit like the trigger's.
-	if _, err := tx.Exec(ctx, `SELECT pg_notify('kritik_config', $1)`, slug); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_notify('kritique_config', $1)`, slug); err != nil {
 		return fmt.Errorf("store: notify dashboard tenant %s deleted: %w", slug, err)
 	}
 	return nil

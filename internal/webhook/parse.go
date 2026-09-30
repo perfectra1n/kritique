@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
-// stateOpen is the pull request state kritik acts on; everything else is
+// stateOpen is the pull request state kritique acts on; everything else is
 // closed, merged or not.
 const stateOpen = "open"
 
@@ -38,7 +38,7 @@ const (
 // Kind is what a webhook is about, after the forge-specific shape is gone.
 type Kind string
 
-// Event kinds kritik acts on. Anything else parses to KindIgnored.
+// Event kinds kritique acts on. Anything else parses to KindIgnored.
 const (
 	KindPing         Kind = "ping"
 	KindPullRequest  Kind = "pull_request"
@@ -249,7 +249,7 @@ type envelope struct {
 }
 
 // withEnvelope stamps the raw event name and the payload's sender on a
-// parsed event. Events kritik does not model also get the payload's action
+// parsed event. Events kritique does not model also get the payload's action
 // and repository, so a consumer of the raw delivery can still route them.
 // A body that is not JSON leaves an ignored event bare rather than failing
 // the delivery.
@@ -447,7 +447,7 @@ func parsePullRequestEvent(delivery string, body []byte) (Event, error) {
 // parseIssueEvent decodes an "issues" event. Forgejo's issue payload also
 // fits here, with its label and assignee changes as actions. An issue that
 // is really a pull request is ignored: its changes also arrive as
-// pull_request events, which are what kritik models.
+// pull_request events, which are what kritique models.
 func parseIssueEvent(delivery string, body []byte) (Event, error) {
 	var p struct {
 		Action     string `json:"action"`

@@ -39,11 +39,11 @@ test.describe('router: parse()', () => {
   });
 
   test('#/t/acme/repos/<owner>/<repo>', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/repos/kritik/kritik', {
+    await expectRoute(page, '#/t/acme/repos/kritique/kritique', {
       name: 'repo',
       slug: 'acme',
-      owner: 'kritik',
-      repo: 'kritik',
+      owner: 'kritique',
+      repo: 'kritique',
     });
   });
 
@@ -52,17 +52,17 @@ test.describe('router: parse()', () => {
   });
 
   test('#/t/acme/pulls/<owner>/<repo>/<n> parses the number as a JS number', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/pulls/kritik/kritik/42', {
+    await expectRoute(page, '#/t/acme/pulls/kritique/kritique/42', {
       name: 'pull',
       slug: 'acme',
-      owner: 'kritik',
-      repo: 'kritik',
+      owner: 'kritique',
+      repo: 'kritique',
       number: 42,
     });
   });
 
   test('a non-numeric pull number falls back to the tenant overview', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/pulls/kritik/kritik/abc', { name: 'tenant', slug: 'acme' });
+    await expectRoute(page, '#/t/acme/pulls/kritique/kritique/abc', { name: 'tenant', slug: 'acme' });
   });
 
   test('#/t/acme/reviews/<id> with no tab', async ({ page }) => {

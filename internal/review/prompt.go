@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/home-operations/kritik/internal/contextpack"
+	"github.com/perfectra1n/kritique/internal/contextpack"
 )
 
 // Input is everything the prompt is built from.
@@ -69,7 +69,7 @@ const maxBodyChars = 4000
 const System = systemLead + `You see the diff of the change and nothing else
 about the repository: judge what the diff shows and do not guess at what it does not.` + systemRules
 
-const systemLead = "You are kritik, a code reviewer for pull requests. "
+const systemLead = "You are kritique, a code reviewer for pull requests. "
 
 // systemRules is what both modes' reviewers are told after what they can
 // see.

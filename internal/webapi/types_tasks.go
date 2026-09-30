@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // TaskRun is one task run as lists show it. DurationMs is null until it

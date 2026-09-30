@@ -16,9 +16,9 @@
       "extra-files": [
         {
           "type": "generic",
-          "path": "charts/kritik/Chart.yaml"
+          "path": "charts/kritique/Chart.yaml"
         },
-        "charts/kritik/README.md"
+        "charts/kritique/README.md"
       ]
     }
   },

@@ -10,7 +10,7 @@
 ## 1. Context
 
 ADR-0003 renders comments from Jinja2 templates through gonja, and lets a
-repository replace either template from `.kritik.yaml`. A repository
+repository replace either template from `.kritique.yaml`. A repository
 template runs in the worker, which serves every tenant, so it must not be
 able to stall or exhaust that process. gonja was not built for untrusted
 templates: it renders several constructs into private, uncapped buffers,
@@ -60,7 +60,7 @@ through the function map:
   multiply it.
 - **Other templates.** `template`, `define` and `block` are refused: a
   template that invokes others can fan out exponentially with no loop and
-  no output for the guards to see. Identifiers starting with `__kritik_`
+  no output for the guards to see. Identifiers starting with `__kritique_`
   are reserved for the guards.
 
 The output cap of 64 KiB, the two-second deadline, the fallback to the
@@ -74,11 +74,11 @@ so a render stops soon after it passes.
 follow from two properties of the language rather than from a list of
 what gonja happens to do. Templates use the syntax the rest of the fleet
 and every Helm chart use. One dependency of the fleet replaces one that
-only kritik carried.
+only kritique carried.
 
 **Negative.** A repository template written for ADR-0003 as merged no
 longer parses and falls back to the default with a note until it is
-rewritten; no such template exists outside kritik's own tests. Go
+rewritten; no such template exists outside kritique's own tests. Go
 templates are more verbose than Jinja2 for the same output.
 
 ## 4. Alternatives considered

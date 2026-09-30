@@ -15,7 +15,7 @@ test.describe('signed-out shell', () => {
     );
     await page.goto('/');
     await expect(page).toHaveURL(/#\/signin$/);
-    await expect(page.locator('.signin-card h1')).toHaveText('kritik');
+    await expect(page.locator('.signin-card h1')).toHaveText('kritique');
 
     const link = page.locator('.signin-provider');
     await expect(link).toHaveAttribute('href', /return_to=%23%2F$/);
@@ -32,7 +32,7 @@ test.describe('signed-out shell', () => {
     );
     await page.goto('/#/t/acme/repos');
     await expect(page).toHaveURL(/#\/signin$/);
-    await expect(page.locator('.signin-card h1')).toHaveText('kritik');
+    await expect(page.locator('.signin-card h1')).toHaveText('kritique');
 
     const link = page.locator('.signin-provider');
     await expect(link).toHaveAttribute('href', /return_to=%23%2Ft%2Facme%2Frepos/);
@@ -50,7 +50,7 @@ test.describe('signed-out shell', () => {
       }),
     );
     await page.goto('/#/signin/');
-    await expect(page.locator('.signin-card h1')).toHaveText('kritik');
+    await expect(page.locator('.signin-card h1')).toHaveText('kritique');
 
     const link = page.locator('.signin-provider');
     await expect(link).toHaveAttribute('href', /return_to=%23%2F$/);
@@ -152,7 +152,7 @@ test.describe('theme toggle', () => {
     await page.goto('/');
     const button = page.locator('.actions button[title^="Theme:"]');
     const currentClass = () => page.evaluate(() => document.documentElement.className);
-    const stored = () => page.evaluate(() => localStorage.getItem('kritik-theme'));
+    const stored = () => page.evaluate(() => localStorage.getItem('kritique-theme'));
 
     // auto, resolved against a light-scheme test environment
     await expect.poll(currentClass).toBe('light');

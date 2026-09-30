@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // TaskRunStatus is where a task run is, as task_runs.status spells it.
@@ -313,7 +313,7 @@ func StartTaskRunner(ctx context.Context, tx pgx.Tx, id string) error {
 	return nil
 }
 
-// TaskConfigRow is the .kritik.yaml a task dispatch last resolved at the
+// TaskConfigRow is the .kritique.yaml a task dispatch last resolved at the
 // repository's default branch tip: the commit and the file, nil when the
 // tip had none.
 type TaskConfigRow struct {
@@ -322,7 +322,7 @@ type TaskConfigRow struct {
 	ResolvedAt time.Time
 }
 
-// SaveRepoTaskConfig records doc as the repository's .kritik.yaml at the
+// SaveRepoTaskConfig records doc as the repository's .kritique.yaml at the
 // default branch tip commit, nil when it has none; a commit already
 // recorded is left as it is.
 func SaveRepoTaskConfig(ctx context.Context, tx pgx.Tx, repositoryID, commit string, doc []byte) error {
@@ -338,7 +338,7 @@ func SaveRepoTaskConfig(ctx context.Context, tx pgx.Tx, repositoryID, commit str
 	return nil
 }
 
-// RepoTaskConfig reads the .kritik.yaml a task dispatch last resolved for
+// RepoTaskConfig reads the .kritique.yaml a task dispatch last resolved for
 // the repository; ErrNotFound when none has yet.
 func RepoTaskConfig(ctx context.Context, tx pgx.Tx, repositoryID string) (TaskConfigRow, error) {
 	var row TaskConfigRow

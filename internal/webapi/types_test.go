@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/auth"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/repoconfig"
-	"github.com/home-operations/kritik/internal/review"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/transcript"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/*.golden.json")
@@ -125,7 +125,7 @@ var goldens = map[string]any{
 				return s
 			}(),
 			Filter: "!pr.draft", SkipPaths: []string{"docs/**"},
-			Dropped: []string{`.kritik.yaml: mode "single" was dropped; allowed: agentic`},
+			Dropped: []string{`.kritique.yaml: mode "single" was dropped; allowed: agentic`},
 		},
 		IndexRuns: []IndexRun{goldenIndexRun},
 		Tasks: []TaskDef{
@@ -176,12 +176,12 @@ var goldens = map[string]any{
 				Stage: "definitions", Path: "b.go", Language: "go", Symbol: "F", Kind: "func", Scope: "pkg", StartLine: 1,
 				EndLine: 9, Ref: "F", Bytes: 120,
 			}},
-			RepoNotes: []string{"docs/missing.md: not found"}, RepoFiles: []RepoFile{{Path: ".kritik.yaml", Size: 42}}, CreatedAt: t0,
+			RepoNotes: []string{"docs/missing.md: not found"}, RepoFiles: []RepoFile{{Path: ".kritique.yaml", Size: 42}}, CreatedAt: t0,
 		},
 	},
 	"review_diff": ReviewDiff{Diff: "diff --git a/a.go b/a.go\n", DeltaDiff: ""},
 	"review_raw": ReviewRaw{
-		RepoFiles: map[string]string{".kritik.yaml": "mode: agentic\n"},
+		RepoFiles: map[string]string{".kritique.yaml": "mode: agentic\n"},
 		Stages: []ContextChunk{{
 			Stage: "definitions", Path: "b.go", Language: "go", Symbol: "F", Kind: "func", Scope: "pkg", StartLine: 1, EndLine: 9,
 			Ref: "F", Text: "func F() {}",

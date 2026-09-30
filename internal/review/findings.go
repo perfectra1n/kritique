@@ -1,5 +1,5 @@
 // Package review turns a context pack into a prompt, a model answer into
-// findings, and findings into the comments kritik posts. It knows nothing
+// findings, and findings into the comments kritique posts. It knows nothing
 // about forges or models beyond their interfaces.
 //
 // # Templates
@@ -11,7 +11,7 @@
 // available: env, filesystem, network, random, uniqueid, checksum and
 // crypto, and the template, define and block actions, so a template can
 // read no file and call no other template. Rendering is bounded, and a
-// template that steps outside a bound falls back to kritik's default with
+// template that steps outside a bound falls back to kritique's default with
 // a note:
 //
 //   - output of 64 KiB, marker included;
@@ -20,7 +20,7 @@
 //     for repeat, indent, nindent, join, replace, regexReplaceAll,
 //     regexReplaceAllLiteral, seq, until, untilStep and printf, an estimate
 //     of what it allocates; printf refuses a width or precision given as *;
-//   - two seconds per render; identifiers starting with __kritik_ are
+//   - two seconds per render; identifiers starting with __kritique_ are
 //     reserved.
 //
 // The summary template's dot is a RenderData, the inline template's a
@@ -87,7 +87,7 @@ type Finding struct {
 	// AgentPrompt is one paragraph telling a coding agent how to apply the
 	// fix.
 	AgentPrompt string `json:"agent_prompt,omitempty"`
-	// URL links the finding's lines at the head commit. kritik sets it
+	// URL links the finding's lines at the head commit. kritique sets it
 	// when rendering; the model never does.
 	URL string `json:"-"`
 }
@@ -187,7 +187,7 @@ const (
 // JSON Schema types the answer shapes use more than once.
 const schemaObject, schemaString = "object", "string"
 
-// jsonSchema is the subset of JSON Schema kritik's answer shapes use.
+// jsonSchema is the subset of JSON Schema kritique's answer shapes use.
 type jsonSchema struct {
 	Type        string                 `json:"type"`
 	Description string                 `json:"description,omitempty"`
@@ -285,7 +285,7 @@ func Schema() json.RawMessage { return slices.Clone(findingsSchema) }
 // SchemaStrict is Schema with suggested_fix required on every finding.
 func SchemaStrict() json.RawMessage { return slices.Clone(findingsSchemaStrict) }
 
-// Parse decodes the model's JSON and drops findings kritik cannot post: an
+// Parse decodes the model's JSON and drops findings kritique cannot post: an
 // unknown severity, a missing field, a missing fix when opts require one,
 // or a line the diff does not add or keep. Dropped findings are returned
 // with the reason so they can be logged and counted, never silently lost.

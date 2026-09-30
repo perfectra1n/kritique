@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 func TestTaskRunAppliedJSON(t *testing.T) {

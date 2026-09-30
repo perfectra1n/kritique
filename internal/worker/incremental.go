@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/review"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // priorReview is a pull request's last completed review; id is "" when it

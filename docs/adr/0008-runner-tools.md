@@ -28,7 +28,7 @@ the sources. Two ways to get there were weighed:
   nothing usable.
 - **Let the model use command-line tools.** `curl` against the release
   API or a registry, `rg` and `fd` over a checkout. The model composes the
-  lookup per case; kritik owns no ecosystem knowledge. This is what Kodus
+  lookup per case; kritique owns no ecosystem knowledge. This is what Kodus
   does (`rg`, `fd`, `find` in a sandbox per review) and what Mira avoids.
 
 The second is chosen. Its cost is model steps and latency on every review
@@ -132,7 +132,7 @@ ADR-0004 removes.
 ## 3. Consequences
 
 **Positive.** A reviewer that reads the upstream, with no ecosystem code
-in kritik. A tighter network boundary than today for every runner, agentic
+in kritique. A tighter network boundary than today for every runner, agentic
 or not, since the direct 443 egress goes. Searches at `rg` speed on large
 repositories.
 

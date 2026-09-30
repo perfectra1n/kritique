@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // orgs is a fake Membership answering from a fixed table, counting calls.

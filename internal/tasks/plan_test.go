@@ -164,7 +164,7 @@ func TestPlan_Comment(t *testing.T) {
 	p := prepared(t, triage, triageFiles())
 	facts := Facts{RepoLabels: []string{"bug", "priority/p1"}, UserAllowed: func(string) bool { return true }}
 	a := Answer{
-		Summary: "Summary <!-- kritik:task:other --> here", Fields: map[string]any{"priority": "p1", "area": "api", "needsInfo": false},
+		Summary: "Summary <!-- kritique:task:other --> here", Fields: map[string]any{"priority": "p1", "area": "api", "needsInfo": false},
 		Labels: LabelChanges{Add: []string{"bug"}},
 	}
 	got, err := p.Plan(SampleInput(), a, facts)
@@ -174,7 +174,7 @@ func TestPlan_Comment(t *testing.T) {
 	if got.Comment == nil || got.Comment.Mode != CommentSticky {
 		t.Fatalf("comment = %+v", got.Comment)
 	}
-	if strings.Contains(got.Comment.Body, "<!-- kritik") || !strings.Contains(got.Comment.Body, "labels bug, priority/p1") {
+	if strings.Contains(got.Comment.Body, "<!-- kritique") || !strings.Contains(got.Comment.Body, "labels bug, priority/p1") {
 		t.Fatalf("comment body %q", got.Comment.Body)
 	}
 

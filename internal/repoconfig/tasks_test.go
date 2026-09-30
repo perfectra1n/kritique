@@ -6,18 +6,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 func TestParse_Tasks(t *testing.T) {
 	t.Parallel()
-	f, _, err := Parse([]byte("tasks:\n  - name: triage\n    on: [{ issue: [opened] }]\n    prompt: .kritik/triage.md\n" +
-		"    actions: { comment: { template: .kritik/comment.md } }\n"))
+	f, _, err := Parse([]byte("tasks:\n  - name: triage\n    on: [{ issue: [opened] }]\n    prompt: .kritique/triage.md\n" +
+		"    actions: { comment: { template: .kritique/comment.md } }\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := f.Referenced(); !slices.Equal(got, []string{".kritik/triage.md", ".kritik/comment.md"}) {
+	if got := f.Referenced(); !slices.Equal(got, []string{".kritique/triage.md", ".kritique/comment.md"}) {
 		t.Fatalf("Referenced() = %v", got)
 	}
 	for name, c := range map[string]struct{ doc, want string }{

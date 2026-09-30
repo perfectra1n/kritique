@@ -42,12 +42,12 @@ func (f *fakeRunStore) MarkRunSecretsSwept(_ context.Context, tenantID string, i
 }
 
 func runSecret(runID string) *corev1.Secret {
-	return &corev1.Secret{Name: jobName(runID), Namespace: "kritik"}
+	return &corev1.Secret{Name: jobName(runID), Namespace: "kritique"}
 }
 
 func secretNames(t *testing.T, client *fake.Clientset) []string {
 	t.Helper()
-	list, err := client.CoreV1().Secrets("kritik").List(t.Context(), metav1.ListOptions{})
+	list, err := client.CoreV1().Secrets("kritique").List(t.Context(), metav1.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestDeleteRunSecret(t *testing.T) {
 }
 
 func TestSweepRunSecrets(t *testing.T) {
-	client := fake.NewClientset(runSecret(runA), runSecret(runC), &corev1.Secret{Name: "kritik-postgres-runner", Namespace: "kritik"})
+	client := fake.NewClientset(runSecret(runA), runSecret(runC), &corev1.Secret{Name: "kritique-postgres-runner", Namespace: "kritique"})
 	st := &fakeRunStore{
 		pending: map[string][]string{"alpha": {runA, runB}, "beta": {runC}},
 		marked:  map[string][]string{},
@@ -110,7 +110,7 @@ func TestSweepRunSecrets(t *testing.T) {
 	if want := map[string][]string{"alpha": {runA, runB}, "beta": {runC}}; !maps.EqualFunc(st.marked, want, slices.Equal) {
 		t.Fatalf("marked = %v, want %v", st.marked, want)
 	}
-	if got, want := secretNames(t, client), []string{"kritik-postgres-runner"}; !slices.Equal(got, want) {
+	if got, want := secretNames(t, client), []string{"kritique-postgres-runner"}; !slices.Equal(got, want) {
 		t.Fatalf("left = %v, want %v", got, want)
 	}
 }

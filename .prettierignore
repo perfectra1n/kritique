@@ -1,5 +1,5 @@
 *.toml
 CHANGELOG.md
 .release-please-manifest.json
-charts/kritik/README.md
-charts/kritik/values.schema.json
+charts/kritique/README.md
+charts/kritique/values.schema.json

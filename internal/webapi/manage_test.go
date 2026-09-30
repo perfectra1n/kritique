@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/auth"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/sealbox"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/sealbox"
 )
 
 // mutate builds a state-changing request that passes the same-origin
@@ -22,13 +22,13 @@ func mutate(method, path, body string) *http.Request {
 		r = strings.NewReader(body)
 	}
 	req := httptest.NewRequest(method, path, r)
-	req.Header.Set("Origin", "https://kritik.example")
-	req.Header.Set("X-Kritik", "1")
+	req.Header.Set("Origin", "https://kritique.example")
+	req.Header.Set("X-Kritique", "1")
 	return req
 }
 
 func TestMetaNeedsNoSession(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	w := ts.as(nil, httptest.NewRequest("GET", "/api/v1/meta", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body)
@@ -37,7 +37,7 @@ func TestMetaNeedsNoSession(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
 		t.Fatal(err)
 	}
-	if m.Management || m.WebURL != "https://kritik.example" || m.SignIn == nil {
+	if m.Management || m.WebURL != "https://kritique.example" || m.SignIn == nil {
 		t.Errorf("meta = %+v", m)
 	}
 	if w.Header().Get("Cache-Control") != "no-store" {
@@ -46,7 +46,7 @@ func TestMetaNeedsNoSession(t *testing.T) {
 }
 
 func TestManagementRefusals(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	operator := &auth.Principal{Operator: true}
 	admin := memberOf(t, ts.file, "alpha", auth.RoleAdmin)
 	member := memberOf(t, ts.file, "alpha", auth.RoleMember)
@@ -100,7 +100,7 @@ func TestManagementRefusals(t *testing.T) {
 }
 
 func TestCreateRefusesAFileSlug(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	key := make([]byte, 32)
 	kr, err := sealbox.NewKeyring(key)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestCreateRefusesAFileSlug(t *testing.T) {
 }
 
 func TestManagementNeedsSameOrigin(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	operator := &auth.Principal{Operator: true}
 	for _, route := range []struct{ method, path string }{
 		{"POST", "/api/v1/tenants"}, {"PUT", "/api/v1/tenants/alpha/config"}, {"DELETE", "/api/v1/tenants/alpha"},
@@ -125,16 +125,16 @@ func TestManagementNeedsSameOrigin(t *testing.T) {
 	} {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
 			req := httptest.NewRequest(route.method, route.path, strings.NewReader("{}"))
-			req.Header.Set("Origin", "https://kritik.example")
+			req.Header.Set("Origin", "https://kritique.example")
 			if w := ts.as(operator, req); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "csrf") {
-				t.Errorf("without X-Kritik: %d %s, want 403 csrf", w.Code, w.Body)
+				t.Errorf("without X-Kritique: %d %s, want 403 csrf", w.Code, w.Body)
 			}
 		})
 	}
 }
 
 func TestFileTenantConfigIsRedacted(t *testing.T) {
-	ts := newTestServer(t, "https://kritik.example")
+	ts := newTestServer(t, "https://kritique.example")
 	w := ts.as(memberOf(t, ts.file, "alpha", auth.RoleAdmin), httptest.NewRequest("GET", "/api/v1/tenants/alpha/config", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", w.Code, w.Body)
@@ -147,7 +147,7 @@ func TestFileTenantConfigIsRedacted(t *testing.T) {
 		slices.ContainsFunc(c.Policy, func(p FieldPolicy) bool { return p.Editable }) {
 		t.Errorf("config = %+v", c)
 	}
-	if body := w.Body.String(); strings.Contains(body, "KRITIK_TEST_TOKEN") || !strings.Contains(body, `"token":{"set":true}`) {
+	if body := w.Body.String(); strings.Contains(body, "KRITIQUE_TEST_TOKEN") || !strings.Contains(body, `"token":{"set":true}`) {
 		t.Errorf("spec is not redacted: %s", body)
 	}
 	if in := c.Inherited; in.Tenant.Mode != configfile.ReviewSingle || in.TenantSources["mode"] != configfile.SourceDefault ||

@@ -15,16 +15,16 @@ import (
 	"github.com/riverqueue/river"
 	"go.yaml.in/yaml/v3"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/executor"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/repoconfig"
-	"github.com/home-operations/kritik/internal/runner"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/taskrun"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/taskrun"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 func taskDefs(t *testing.T, doc string) []tasks.Task {
@@ -41,9 +41,9 @@ func TestIsBot(t *testing.T) {
 		sender, bot string
 		want        bool
 	}{
-		{"kritik[bot]", "kritik[bot]", true},
-		{"Kritik[bot]", "kritik[bot]", true},
-		{"devin", "kritik[bot]", false},
+		{"kritique[bot]", "kritique[bot]", true},
+		{"Kritique[bot]", "kritique[bot]", true},
+		{"devin", "kritique[bot]", false},
 		{"", "", false},
 	}
 	for _, tt := range tests {
@@ -255,7 +255,7 @@ func TestSpend(t *testing.T) {
 // TestDraftGuard checks the pr-area-labels recipe's draft guard against the
 // subject dispatch builds from the forge.
 func TestDraftGuard(t *testing.T) {
-	doc, err := os.ReadFile("../../docs/recipes/pr-area-labels/.kritik.yaml")
+	doc, err := os.ReadFile("../../docs/recipes/pr-area-labels/.kritique.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

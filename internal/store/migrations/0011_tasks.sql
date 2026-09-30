@@ -25,7 +25,7 @@ CREATE UNIQUE INDEX task_events_delivery_idx ON task_events (installation_id, de
 
 -- task_runs is one task run on one event: queued when it is enqueued,
 -- running, then succeeded, failed or skipped, with the answer's fields and
--- the actions the model proposed, kritik applied and kritik dropped, each
+-- the actions the model proposed, kritique applied and kritique dropped, each
 -- dropped one with its reason.
 CREATE TABLE task_runs (
     id             uuid        PRIMARY KEY DEFAULT gen_random_uuid(),

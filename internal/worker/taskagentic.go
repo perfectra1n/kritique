@@ -13,13 +13,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/executor"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/runner"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // agentic runs the task's agent in a runner over the commit the task was
@@ -59,7 +59,7 @@ func (r *taskRunner) agentic(ctx context.Context, data tasks.PromptData, labels 
 // given; otherwise the caller holds the slot until the run ends.
 func (r *taskRunner) agenticSlot(ctx context.Context) (store.TaskRunResult, func(), error) {
 	if r.w.GatewayURL == "" || r.w.Executor == nil {
-		return failed("", errors.New("worker: agentic tasks need the model gateway (KRITIK_GATEWAY_URL)")), nil, nil
+		return failed("", errors.New("worker: agentic tasks need the model gateway (KRITIQUE_GATEWAY_URL)")), nil, nil
 	}
 	ref, _ := r.models()
 	if ref == "" {

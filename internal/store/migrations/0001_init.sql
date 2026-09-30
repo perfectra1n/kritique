@@ -1,4 +1,4 @@
--- kritik's schema. Tenant-scoped tables carry tenant_id and a row-level
+-- kritique's schema. Tenant-scoped tables carry tenant_id and a row-level
 -- security policy keyed on the transaction-local setting app.tenant_id. The
 -- policy normalises the setting with NULLIF because after a transaction-local
 -- set_config ends the setting reads back as '' rather than NULL, and ''::uuid
@@ -78,7 +78,7 @@ CREATE TABLE config_state (
     leader       text        NOT NULL
 );
 
--- body, labels ([{name, color}]) and merged feed the .kritik.yaml filter's
+-- body, labels ([{name, color}]) and merged feed the .kritique.yaml filter's
 -- pr variable, which the worker rebuilds after the runner; body also goes
 -- into the review prompt.
 CREATE TABLE pull_requests (
@@ -165,7 +165,7 @@ CREATE INDEX runner_runs_tenant_id_idx ON runner_runs (tenant_id);
 CREATE INDEX runner_runs_secret_pending_idx ON runner_runs (tenant_id, created_at) WHERE secret_swept_at IS NULL;
 
 -- context_packs is what a review's Job produced: the diff, the changed
--- paths, the context stages, .kritik.yaml and the files it and the operator
+-- paths, the context stages, .kritique.yaml and the files it and the operator
 -- name as read from the merge-base tree (repo_files; repo_notes says what
 -- could not be read), and for a re-review the head of the last completed
 -- review when the runner could fetch it (prior_head_sha, NULL when there

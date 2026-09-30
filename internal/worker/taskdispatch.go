@@ -11,19 +11,19 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/repoconfig"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/taskrun"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/taskrun"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // taskRepo is the repository a task event concerns, as the store has it.
 type taskRepo struct {
 	id, name, defaultBranch, installation string
 	externalID                            int64
-	// configSHA is the default branch tip whose .kritik.yaml a dispatch
+	// configSHA is the default branch tip whose .kritique.yaml a dispatch
 	// last recorded, "" before the first.
 	configSHA string
 }
@@ -47,7 +47,7 @@ func loadTaskRepo(ctx context.Context, tx pgx.Tx, id string) (taskRepo, error) {
 	return r, nil
 }
 
-// repoConfigs caches .kritik.yaml by repository and commit: a commit's file
+// repoConfigs caches .kritique.yaml by repository and commit: a commit's file
 // never changes, and every event on a quiet default branch reads the same
 // one.
 type repoConfigs struct {
@@ -58,7 +58,7 @@ type repoConfigs struct {
 // repoConfigsMax bounds the cache; past it, it starts over.
 const repoConfigsMax = 512
 
-// read returns the .kritik.yaml of owner/repo at sha, nil when it has none
+// read returns the .kritique.yaml of owner/repo at sha, nil when it has none
 // or one too large to use.
 func (c *repoConfigs) read(ctx context.Context, client forge.Client, installation, owner, repo, sha string) ([]byte, error) {
 	key := installation + "\x00" + owner + "/" + repo + "\x00" + sha
@@ -118,7 +118,7 @@ func isBot(sender, botLogin string) bool {
 
 // TaskDispatch works task_dispatch jobs: it resolves the tasks a stored
 // delivery runs, from the operator's settings and the repository's
-// .kritik.yaml at the default branch tip, and enqueues one task job for
+// .kritique.yaml at the default branch tip, and enqueues one task job for
 // each that matches.
 type TaskDispatch struct {
 	river.WorkerDefaults[jobs.TaskDispatchArgs]
@@ -183,7 +183,7 @@ func (w *TaskDispatch) Work(ctx context.Context, job *river.Job[jobs.TaskDispatc
 	}
 	eff, err := repoconfig.Merge(doc, file.Settings(tenant, repo.installation, repo.name))
 	if err != nil {
-		logger.Warn("repository .kritik.yaml ignored; only the operator's tasks run", "config_sha", short(sha), "error", err)
+		logger.Warn("repository .kritique.yaml ignored; only the operator's tasks run", "config_sha", short(sha), "error", err)
 	}
 	for _, n := range eff.Dropped {
 		logger.Debug("repository configuration note", "note", n)

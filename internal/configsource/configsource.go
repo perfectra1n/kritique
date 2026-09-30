@@ -17,17 +17,17 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/sealbox"
-	"github.com/home-operations/kritik/internal/server"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/sealbox"
+	"github.com/perfectra1n/kritique/internal/server"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 var _ configfile.Opener = (*sealbox.Keyring)(nil)
 
 // ErrNoDashboardKey is dashboard tenants present with no key to open their
 // sealed credentials.
-var ErrNoDashboardKey = errors.New("configsource: dashboard tenants exist but KRITIK_DASHBOARD_KEY is not set")
+var ErrNoDashboardKey = errors.New("configsource: dashboard tenants exist but KRITIQUE_DASHBOARD_KEY is not set")
 
 // DefaultPoll is how often Run checks the dashboard fingerprint when Poll
 // is unset. Notifications carry changes promptly; the poll only bounds how
@@ -105,7 +105,7 @@ func (s *Source) Load(ctx context.Context, path string) (*configfile.File, error
 }
 
 // Run keeps Current fresh until ctx ends: the file at path is re-read every
-// interval, a kritik_config notification or a reconnect of the listener
+// interval, a kritique_config notification or a reconnect of the listener
 // re-reads the dashboard, and so does a change in the dashboard
 // fingerprint, checked every Poll. Call Load first.
 func (s *Source) Run(ctx context.Context, path string, interval time.Duration) error {

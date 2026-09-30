@@ -12,7 +12,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
-	"github.com/home-operations/kritik/internal/model"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 // defaultGrepMaxResults and grepMaxResultsCap bound grep's max_results

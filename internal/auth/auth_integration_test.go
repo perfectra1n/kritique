@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 func testEnv(t *testing.T, key string) string {
@@ -54,23 +54,23 @@ web:
     - name: corp
       type: oidc
       issuer: %[1]s
-      clientId: kritik-client
-      clientSecret: { env: KRITIK_TEST_TOKEN }
+      clientId: kritique-client
+      clientSecret: { env: KRITIQUE_TEST_TOKEN }
     - name: gh
       type: github
       host: %[2]s
-      clientId: kritik-client
-      clientSecret: { env: KRITIK_TEST_TOKEN }
+      clientId: kritique-client
+      clientSecret: { env: KRITIQUE_TEST_TOKEN }
     - name: fj
       type: forgejo
       host: %[3]s
-      clientId: kritik-client
-      clientSecret: { env: KRITIK_TEST_TOKEN }
+      clientId: kritique-client
+      clientSecret: { env: KRITIQUE_TEST_TOKEN }
   operators: ["corp:op-oidc", "gh:OpGH", "email:ops@ops.example"]
 tenants:
   - slug: auth-personal
     installations:
-      - {name: auth-personal-bot, forge: github, host: "%[2]s", account: alice-gh, app: &app {clientId: Iv1.x, privateKey: {env: KRITIK_TEST_TOKEN}, webhookSecret: {env: KRITIK_TEST_TOKEN}}}
+      - {name: auth-personal-bot, forge: github, host: "%[2]s", account: alice-gh, app: &app {clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}}
   - slug: auth-acme
     installations:
       - {name: auth-acme-bot, forge: github, host: "%[2]s", account: acme, app: *app}
@@ -82,10 +82,10 @@ tenants:
       - {name: auth-pending-bot, forge: github, host: "%[2]s", account: pendco, app: *app}
   - slug: auth-fj
     installations:
-      - {name: auth-fj-bot, forge: forgejo, host: "%[3]s", account: fjorg, token: {env: KRITIK_TEST_TOKEN}, webhookSecret: {env: KRITIK_TEST_TOKEN}}
+      - {name: auth-fj-bot, forge: forgejo, host: "%[3]s", account: fjorg, token: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
   - slug: auth-invite
     installations:
-      - {name: auth-invite-bot, forge: forgejo, host: "%[3]s", account: nobody, token: {env: KRITIK_TEST_TOKEN}, webhookSecret: {env: KRITIK_TEST_TOKEN}}
+      - {name: auth-invite-bot, forge: forgejo, host: "%[3]s", account: nobody, token: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
 `
 
 type authEnv struct {
@@ -106,21 +106,21 @@ func newAuthEnv(t *testing.T) *authEnv {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.Open(ctx, store.Options{
-		AppURL: testEnv(t, "KRITIK_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIK_TEST_OWNER_URL"),
+		AppURL: testEnv(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIQUE_TEST_OWNER_URL"),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritik_app", "kritik_runner"); err != nil {
+	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	e := &authEnv{
 		t: t, st: st, oidc: newFakeOIDC(t), gh: newFakeGitHub(t), gh2: newFakeGitHub(t), fj: newFakeForgejo(t),
 		now: time.Now(), tenantID: map[string]string{},
 	}
-	t.Setenv("KRITIK_TEST_TOKEN", fakeClientSecret)
+	t.Setenv("KRITIQUE_TEST_TOKEN", fakeClientSecret)
 	e.file, err = configfile.Parse(fmt.Appendf(nil, authConfigYAML, e.oidc.srv.URL, e.gh.srv.URL, e.fj.srv.URL))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -133,7 +133,7 @@ func newAuthEnv(t *testing.T) *authEnv {
 	}
 	e.current = configfile.NewCurrent(e.file)
 	e.h, err = New(Config{
-		Store: st, Current: e.current, WebURL: mustParseURL(t, "https://kritik.example.com/dash/"),
+		Store: st, Current: e.current, WebURL: mustParseURL(t, "https://kritique.example.com/dash/"),
 		HTTPClient: trustingClient(e.oidc, e.gh, e.gh2, e.fj), Now: func() time.Time { return e.now },
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -285,7 +285,7 @@ func TestOIDCSignIn(t *testing.T) {
 	alice := &fakeUser{Login: "alice-oidc-" + randomHex(t), Email: "alice@oidc.example", EmailVerified: true}
 
 	w := e.signIn("corp", e.oidc, alice, "#/reviews/42")
-	if w.Code != http.StatusFound || w.Header().Get("Location") != "https://kritik.example.com/dash/#/reviews/42" {
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "https://kritique.example.com/dash/#/reviews/42" {
 		t.Fatalf("callback: status %d location %q body %s", w.Code, w.Header().Get("Location"), w.Body.String())
 	}
 	var cookie *http.Cookie
@@ -305,7 +305,7 @@ func TestOIDCSignIn(t *testing.T) {
 
 	t.Run("return_to outside the dashboard falls back to its root", func(t *testing.T) {
 		w := e.signIn("corp", e.oidc, alice, "https://evil.example/")
-		if w.Header().Get("Location") != "https://kritik.example.com/dash/#/" {
+		if w.Header().Get("Location") != "https://kritique.example.com/dash/#/" {
 			t.Fatalf("location = %q", w.Header().Get("Location"))
 		}
 	})
@@ -528,8 +528,8 @@ func TestSessionLifecycle(t *testing.T) {
 	t.Run("logout", func(t *testing.T) {
 		other := e.mustSignIn("fj", e.fj, user)
 		r := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
-		r.Header.Set("X-Kritik", "1")
-		r.Header.Set("Origin", "https://kritik.example.com")
+		r.Header.Set("X-Kritique", "1")
+		r.Header.Set("Origin", "https://kritique.example.com")
 		r.AddCookie(other)
 		w := e.do(r)
 		if w.Code != http.StatusNoContent {

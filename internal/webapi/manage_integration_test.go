@@ -28,13 +28,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/home-operations/kritik/internal/auth"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/configsource"
-	"github.com/home-operations/kritik/internal/ingest"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/sealbox"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configsource"
+	"github.com/perfectra1n/kritique/internal/ingest"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/sealbox"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 const manageConfig = `
@@ -43,8 +43,8 @@ web:
     - name: corp
       type: oidc
       issuer: https://idp.example
-      clientId: kritik
-      clientSecret: { env: KRITIK_TEST_TOKEN }
+      clientId: kritique
+      clientSecret: { env: KRITIQUE_TEST_TOKEN }
   operators: ["corp:mgr-op"]
   dashboardForgeHosts: [git.example, git2.example]
 tenants:
@@ -54,8 +54,8 @@ tenants:
         forge: forgejo
         host: git.example
         account: mf
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
     repositories:
       - name: mf/one
 `
@@ -121,17 +121,17 @@ func newManageEnv(t *testing.T) *manageEnv {
 	t.Cleanup(cancel)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	st, err := store.Open(ctx, store.Options{
-		AppURL: testEnv(t, "KRITIK_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIK_TEST_OWNER_URL"),
+		AppURL: testEnv(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIQUE_TEST_OWNER_URL"),
 		Logger: logger,
 	})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritik_app", "kritik_runner"); err != nil {
+	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	owner, err := pgxpool.New(ctx, testEnv(t, "KRITIK_TEST_OWNER_URL"))
+	owner, err := pgxpool.New(ctx, testEnv(t, "KRITIQUE_TEST_OWNER_URL"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,8 +141,8 @@ func newManageEnv(t *testing.T) *manageEnv {
 	e.exec(`DELETE FROM dashboard_tenants`)
 	t.Cleanup(func() { _, _ = owner.Exec(context.Background(), `DELETE FROM dashboard_tenants`) })
 
-	t.Setenv("KRITIK_TEST_TOKEN", "tok")
-	path := filepath.Join(t.TempDir(), "kritik.yaml")
+	t.Setenv("KRITIQUE_TEST_TOKEN", "tok")
+	path := filepath.Join(t.TempDir(), "kritique.yaml")
 	if err := os.WriteFile(path, []byte(manageConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func newManageEnv(t *testing.T) *manageEnv {
 	}
 	go func() { _ = e.src.Run(ctx, path, time.Hour) }()
 
-	webURL, _ := url.Parse("https://kritik.example")
+	webURL, _ := url.Parse("https://kritique.example")
 	h, err := auth.New(auth.Config{Store: st, Current: e.src.Current, WebURL: webURL, Logger: logger})
 	if err != nil {
 		t.Fatalf("auth.New: %v", err)
@@ -207,7 +207,7 @@ func (e *manageEnv) signIn(name, subject string, grants []store.Grant) {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	e.cookie[name] = &http.Cookie{Name: auth.SessionCookieName(&url.URL{Scheme: "https", Host: "kritik.example"}), Value: token}
+	e.cookie[name] = &http.Cookie{Name: auth.SessionCookieName(&url.URL{Scheme: "https", Host: "kritique.example"}), Value: token}
 	e.account[name] = acct.ID
 }
 
@@ -231,8 +231,8 @@ func (e *manageEnv) do(who, method, path string, body any, csrf ...bool) (int, [
 		req.AddCookie(c)
 	}
 	if len(csrf) == 0 || csrf[0] {
-		req.Header.Set("Origin", "https://kritik.example")
-		req.Header.Set("X-Kritik", "1")
+		req.Header.Set("Origin", "https://kritique.example")
+		req.Header.Set("X-Kritique", "1")
 	}
 	resp, err := e.http.Client().Do(req)
 	if err != nil {
@@ -417,7 +417,7 @@ func testConfigRedacted(t *testing.T, e *manageEnv) {
 	e.expect(status, body, http.StatusNotFound, CodeNotFound)
 	status, body = e.do("operator", "GET", "/api/v1/tenants/mgr-file/config", nil)
 	e.expect(status, body, http.StatusOK, "")
-	if !strings.Contains(string(body), `"managedBy":"file"`) || strings.Contains(string(body), "KRITIK_TEST_TOKEN") {
+	if !strings.Contains(string(body), `"managedBy":"file"`) || strings.Contains(string(body), "KRITIQUE_TEST_TOKEN") {
 		t.Errorf("file config = %s", body)
 	}
 }
@@ -675,8 +675,8 @@ func testMutualDemotion(t *testing.T, e *manageEnv, dashID string) {
 	demote := func(by, target string) *httptest.ResponseRecorder {
 		body := strings.NewReader(`{"role":"member"}`)
 		req := httptest.NewRequest("PATCH", "/api/v1/tenants/mgr-dash/members/"+e.account[target], body)
-		req.Header.Set("Origin", "https://kritik.example")
-		req.Header.Set("X-Kritik", "1")
+		req.Header.Set("Origin", "https://kritique.example")
+		req.Header.Set("X-Kritique", "1")
 		req = req.WithContext(auth.WithPrincipal(req.Context(), stale(by)))
 		w := httptest.NewRecorder()
 		e.srv.Handler().ServeHTTP(w, req)

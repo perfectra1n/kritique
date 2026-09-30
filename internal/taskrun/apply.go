@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // Action names a dropped write carries, matching tasks.Plan's.

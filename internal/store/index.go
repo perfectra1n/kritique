@@ -10,7 +10,7 @@ import (
 )
 
 // maxEmbedDims bounds the embedding dimension. halfvec holds up to 16,000
-// and vchordrq indexes any halfvec; the cap is kritik's, as an embedding
+// and vchordrq indexes any halfvec; the cap is kritique's, as an embedding
 // wider than this is a configuration mistake rather than a model.
 const maxEmbedDims = 4000
 
@@ -33,7 +33,7 @@ func (s *Store) EnsureIndexSchema(ctx context.Context, appRole, model string, di
 		return fmt.Errorf("store: embedding dimension %d is outside the index limit of %d", dims, maxEmbedDims)
 	}
 	return pgx.BeginFunc(ctx, s.owner, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('kritik-index-schema'))`); err != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('kritique-index-schema'))`); err != nil {
 			return err
 		}
 		var curModel string
@@ -47,7 +47,7 @@ func (s *Store) EnsureIndexSchema(ctx context.Context, appRole, model string, di
 		case curModel == model && curDims == dims:
 			return nil
 		case !reindex:
-			return fmt.Errorf("%w: table has %s/%d, deployment wants %s/%d (set KRITIK_REINDEX_ON_MODEL_CHANGE=true to rebuild)",
+			return fmt.Errorf("%w: table has %s/%d, deployment wants %s/%d (set KRITIQUE_REINDEX_ON_MODEL_CHANGE=true to rebuild)",
 				ErrIndexSchemaMismatch, curModel, curDims, model, dims)
 		}
 		// Rebuild: no generation is valid for a different embedder, so

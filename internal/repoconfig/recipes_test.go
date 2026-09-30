@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // TestRecipes checks the task recipes docs/repository-config.md shows:

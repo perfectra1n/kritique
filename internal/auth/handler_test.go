@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 func TestReturnTo(t *testing.T) {
@@ -45,11 +45,11 @@ func TestSessionCookie(t *testing.T) {
 		web, path, loginPath, session, login string
 		secure                               bool
 	}{
-		{"https://kritik.example.com", "/", "/", "__Host-kritik_session", "__Host-kritik_login", true},
-		{"https://kritik.example.com/", "/", "/", "__Host-kritik_session", "__Host-kritik_login", true},
-		{"https://example.com/kritik/", "/kritik", "/kritik/auth/callback", "__Secure-kritik_session", "__Secure-kritik_login", true},
-		{"http://localhost:8080", "/", "/auth/callback", "kritik_session", "kritik_login", false},
-		{"http://localhost:8080/dash", "/dash", "/dash/auth/callback", "kritik_session", "kritik_login", false},
+		{"https://kritique.example.com", "/", "/", "__Host-kritique_session", "__Host-kritique_login", true},
+		{"https://kritique.example.com/", "/", "/", "__Host-kritique_session", "__Host-kritique_login", true},
+		{"https://example.com/kritique/", "/kritique", "/kritique/auth/callback", "__Secure-kritique_session", "__Secure-kritique_login", true},
+		{"http://localhost:8080", "/", "/auth/callback", "kritique_session", "kritique_login", false},
+		{"http://localhost:8080/dash", "/dash", "/dash/auth/callback", "kritique_session", "kritique_login", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.web, func(t *testing.T) {
@@ -84,7 +84,7 @@ func TestProvidersEndpoint(t *testing.T) {
 		{Name: "corp", Type: configfile.SignInOIDC, Issuer: "https://id.example.com"},
 		{Name: "fj", Type: configfile.SignInForgejo, Host: "code.example.org"},
 	}}}
-	h := testHandler(t, "https://kritik.example.com", f)
+	h := testHandler(t, "https://kritique.example.com", f)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	w := httptest.NewRecorder()
@@ -119,19 +119,19 @@ func TestProvidersEndpoint(t *testing.T) {
 }
 
 func TestLoginUnknownProvider(t *testing.T) {
-	h := testHandler(t, "https://kritik.example.com", nil)
+	h := testHandler(t, "https://kritique.example.com", nil)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/auth/login/nope", nil))
 	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "unknown_sign_in") ||
-		!strings.Contains(w.Body.String(), `href="https://kritik.example.com/"`) {
+		!strings.Contains(w.Body.String(), `href="https://kritique.example.com/"`) {
 		t.Fatalf("status %d body %s", w.Code, w.Body.String())
 	}
 }
 
 func TestLogoutNeedsSameOrigin(t *testing.T) {
-	h := testHandler(t, "https://kritik.example.com", nil)
+	h := testHandler(t, "https://kritique.example.com", nil)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	w := httptest.NewRecorder()

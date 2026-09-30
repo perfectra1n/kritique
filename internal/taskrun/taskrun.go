@@ -12,9 +12,9 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/tasks"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // MaxRawBytes caps the payload a task sees decoded; a larger one is seen as

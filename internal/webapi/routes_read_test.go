@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 func TestRepoTasks(t *testing.T) {

@@ -18,16 +18,16 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/executor"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/gitfetch"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/repoconfig"
-	"github.com/home-operations/kritik/internal/review"
-	"github.com/home-operations/kritik/internal/runner"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Forges builds and caches a forge client per installation. repo is a
@@ -238,7 +238,7 @@ func (w *Review) Work(ctx context.Context, job *river.Job[jobs.ReviewArgs]) erro
 }
 
 // prepared is what afterRun hands the model phase: the patch id, the
-// settings with the repository's .kritik.yaml applied, the notes the
+// settings with the repository's .kritique.yaml applied, the notes the
 // summary states about that file, and whether the review builds on the
 // last completed one.
 type prepared struct {
@@ -250,7 +250,7 @@ type prepared struct {
 
 // afterRun re-checks the head under the tenant transaction, lifts the patch
 // id and the merge-base repository files out of the context pack, and
-// finishes applying .kritik.yaml: a review whose changes its skip rule
+// finishes applying .kritique.yaml: a review whose changes its skip rule
 // covers ends skipped with a success status saying why. A bot-authored PR
 // whose patch id equals its last prepared review is skipped too: a
 // Renovate rebase changes nothing. notes are the worker's own on the file.
@@ -321,7 +321,7 @@ func (w *Review) afterRun(
 		}
 		owner, repo, _ := strings.Cut(pr.repository, "/")
 		if err := client.SetStatus(ctx, owner, repo, args.HeadSHA, forge.StatusSuccess,
-			"kritik: skipped ("+reason.Description()+")"); err != nil {
+			"kritique: skipped ("+reason.Description()+")"); err != nil {
 			logger.Warn("commit status not set", "error", err)
 		}
 		return prepared{}, statusSkipped, nil
@@ -377,7 +377,7 @@ type earlyEnd struct {
 	args                              jobs.ReviewArgs
 	pr                                *pullRequest
 	tenantSlug, mergeBase, forgePatch string
-	// skip is why the repository's .kritik.yaml skipped the review.
+	// skip is why the repository's .kritique.yaml skipped the review.
 	skip    repoconfig.SkipReason
 	started time.Time
 	logger  *slog.Logger
@@ -416,7 +416,7 @@ func (w *Review) skipUnchangedBot(ctx context.Context, e earlyEnd, client forge.
 
 // begun is a review job past everything before its admission: its pull
 // request is current, a model slot was free when it looked, the forge
-// answered, the repository's .kritik.yaml is applied and does not skip it,
+// answered, the repository's .kritique.yaml is applied and does not skip it,
 // its settle time is over, and it is not an unchanged bot rebase. notes are
 // what the review's summary says about the file.
 type begun struct {
@@ -429,7 +429,7 @@ type begun struct {
 
 // begin takes a review job up to its admission, or ends it: superseded,
 // snoozed while every model slot is held or until its settle time is over,
-// or skipped by the merge-base .kritik.yaml or as an unchanged bot rebase.
+// or skipped by the merge-base .kritique.yaml or as an unchanged bot rebase.
 // The operator's model's slots are checked before any forge call, so a job
 // snoozed through a busy spell costs the forge nothing each time it wakes;
 // a repository that chooses another model then waits for that model's
@@ -640,9 +640,9 @@ func (w *Review) finishEnded(ctx context.Context, e endedReview, err error) erro
 	cctx, cancel := detach(ctx)
 	defer cancel()
 	cause := context.Cause(ctx)
-	status, errText, desc := statusCanceled, "", "kritik: review canceled"
+	status, errText, desc := statusCanceled, "", "kritique: review canceled"
 	if !errors.Is(cause, river.ErrJobCancelledRemotely) {
-		status, errText, desc = statusFailed, "review timed out: "+cause.Error(), "kritik: review timed out"
+		status, errText, desc = statusFailed, "review timed out: "+cause.Error(), "kritique: review timed out"
 	}
 	finished, ferr := w.finishUnfinished(cctx, e.tenantID, e.reviewID, status, errText)
 	if ferr != nil || !finished {

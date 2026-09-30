@@ -417,7 +417,7 @@ func DeleteInvite(ctx context.Context, tx pgx.Tx, tenantID, id string) (Invite, 
 // away one of the tenant's admins, so two admins demoting each other at
 // once cannot both see the other as the admin who remains.
 func LockTenantAdmins(ctx context.Context, tx pgx.Tx, tenantID string) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('kritik:tenant-admins:' || $1, 0))`, tenantID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('kritique:tenant-admins:' || $1, 0))`, tenantID); err != nil {
 		return fmt.Errorf("store: lock tenant admins: %w", err)
 	}
 	return nil

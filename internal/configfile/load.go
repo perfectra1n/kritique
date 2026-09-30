@@ -18,8 +18,8 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"go.yaml.in/yaml/v3"
 
-	"github.com/home-operations/kritik/internal/jobtimeout"
-	"github.com/home-operations/kritik/internal/prfilter"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/prfilter"
 )
 
 // nameRe bounds installation and tenant names to what is safe in a URL path
@@ -157,7 +157,7 @@ func (in *Installation) resolve(where string, refs refPolicy) error {
 	return nil
 }
 
-// validate checks every invariant the rest of kritik relies on.
+// validate checks every invariant the rest of kritique relies on.
 func (f *File) validate() error {
 	if err := f.validateProviders(); err != nil {
 		return err

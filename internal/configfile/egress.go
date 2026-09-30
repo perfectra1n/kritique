@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/home-operations/kritik/internal/egress"
+	"github.com/perfectra1n/kritique/internal/egress"
 )
 
 // GitHubHost is where a GitHub installation or sign-in without a host lives.

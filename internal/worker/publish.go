@@ -13,12 +13,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/contextpack"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/review"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/contextpack"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // CompleterSource resolves a configured provider name to its model
@@ -66,7 +66,7 @@ type publishPhase struct {
 	jobID    int64
 	logger   *slog.Logger
 	// parse and templates are the repository's contract settings; the zero
-	// values are kritik's defaults.
+	// values are kritique's defaults.
 	parse     review.ParseOptions
 	templates review.Templates
 	// instructions are the repository's review instructions, references
@@ -424,7 +424,7 @@ func (p *publishPhase) writeBack(ctx context.Context, res review.Result, modelNa
 	if n := len(res.Findings); n > 0 {
 		desc = fmt.Sprintf("%d finding(s)", n)
 	}
-	if err := p.client.SetStatus(ctx, owner, repo, p.pr.headSHA, forge.StatusSuccess, "kritik: "+desc); err != nil {
+	if err := p.client.SetStatus(ctx, owner, repo, p.pr.headSHA, forge.StatusSuccess, "kritique: "+desc); err != nil {
 		p.logger.Warn("commit status not set", "error", err)
 	}
 	return commentID, onForge, nil

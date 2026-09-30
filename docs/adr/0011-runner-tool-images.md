@@ -60,7 +60,7 @@ tools:
 
 The catalog is instance scope, in the file only (ADR-0010 §2.3): which code
 runs next to untrusted pull requests is the operator's decision. A
-dashboard tenant or a repository's `.kritik.yaml` can allow a tool's
+dashboard tenant or a repository's `.kritique.yaml` can allow a tool's
 command only where the operator's allowlist already does; neither can add
 a tool.
 
@@ -73,7 +73,7 @@ mount none; neither runs commands.
 ### 2.4 Mount layout and `PATH`
 
 Each tool is an image volume mounted read-only at
-`/opt/kritik/tools/<name>`, from `path` as its `subPath`. The runner
+`/opt/kritique/tools/<name>`, from `path` as its `subPath`. The runner
 container's `PATH` is the tool directories, in catalog order, ahead of the
 `PATH` both runner images set (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`),
 since a container's `PATH` variable replaces the image's rather than

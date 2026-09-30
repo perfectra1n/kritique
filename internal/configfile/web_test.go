@@ -10,8 +10,8 @@ const webMinimal = `web:
   signIn:
     - name: sso
       type: oidc
-      issuer: https://sso.example.com/application/o/kritik/
-      clientId: kritik
+      issuer: https://sso.example.com/application/o/kritique/
+      clientId: kritique
       clientSecret: { env: TEST_WEBHOOK_SECRET }
     - name: gh
       type: github
@@ -73,11 +73,11 @@ func TestWebRejects(t *testing.T) {
 		{"duplicate name", rep("name: gh", "name: sso"), "duplicates web.signIn[0]"},
 		{"bad type", rep("type: oidc", "type: saml"), "web.signIn[0].type must be"},
 		{"oidc http issuer", rep("issuer: https://", "issuer: http://"), "https"},
-		{"oidc without issuer", rep("      issuer: https://sso.example.com/application/o/kritik/\n", ""), "https"},
+		{"oidc without issuer", rep("      issuer: https://sso.example.com/application/o/kritique/\n", ""), "https"},
 		{"issuer on github", rep("type: github\n", "type: github\n      issuer: https://x.example.com\n"), "web.signIn[1].issuer"},
 		{"forgejo without host", rep("      host: git.example.com\n", ""), "web.signIn[2].host is required"},
 		{"host on oidc", rep("type: oidc\n", "type: oidc\n      host: x.example.com\n"), "web.signIn[0].host"},
-		{"no client id", rep("clientId: kritik", "clientId: \"\""), "web.signIn[0].clientId is required"},
+		{"no client id", rep("clientId: kritique", "clientId: \"\""), "web.signIn[0].clientId is required"},
 		{"unset secret", rep("{ env: TEST_WEBHOOK_SECRET }", "{ env: TEST_NOPE }"), "web.signIn[0].clientSecret"},
 		{"empty secret", rep("{ env: TEST_WEBHOOK_SECRET }", "{ env: TEST_EMPTY }"), "web.signIn[0].clientSecret resolved to an empty value"},
 		{"sealed secret", rep("{ env: TEST_WEBHOOK_SECRET }", "{ sealed: abc }"), "sealed values are only valid"},

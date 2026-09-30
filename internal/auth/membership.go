@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Role is what a membership lets an account do on a tenant.

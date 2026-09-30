@@ -11,8 +11,8 @@ import (
 
 	gh "github.com/google/go-github/v92/github"
 
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // userTypeBot is how GitHub types App and bot accounts.

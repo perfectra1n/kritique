@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 func fakeSeal(b []byte) (string, error) { return "sealed:" + string(b), nil }
@@ -234,7 +234,7 @@ func TestRenderFileTenant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(got), "KRITIK_TEST_TOKEN") || strings.Contains(string(got), "tok\"") {
+	if strings.Contains(string(got), "KRITIQUE_TEST_TOKEN") || strings.Contains(string(got), "tok\"") {
 		t.Fatalf("file tenant render leaks a secret reference: %s", got)
 	}
 	var back struct {

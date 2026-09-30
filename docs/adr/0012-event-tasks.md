@@ -4,19 +4,19 @@
 - **Date:** 2026-09-26
 - **Amends:** [ADR-0003](0003-forgejo-agentic-review.md) §2.1 (an
   agentic task's runner requires the read-only `gitToken` on Forgejo and
-  Gitea, and gets a down-scoped installation token on GitHub) and §2.3 (`.kritik.yaml`
+  Gitea, and gets a down-scoped installation token on GitHub) and §2.3 (`.kritique.yaml`
   gains `tasks`), and [ADR-0010](0010-configuration-layers.md) §2.5 (`allow`
   gains `tasks`) and §2.3 (the operator's scopes gain `tasks`).
 - **Authors:** perfectra1n.
 
 > Scope: running a declared prompt when a forge event fires, and applying
-> what the model's answer asks for once kritik has checked it. Issue triage
+> what the model's answer asks for once kritique has checked it. Issue triage
 > is the first use. It does not change how a pull request review, a
 > follow-up or an index run works; the review is not rebuilt on tasks.
 
 ## 1. Context
 
-kritik reviews pull requests and nothing else. Every issue event, and every
+kritique reviews pull requests and nothing else. Every issue event, and every
 delivery it has no use for, is dropped at the webhook parser. Issue triage
 was the first request beyond reviews, and it generalizes: "when this event
 fires, run this prompt with these things, and report back when done".
@@ -27,7 +27,7 @@ contributor) to another feature each time.
 The pieces a general answer needs mostly exist:
 
 - The webhook parser verifies and decodes every forge's deliveries.
-- `repoconfig` reads a repository's `.kritik.yaml`, and ADR-0010 §2.5
+- `repoconfig` reads a repository's `.kritique.yaml`, and ADR-0010 §2.5
   already bounds what it may choose by the operator's `allow`.
 - ADR-0005 settled on Go `text/template` for repository-written templates,
   and `internal/prfilter` on CEL for repository-written conditions.
@@ -47,7 +47,7 @@ plus a CEL guard), the **context** it gathers, the **prompt** (Go
 templates), the **answer** (the custom fields it declares and the actions it
 may propose), the **actions** (proposed by the model or driven by rules,
 each with a CEL `if`) and the **report** (a templated comment and the
-dashboard). Repositories declare tasks in `.kritik.yaml`; the operator turns
+dashboard). Repositories declare tasks in `.kritique.yaml`; the operator turns
 tasks on, bounds them and may declare its own. A new `internal/tasks`
 package owns the definition, its validation, clipping to the bounds,
 matching, rendering, the answer schema and the plan of writes, and does no
@@ -110,8 +110,8 @@ tasks:
       search: [{ name: code, query: "{{ .Subject.Title }}", k: 8 }]
       related: [{ name: dupes, query: "{{ .Subject.Title }}", k: 5 }]
       commands: [{ name: owners, run: cat .github/CODEOWNERS }] # agentic only
-    system: .kritik/tasks/system.md.tmpl # after kritik's fixed preamble
-    prompt: .kritik/tasks/triage.md.tmpl # or promptInline
+    system: .kritique/tasks/system.md.tmpl # after kritique's fixed preamble
+    prompt: .kritique/tasks/triage.md.tmpl # or promptInline
     fields:
       priority: { type: string, enum: [p0, p1, p2, p3] }
       needsInfo: { type: boolean }
@@ -122,7 +122,7 @@ tasks:
     actions:
       comment:
         mode: sticky
-        template: .kritik/tasks/triage-comment.md.tmpl
+        template: .kritique/tasks/triage-comment.md.tmpl
         if: answer.fields.needsInfo
       labels:
         propose: { add: [bug, enhancement], remove: [needs-triage] }
@@ -139,7 +139,7 @@ tasks:
 ```
 
 `docs/repository-config.md` is the reference for every key, and
-`docs/kritik.schema.json` its schema, kept in step with the Go types by
+`docs/kritique.schema.json` its schema, kept in step with the Go types by
 `schema_test.go`. The rules the definition follows:
 
 - **Validated whole, when the file is parsed.** Names, trigger globs, CEL
@@ -149,7 +149,7 @@ tasks:
   template files and smoke-renders every template against a sample event
   and a sample answer, as `repoconfig` already does for filters, so a
   template that fails on the shape of the data fails before any event. A
-  bad `tasks` block fails the whole `.kritik.yaml`, as any other bad key
+  bad `tasks` block fails the whole `.kritique.yaml`, as any other bad key
   does; the dashboard shows the parse error.
 - **Fields are a restricted JSON Schema.** A string with an `enum`,
   `maxLength` or `pattern`; a number or integer with a `minimum` and
@@ -203,8 +203,8 @@ event and the answer. Both feed one plan, which is checked as a whole:
 
 Everything left out is recorded with its reason, and the report comment is
 rendered last, with what was applied and dropped. Comments carry a hidden
-`<!-- kritik:task:<name> -->` marker so a sticky report updates in place;
-anything in a rendered comment that could pass for one of kritik's markers
+`<!-- kritique:task:<name> -->` marker so a sticky report updates in place;
+anything in a rendered comment that could pass for one of kritique's markers
 is escaped.
 
 v1's actions are a sticky or appended comment, inline comments, adding and
@@ -230,7 +230,7 @@ when tasks are on and an operator task, or an event the operator lets
 repository tasks trigger on, could match the delivery, it stores the
 delivery and enqueues one `task_dispatch` job. That job drops the event if
 its sender is the installation's bot, resolves the repository's tasks
-(`repoconfig.Merged`, §2.6) from the `.kritik.yaml` at the default branch's
+(`repoconfig.Merged`, §2.6) from the `.kritique.yaml` at the default branch's
 tip, records that commit and file on the repository for the dashboard
 (§2.8), and enqueues one job per matching task on a `task` queue, unique by
 task and event, carrying the commit. The task worker re-resolves the task
@@ -279,7 +279,7 @@ The design keeps each of those in its lane:
   tasks start no runner and need neither. Agentic reviews keep ADR-0003's
   token as before.
 - **A fixed preamble and fenced data.** Every task's system prompt starts
-  with kritik's preamble, which states that text inside `<untrusted>`
+  with kritique's preamble, which states that text inside `<untrusted>`
   blocks is data, never instructions, and that only what the answer schema
   offers may be proposed. A task's `system` is added after it, only when
   the operator allows it, and cannot replace it. The subject, the thread
@@ -320,7 +320,7 @@ The design keeps each of those in its lane:
 | `context`                  | all but `commands`                       | context source kinds                                       |
 | `tools`                    | `read_file`, `grep`, `list_files`        | agent tools                                                |
 | `systemPrompt`             | `false`                                  | whether a task may add to the system prompt                |
-| `repositoryTasks`          | `true`                                   | whether `.kritik.yaml` may define tasks                    |
+| `repositoryTasks`          | `true`                                   | whether `.kritique.yaml` may define tasks                    |
 | `maxTasks`                 | 10                                       | a repository's tasks                                       |
 | `maxRunsPerSubjectPerHour` | 6                                        | runs of one task on one issue or pull request              |
 | `maxFields`                | 16                                       | a task's fields                                            |
@@ -363,9 +363,9 @@ permissions, file reads and branch tips reuse what exists.
 ### 2.8 Dashboard
 
 A repository's page lists its resolved tasks: their names, where each came
-from (the configuration file, the dashboard or `.kritik.yaml`), triggers,
+from (the configuration file, the dashboard or `.kritique.yaml`), triggers,
 mode and action kinds, with the clipping notes. They are resolved from the
-`.kritik.yaml` the last dispatch read at the default branch's tip, which
+`.kritique.yaml` the last dispatch read at the default branch's tip, which
 it records on the repository (migration 0014); before any dispatch, from
 the one the last review read at its merge base, and the page says which. Task runs, their fields,
 the three action lists and a transcript link join it once runs are
@@ -374,14 +374,14 @@ recorded, with live updates.
 ## 3. Consequences
 
 - A repository can automate issue and pull request housekeeping with a
-  file and two templates, and kritik gains no feature code per use: triage
+  file and two templates, and kritique gains no feature code per use: triage
   ships as a documented recipe, tested like any other.
 - Tasks are off until the operator turns them on, and a new action kind,
   raw event or context kind is off until the operator lists it.
 - Everything a task can write is visible in its definition, and every
   write is recorded with what the model proposed and what was dropped.
 - `internal/tasks` is a large surface in one pure, table-tested package.
-- A typo in `tasks` stops the whole `.kritik.yaml` from applying, the
+- A typo in `tasks` stops the whole `.kritique.yaml` from applying, the
   review's settings included, until it is fixed.
 - On Forgejo and Gitea, removing a label fires `labeled` tasks.
 - The installation's credentials need write access to issues and pull
@@ -420,5 +420,5 @@ recorded, with live updates.
   report somewhere other than the dashboard.
 - Rebuilding the pull request review on tasks.
 - GitLab, which has no `forge.Client` yet.
-- Letting a broken `tasks` block leave the rest of `.kritik.yaml` in force.
+- Letting a broken `tasks` block leave the rest of `.kritique.yaml` in force.
 - The operator's "tasks bounds" view in the operator console.

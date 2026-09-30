@@ -27,11 +27,11 @@ const hints: Partial<Record<ManagementErrorCode | ErrorCode, string>> = {
 
 // describe is one line for a failed management call.
 const inheritedFrom: Record<ConfigSource, string> = {
-  default: "kritik's default",
+  default: "kritique's default",
   env: 'the environment',
   file: 'the config file',
   dashboard: 'this tenant',
-  repository: '.kritik.yaml',
+  repository: '.kritique.yaml',
 };
 
 // inheritsHint is what a field left empty takes, and from where.

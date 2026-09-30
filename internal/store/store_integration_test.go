@@ -19,15 +19,15 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // The suite needs a VectorChord-enabled Postgres with three roles, as
 // `mise run test-integration` provisions:
-//   KRITIK_TEST_OWNER_URL   database owner (not superuser)
-//   KRITIK_TEST_APP_URL     application role, owns nothing
-//   KRITIK_TEST_RUNNER_URL  runner role, owns nothing
-//   KRITIK_TEST_SUPER_URL   a superuser, used only to assert refusal
+//   KRITIQUE_TEST_OWNER_URL   database owner (not superuser)
+//   KRITIQUE_TEST_APP_URL     application role, owns nothing
+//   KRITIQUE_TEST_RUNNER_URL  runner role, owns nothing
+//   KRITIQUE_TEST_SUPER_URL   a superuser, used only to assert refusal
 
 func testEnv(t *testing.T, key string) string {
 	t.Helper()
@@ -42,14 +42,14 @@ func openStore(t *testing.T) *Store {
 	t.Helper()
 	ctx := context.Background()
 	s, err := Open(ctx, Options{
-		AppURL: testEnv(t, "KRITIK_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIK_TEST_OWNER_URL"),
+		AppURL: testEnv(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIQUE_TEST_OWNER_URL"),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(s.Close)
-	if err := s.Migrate(ctx, "kritik_app", "kritik_runner"); err != nil {
+	if err := s.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	return s
@@ -63,8 +63,8 @@ func TestOpenRefusesUnsafeApplicationDSN(t *testing.T) {
 		url  string
 		want error
 	}{
-		{"superuser as application role", testEnv(t, "KRITIK_TEST_SUPER_URL"), ErrIsolationOff},
-		{"owner as application role", testEnv(t, "KRITIK_TEST_OWNER_URL"), ErrIsolationOff},
+		{"superuser as application role", testEnv(t, "KRITIQUE_TEST_SUPER_URL"), ErrIsolationOff},
+		{"owner as application role", testEnv(t, "KRITIQUE_TEST_OWNER_URL"), ErrIsolationOff},
 	}
 	// The owner must own at least one table for the ownership check to bite.
 	openStore(t)
@@ -77,7 +77,7 @@ func TestOpenRefusesUnsafeApplicationDSN(t *testing.T) {
 		})
 	}
 	t.Run("superuser as owner", func(t *testing.T) {
-		_, err := Open(ctx, Options{AppURL: testEnv(t, "KRITIK_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIK_TEST_SUPER_URL"), Logger: logger})
+		_, err := Open(ctx, Options{AppURL: testEnv(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIQUE_TEST_SUPER_URL"), Logger: logger})
 		if err == nil || !strings.Contains(err.Error(), "superuser") {
 			t.Fatalf("Open = %v, want a superuser refusal", err)
 		}
@@ -89,7 +89,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if ready, err := s.SchemaReady(context.Background()); err != nil || !ready {
 		t.Fatalf("SchemaReady after Migrate = %v, %v", ready, err)
 	}
-	if err := s.Migrate(context.Background(), "kritik_app", "kritik_runner"); err != nil {
+	if err := s.Migrate(context.Background(), "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
 	names, _ := fs.Glob(migrationFS, "migrations/*.sql")
@@ -106,8 +106,8 @@ tenants:
       - name: alpha-bot
         forge: forgejo
         account: alpha
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
     repositories:
       - name: alpha/one
       - name: alpha/two
@@ -117,13 +117,13 @@ tenants:
       - name: beta-bot
         forge: forgejo
         account: beta
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
 `
 
 func parse(t *testing.T, yaml string) *configfile.File {
 	t.Helper()
-	t.Setenv("KRITIK_TEST_TOKEN", "tok")
+	t.Setenv("KRITIQUE_TEST_TOKEN", "tok")
 	f, err := configfile.Parse([]byte(yaml))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -258,7 +258,7 @@ func TestRunnerRoleUpdatesOnlyWhatARunnerReports(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	runner, err := Open(ctx, Options{AppURL: testEnv(t, "KRITIK_TEST_RUNNER_URL"), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	runner, err := Open(ctx, Options{AppURL: testEnv(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatalf("Open runner: %v", err)
 	}
@@ -400,12 +400,12 @@ func TestLeaderLockIsExclusive(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	// Each run starts from an empty schema so the suite is repeatable.
-	if super := os.Getenv("KRITIK_TEST_SUPER_URL"); super != "" {
+	if super := os.Getenv("KRITIQUE_TEST_SUPER_URL"); super != "" {
 		ctx := context.Background()
 		pool, err := pgxpool.New(ctx, super)
 		if err == nil {
 			_, _ = pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;
-				GRANT ALL ON SCHEMA public TO kritik; GRANT USAGE ON SCHEMA public TO kritik_app, kritik_runner;
+				GRANT ALL ON SCHEMA public TO kritique; GRANT USAGE ON SCHEMA public TO kritique_app, kritique_runner;
 				CREATE EXTENSION IF NOT EXISTS vchord CASCADE`)
 			pool.Close()
 		}
@@ -421,14 +421,14 @@ var _ = filepath.Join
 func TestEnsureIndexSchemaUsesVectorChord(t *testing.T) {
 	ctx := t.Context()
 	s := openStore(t)
-	if err := s.Migrate(ctx, "kritik_app", "kritik_runner"); err != nil {
+	if err := s.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	// The suites share one database: leave no index schema behind.
 	t.Cleanup(func() {
 		_, _ = s.owner.Exec(context.Background(), `DROP TABLE IF EXISTS index_chunks; DELETE FROM index_schema`)
 	})
-	if err := s.EnsureIndexSchema(ctx, "kritik_app", "test-embed", 8, true); err != nil {
+	if err := s.EnsureIndexSchema(ctx, "kritique_app", "test-embed", 8, true); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
 	var method string
@@ -458,7 +458,7 @@ func TestSweepDisabledIndexes(t *testing.T) {
 		_, _ = s.owner.Exec(context.Background(), `UPDATE repositories SET active_index_run_id = NULL;
 			DROP TABLE IF EXISTS index_chunks; DELETE FROM index_schema`)
 	})
-	if err := s.EnsureIndexSchema(ctx, "kritik_app", "test-embed", 8, true); err != nil {
+	if err := s.EnsureIndexSchema(ctx, "kritique_app", "test-embed", 8, true); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
 	// Both alpha repositories get an active generation with one chunk;
@@ -528,14 +528,14 @@ tenants:
         forge: forgejo
         host: one.example.com
         account: gamma
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
       - name: gamma-two
         forge: forgejo
         host: two.example.com
         account: gamma
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
     repositories:
       - { name: gamma/x, installation: gamma-one }
       - { name: gamma/x, installation: gamma-two }
@@ -572,8 +572,8 @@ tenants:
         forge: forgejo
         host: two.example.com
         account: gamma
-        token: { env: KRITIK_TEST_TOKEN }
-        webhookSecret: { env: KRITIK_TEST_TOKEN }
+        token: { env: KRITIQUE_TEST_TOKEN }
+        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
 `, "", 1)
 	if err := s.ApplyConfig(ctx, parse(t, oneLeft), "test"); err != nil {
 		t.Fatalf("ApplyConfig without gamma-two: %v", err)

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // Identity is who a sign-in provider says a human is. Provider is the
@@ -22,7 +22,7 @@ import (
 // Subject is the provider's stable id for them, unique within that origin.
 //
 // EmailVerified is the provider's own word: the OIDC email_verified claim,
-// or the forge's verified flag on the primary address. kritik cannot check
+// or the forge's verified flag on the primary address. kritique cannot check
 // it, and a verified email accepts invites and matches "email:" operators,
 // so an operator should only configure sign-ins whose email verification
 // they trust.

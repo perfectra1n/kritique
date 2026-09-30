@@ -12,9 +12,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/metrics"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/metrics"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // Request is a verified, parsed webhook with the configuration it applies to.
@@ -123,7 +123,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case ev.Account != "" && !strings.EqualFold(ev.Account, in.Account):
 		// A public App can be installed by anyone; only the declared
 		// account is served. Accepted, so the forge does not retry. A
-		// kind kritik would not act on for anyone is noise at Warn.
+		// kind kritique would not act on for anyone is noise at Warn.
 		level := slog.LevelWarn
 		if ev.Kind == webhook.KindIgnored {
 			level = slog.LevelDebug

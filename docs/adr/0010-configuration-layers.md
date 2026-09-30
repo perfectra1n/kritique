@@ -2,28 +2,28 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-26
-- **Amends:** [ADR-0002](0002-kritik-pr-review-service.md) §2.6 (the two
+- **Amends:** [ADR-0002](0002-kritique-pr-review-service.md) §2.6 (the two
   configuration sources), [ADR-0003](0003-forgejo-agentic-review.md) §2.3
-  (`.kritik.yaml`) and [ADR-0009](0009-web-dashboard.md) §2.12 (collisions),
+  (`.kritique.yaml`) and [ADR-0009](0009-web-dashboard.md) §2.12 (collisions),
   §2.15 (operator-only fields) and the first item of §6.
 - **Authors:** onedr0p.
 
 > Scope: where each setting lives, who may change it, which value wins when
 > more than one layer speaks to the same repository, how the dashboard shows
-> what it may not change, what a repository's own `.kritik.yaml` may
+> what it may not change, what a repository's own `.kritique.yaml` may
 > choose, and how a repository is identified when its name exists on more
 > than one forge. It does not change how a review, follow-up or index run works once
 > its settings are resolved.
 
 ## 1. Context
 
-Configuration reaches kritik from four places today, and each grew on its
+Configuration reaches kritique from four places today, and each grew on its
 own:
 
 - **Environment variables** (`internal/config/config.go`): listeners, DSNs,
   keys, the embedder, the executor and runner image, but also tuning such as
-  `KRITIK_RUNNER_DEADLINE`, `KRITIK_POLL_INTERVAL`, `KRITIK_POLL_LOOKBACK` and
-  `KRITIK_ONBOARD_WINDOW`. `KRITIK_RUNNER_DEADLINE` is in fact the default of
+  `KRITIQUE_RUNNER_DEADLINE`, `KRITIQUE_POLL_INTERVAL`, `KRITIQUE_POLL_LOOKBACK` and
+  `KRITIQUE_ONBOARD_WINDOW`. `KRITIQUE_RUNNER_DEADLINE` is in fact the default of
   a per-tenant file field (`runner.activeDeadlineSeconds`), so one setting
   spans two layers.
 - **The config file** (`internal/configfile`): providers, `defaults`, egress,
@@ -32,21 +32,21 @@ own:
 - **Postgres** (`dashboard_tenants`): dashboard-managed tenant specs,
   merged into the file's snapshot (ADR-0009 §2.5). File and dashboard tenants
   are disjoint by slug; a file tenant is read-only in the UI as a whole.
-- **`.kritik.yaml`** (`internal/repoconfig`, ADR-0003 §2.3): read by the
+- **`.kritique.yaml`** (`internal/repoconfig`, ADR-0003 §2.3): read by the
   runner from the merge base and merged onto the operator's settings.
 
 Surveying the code found these problems:
 
 - **No stated precedence.** A repository's `filter` replaces its tenant's,
-  but `.kritik.yaml`'s `filter` is ANDed with the operator's. A zero or empty
+  but `.kritique.yaml`'s `filter` is ANDed with the operator's. A zero or empty
   value means "inherit" (`resolve.go`), so a tenant cannot clear a default
   filter, settle or limit.
-- **`.kritik.yaml` does not only narrow**, despite ADR-0003 §2.3 and
+- **`.kritique.yaml` does not only narrow**, despite ADR-0003 §2.3 and
   `docs/repository-config.md`: its `instructions` replace the operator's list,
   and `requireSuggestedFix: false` overrides an operator's `true`. It is also
   ignored by indexing and follow-ups, and it cannot pick a mode, model or
   agent limit at all.
-- **Two different operator-only lists.** Fields closed to `.kritik.yaml`
+- **Two different operator-only lists.** Fields closed to `.kritique.yaml`
   (`mode`, `agent`, `incremental`, `settle`) differ from fields closed to a
   tenant admin (`models`, `forks`, `runner`, `limits`, and a repository's
   `agent`, `mode`, `incremental`), and the second list is repeated in
@@ -80,7 +80,7 @@ Surveying the code found these problems:
 | Environment          | whoever deploys the process                      | deployment wiring and secrets (§2.2)                         | on restart                             |
 | Config file          | the operator, through git                        | instance settings, and every tenant it declares (§2.3)       | on reload, applied by the leader       |
 | Dashboard (Postgres) | operators and tenant admins, through the UI      | every tenant the file does not declare (§2.3)                | on write, via `NOTIFY`                 |
-| `.kritik.yaml`       | whoever can push to the repository's base branch | the repository's choices within the operator's bounds (§2.5) | per run, from the commit the run reads |
+| `.kritique.yaml`       | whoever can push to the repository's base branch | the repository's choices within the operator's bounds (§2.5) | per run, from the commit the run reads |
 
 **Every setting, at a given scope, has exactly one layer that may set it.**
 Precedence (§2.4) decides how defaults flow down from a broader scope and how
@@ -107,25 +107,25 @@ file.
 
 | Group                                                                                  | Variables                                                                                                                                                                                                             |
 | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Listeners and process                                                                  | `KRITIK_ADDR`, `KRITIK_METRICS_ADDR`, `KRITIK_GATEWAY_ADDR`, `KRITIK_WEB_ADDR`, `KRITIK_WEB_URL`, `KRITIK_LEADER_RETRY_INTERVAL`, `KRITIK_LOG_LEVEL`, `KRITIK_LOG_FORMAT`                                             |
-| Configuration source                                                                   | `KRITIK_CONFIG_FILE`, `KRITIK_CONFIG_RELOAD_INTERVAL`                                                                                                                                                                 |
-| Database                                                                               | `KRITIK_DATABASE_URL`, `KRITIK_DATABASE_OWNER_URL`, `KRITIK_DATABASE_APP_ROLE`, `KRITIK_DATABASE_RUNNER_ROLE`                                                                                                         |
-| Keys                                                                                   | `KRITIK_DASHBOARD_KEY`, `KRITIK_DASHBOARD_OLD_KEYS`                                                                                                                                                                   |
-| Embedding, deployment-wide because it shapes the `index_chunks` schema (ADR-0002 §2.6) | `KRITIK_EMBED_BASE_URL`, `KRITIK_EMBED_API_KEY`, `KRITIK_EMBED_MODEL`, `KRITIK_EMBED_DIMS`, `KRITIK_EMBED_MAX_BATCH`, `KRITIK_EMBED_MAX_BATCH_CHARS`, `KRITIK_EMBED_MAX_ITEM_CHARS`, `KRITIK_REINDEX_ON_MODEL_CHANGE` |
-| Gateway                                                                                | `KRITIK_GATEWAY_URL`, `KRITIK_GATEWAY_TOKEN_TTL` (a credential's lifetime)                                                                                                                                            |
-| Executor and runner pods                                                               | `KRITIK_EXECUTOR`, `KRITIK_RUNNER_IMAGE`, `KRITIK_RUNNER_SERVICE_ACCOUNT`, `KRITIK_RUNNER_DATABASE_SECRET`, `KRITIK_RUNNER_DATABASE_SECRET_KEY`, `KRITIK_RUNNER_RUNTIME_CLASS`, `KRITIK_RUNNER_TTL`                   |
-| Per-process capacity                                                                   | `KRITIK_REVIEW_WORKERS`, `KRITIK_INDEX_WORKERS`                                                                                                                                                                       |
-| Runner-only, injected per run                                                          | `KRITIK_RUN_SPEC_FILE`, `KRITIK_GIT_TOKEN`, `KRITIK_GATEWAY_TOKEN`, `KRITIK_RUNNER_DATABASE_URL` (local executor)                                                                                                     |
+| Listeners and process                                                                  | `KRITIQUE_ADDR`, `KRITIQUE_METRICS_ADDR`, `KRITIQUE_GATEWAY_ADDR`, `KRITIQUE_WEB_ADDR`, `KRITIQUE_WEB_URL`, `KRITIQUE_LEADER_RETRY_INTERVAL`, `KRITIQUE_LOG_LEVEL`, `KRITIQUE_LOG_FORMAT`                                             |
+| Configuration source                                                                   | `KRITIQUE_CONFIG_FILE`, `KRITIQUE_CONFIG_RELOAD_INTERVAL`                                                                                                                                                                 |
+| Database                                                                               | `KRITIQUE_DATABASE_URL`, `KRITIQUE_DATABASE_OWNER_URL`, `KRITIQUE_DATABASE_APP_ROLE`, `KRITIQUE_DATABASE_RUNNER_ROLE`                                                                                                         |
+| Keys                                                                                   | `KRITIQUE_DASHBOARD_KEY`, `KRITIQUE_DASHBOARD_OLD_KEYS`                                                                                                                                                                   |
+| Embedding, deployment-wide because it shapes the `index_chunks` schema (ADR-0002 §2.6) | `KRITIQUE_EMBED_BASE_URL`, `KRITIQUE_EMBED_API_KEY`, `KRITIQUE_EMBED_MODEL`, `KRITIQUE_EMBED_DIMS`, `KRITIQUE_EMBED_MAX_BATCH`, `KRITIQUE_EMBED_MAX_BATCH_CHARS`, `KRITIQUE_EMBED_MAX_ITEM_CHARS`, `KRITIQUE_REINDEX_ON_MODEL_CHANGE` |
+| Gateway                                                                                | `KRITIQUE_GATEWAY_URL`, `KRITIQUE_GATEWAY_TOKEN_TTL` (a credential's lifetime)                                                                                                                                            |
+| Executor and runner pods                                                               | `KRITIQUE_EXECUTOR`, `KRITIQUE_RUNNER_IMAGE`, `KRITIQUE_RUNNER_SERVICE_ACCOUNT`, `KRITIQUE_RUNNER_DATABASE_SECRET`, `KRITIQUE_RUNNER_DATABASE_SECRET_KEY`, `KRITIQUE_RUNNER_RUNTIME_CLASS`, `KRITIQUE_RUNNER_TTL`                   |
+| Per-process capacity                                                                   | `KRITIQUE_REVIEW_WORKERS`, `KRITIQUE_INDEX_WORKERS`                                                                                                                                                                       |
+| Runner-only, injected per run                                                          | `KRITIQUE_RUN_SPEC_FILE`, `KRITIQUE_GIT_TOKEN`, `KRITIQUE_GATEWAY_TOKEN`, `KRITIQUE_RUNNER_DATABASE_URL` (local executor)                                                                                                     |
 
 **Moves to the file:**
 
 | Variable                                       | Becomes                                 | Why                                                                                                      |
 | ---------------------------------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `KRITIK_RUNNER_DEADLINE`                       | `defaults.runner.activeDeadlineSeconds` | it is already the default of the tenant's `runner.activeDeadlineSeconds`; the chain belongs in one layer |
-| `KRITIK_POLL_INTERVAL`, `KRITIK_POLL_LOOKBACK` | `polling.interval`, `polling.lookback`  | how soon a missed webhook is caught is review behaviour                                                  |
-| `KRITIK_ONBOARD_WINDOW`                        | `indexing.onboardWindow`                | how fast repositories are onboarded is indexing behaviour                                                |
+| `KRITIQUE_RUNNER_DEADLINE`                       | `defaults.runner.activeDeadlineSeconds` | it is already the default of the tenant's `runner.activeDeadlineSeconds`; the chain belongs in one layer |
+| `KRITIQUE_POLL_INTERVAL`, `KRITIQUE_POLL_LOOKBACK` | `polling.interval`, `polling.lookback`  | how soon a missed webhook is caught is review behaviour                                                  |
+| `KRITIQUE_ONBOARD_WINDOW`                        | `indexing.onboardWindow`                | how fast repositories are onboarded is indexing behaviour                                                |
 
-The chart renders these into the file instead of the environment. kritik has
+The chart renders these into the file instead of the environment. kritique has
 no release yet, so the old variable names are removed rather than aliased.
 
 No setting may be both an environment variable and a file key, so neither
@@ -161,7 +161,7 @@ slug or installation name a dashboard tenant already holds no longer
 blocks the whole reload: that file tenant is left out of the running
 configuration, the dashboard tenant keeps running, and every other tenant
 applies. The operator console lists the file tenant as conflicting, with
-the reason, the log warns once, and `kritik_config_error{stage="merge"}`
+the reason, the log warns once, and `kritique_config_error{stage="merge"}`
 stays at 1 until the operator renames either side or deletes the dashboard
 tenant. One conflict must not freeze every tenant's configuration at the
 last good snapshot, but the file cannot simply win either: tenant and
@@ -181,7 +181,7 @@ Two rules decide every value:
    empty or zero, so a tenant can clear a default filter, settle or limit. A
    field left out inherits.
 2. **Across authors, the less trusted one narrows or chooses within bounds.**
-   `.kritik.yaml` is written by the repository, not the operator. It is
+   `.kritique.yaml` is written by the repository, not the operator. It is
    applied last, and it can never move a value outside the bounds the
    operator's resolved settings allow (§2.5).
 
@@ -189,7 +189,7 @@ Every repository-scoped setting is available at all three operator scopes
 (`defaults`, tenant, repository), and every tenant-scoped setting at
 `defaults` and tenant:
 
-| Setting                                                                   | Operator scopes                                  | `.kritik.yaml`                                      |
+| Setting                                                                   | Operator scopes                                  | `.kritique.yaml`                                      |
 | ------------------------------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------- |
 | `enabled`                                                                 | repository                                       | may turn off only                                   |
 | `filter`                                                                  | defaults, tenant, repository                     | ANDed with the operator's                           |
@@ -213,9 +213,9 @@ Every repository-scoped setting is available at all three operator scopes
 The environment does not appear in this table: nothing it holds is a
 per-repository setting (§2.2).
 
-### 2.5 `.kritik.yaml`: choices within the operator's bounds
+### 2.5 `.kritique.yaml`: choices within the operator's bounds
 
-The file lives at the root of the repository as `.kritik.yaml`. It is read
+The file lives at the root of the repository as `.kritique.yaml`. It is read
 from the merge base for a review or follow-up, and from the indexed commit
 for an index run: base-branch history, which the pull request under review
 cannot rewrite (ADR-0003 §2.3).
@@ -255,7 +255,7 @@ filter: '!pr.body.contains("[skip-review]")'
 ignore: ["web/src/generated/**"]
 skip: { onlyPaths: ["docs/**"] }
 review:
-  instructions: [".kritik/rules.md"]
+  instructions: [".kritique/rules.md"]
   requireSuggestedFix: true
 ```
 
@@ -279,19 +279,19 @@ uses the repository's `models` and `instructions`.
 what the operator pays for or expose the instance to untrusted code, and no
 `allow` block can open them.
 
-### 2.6 Reading `.kritik.yaml` before the run
+### 2.6 Reading `.kritique.yaml` before the run
 
 A repository's `mode` and `models` decide which model slot the worker waits
 for and what run spec it builds, and its `settle` decides when the job
 starts. All three are decided before the runner exists, but the runner is
-what reads `.kritik.yaml` today. So:
+what reads `.kritique.yaml` today. So:
 
-- **The worker reads `.kritik.yaml` first.** A new `forge.Client.FileAt(ctx,
+- **The worker reads `.kritique.yaml` first.** A new `forge.Client.FileAt(ctx,
 owner, repo, ref, path)` fetches the one file at the merge base (or, for an
   index run, at the indexed commit) through the forge API: the same commit,
   so the same trust root, as the runner's tree. The worker validates it,
   applies the bounds, and puts the effective settings in the run spec. The
-  runner still reads the files `.kritik.yaml` names (instructions,
+  runner still reads the files `.kritique.yaml` names (instructions,
   templates) from the merge-base tree under the existing size caps, but no
   longer merges policy.
 - **Settle moves from ingest to the worker.** Ingest enqueues the review job
@@ -305,7 +305,7 @@ owner, repo, ref, path)` fetches the one file at the merge base (or, for an
 
 Every configuration view the API serves (instance, tenant and repository)
 returns, for each field, its **value**, its **source** (`env`, `file`,
-`dashboard`, `repository` for `.kritik.yaml`, or `default`), and whether the
+`dashboard`, `repository` for `.kritique.yaml`, or `default`), and whether the
 **caller may edit it**. A secret's value is never returned from any layer;
 the API reports only whether it is set (ADR-0009 §2.13).
 
@@ -326,7 +326,7 @@ The UI renders from that response, never from its own list:
   write-only as ADR-0009 §2.13 decides.
 - The operator console shows the instance settings read-only, each with its
   source: `env`, `file` or `default`.
-- A repository's view shows the values its `.kritik.yaml` chose, read-only,
+- A repository's view shows the values its `.kritique.yaml` chose, read-only,
   with the commit they came from and next to the operator's value and
   bound, plus any field dropped for being out of bounds.
 
@@ -359,10 +359,10 @@ two forges is two repositories everywhere, not only in the database.
   one holds it. The UI's routes carry the installation; the repository list
   links a name several installations hold with its installation, and a page
   reached without one offers the installations to choose from.
-- **`.kritik.yaml` is unaffected:** each forge's repository has its own file,
+- **`.kritique.yaml` is unaffected:** each forge's repository has its own file,
   in its own history.
 
-### 2.9 What `.kritik.yaml` can say besides settings
+### 2.9 What `.kritique.yaml` can say besides settings
 
 Greptile's per-repository configuration
 ([`.greptile/` reference](https://www.greptile.com/docs/code-review/greptile-config-reference.md),
@@ -373,8 +373,8 @@ or only changes presentation, so none of it needs an `allow` bound:
 ```yaml
 review:
   instructions:
-    - .kritik/rules.md
-    - { path: .kritik/sql.md, paths: ["internal/store/**", "**/*.sql"] }
+    - .kritique/rules.md
+    - { path: .kritique/sql.md, paths: ["internal/store/**", "**/*.sql"] }
   context:
     - path: internal/store/migrations/0001_init.sql
       description: the schema; check queries against it
@@ -407,13 +407,13 @@ filter: '!pr.draft && pr.event != "synchronize"'
   Label, author, branch, keyword and draft conditions are already filter
   expressions; the documentation gives them as recipes rather than adding
   a list field for each.
-- **A published JSON Schema** for `.kritik.yaml`, so an editor validates the
+- **A published JSON Schema** for `.kritique.yaml`, so an editor validates the
   file before a review has to note that it was ignored.
 
 ## 3. Consequences
 
 - **Operators can let repositories opt in to more** (agentic mode, a
-  different model, more steps) without editing kritik's configuration for
+  different model, more steps) without editing kritique's configuration for
   each repository, and a repository cannot exceed what the operator allowed.
   The default, no `allow` block, keeps today's narrow-only behaviour.
 - **Anyone who can push to a repository's base branch** can now raise that
@@ -429,7 +429,7 @@ filter: '!pr.draft && pr.event != "synchronize"'
 - **Breaking changes, acceptable before the first release:** the three moved
   environment variables are removed, and the chart's `config.pollInterval`,
   `config.pollLookback`, `config.onboardWindow` and runner deadline values
-  render into the file. `.kritik.yaml` `instructions` now append, and a
+  render into the file. `.kritique.yaml` `instructions` now append, and a
   `requireSuggestedFix: false` no longer loosens the operator's `true`.
 - **One tenant can hold the same `owner/repo` on two forges** and configure
   each separately (§2.8). A file whose tenant has two installations with the
@@ -455,10 +455,10 @@ filter: '!pr.draft && pr.event != "synchronize"'
 - **The dashboard managing instance settings, with the file optional.** It
   would need a bootstrap path for the first operator and would put sign-in
   and operators within reach of a dashboard session.
-- **`.kritik.yaml` overriding the operator's tuning.** A repository could
+- **`.kritique.yaml` overriding the operator's tuning.** A repository could
   raise cost and exposure past anything the operator sized the instance for.
 - **Clamping an out-of-bounds value** (§2.5). It runs a value nobody wrote.
-- **Reading `.kritik.yaml` from the pull request's own branch**, as Greptile
+- **Reading `.kritique.yaml` from the pull request's own branch**, as Greptile
   reads `greptile.json`. A pull request could raise its own cost or switch
   off its own review; Greptile itself reads its one approval setting from
   the base branch for that reason.
@@ -481,7 +481,7 @@ filter: '!pr.draft && pr.event != "synchronize"'
   file's providers).
 - Picking up a rotated `file:` secret without a change to the config file's
   own bytes.
-- Path-scoped settings in `.kritik.yaml`: §2.9 scopes instructions and
+- Path-scoped settings in `.kritique.yaml`: §2.9 scopes instructions and
   context, not settings.
 - Per-pull-request escalation, such as a label selecting agentic mode or a
   larger model. A pull request's author controls its labels and title, so

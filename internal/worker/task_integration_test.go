@@ -22,14 +22,14 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/ingest"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/tasks"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/ingest"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 const taskConfigYAML = `
@@ -80,7 +80,7 @@ type taskForge struct {
 	creates  int
 }
 
-func (f *taskForge) BotLogin(context.Context) (string, error) { return "kritik[bot]", nil }
+func (f *taskForge) BotLogin(context.Context) (string, error) { return "kritique[bot]", nil }
 
 func (f *taskForge) BranchTip(context.Context, string, string, string) (string, string, error) {
 	return "c0ffee", "main", nil
@@ -222,12 +222,12 @@ func newTaskHarness(t *testing.T, timeout time.Duration) *taskHarness {
 	t.Helper()
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIK_TEST_APP_URL"), OwnerURL: env(t, "KRITIK_TEST_OWNER_URL"), Logger: logger})
+	st, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: env(t, "KRITIQUE_TEST_OWNER_URL"), Logger: logger})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritik_app", "kritik_runner"); err != nil {
+	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	t.Setenv("TEST_PEM", "pem")
@@ -350,7 +350,7 @@ func TestTaskEndToEnd(t *testing.T) {
 	first := h.waitRuns(1)
 	checkFirstTaskRun(t, h, first)
 	// The dispatch recorded the default branch tip it read, which has no
-	// .kritik.yaml, for the dashboard's task list.
+	// .kritique.yaml, for the dashboard's task list.
 	if n := h.count(`SELECT count(*) FROM repositories WHERE task_config_sha = 'c0ffee' AND task_config_doc IS NULL
 		AND task_config_at IS NOT NULL`); n != 1 {
 		t.Fatalf("repositories with the dispatch's task config = %d, want 1", n)
@@ -360,8 +360,8 @@ func TestTaskEndToEnd(t *testing.T) {
 	if out := h.dispatch("d-1", "devin"); out.Status == ingest.Enqueued {
 		t.Fatalf("a redelivery = %+v", out)
 	}
-	// kritik's own event never triggers a task, and leaves no event behind.
-	if out := h.dispatch("d-bot", "kritik[bot]"); out.Status != ingest.Enqueued {
+	// kritique's own event never triggers a task, and leaves no event behind.
+	if out := h.dispatch("d-bot", "kritique[bot]"); out.Status != ingest.Enqueued {
 		t.Fatalf("the bot's event = %+v", out)
 	}
 	waitFor(t, 20*time.Second, "the bot's event to be dropped", func() bool {

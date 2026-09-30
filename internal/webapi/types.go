@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/home-operations/kritik/internal/auth"
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/repoconfig"
-	"github.com/home-operations/kritik/internal/review"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/transcript"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
 // Every JSON shape the dashboard API returns. internal/web/src/lib/types.ts
@@ -193,7 +193,7 @@ type ReviewBlock struct {
 	Context             []configfile.ContextFile   `json:"context"`
 }
 
-// AllowBounds are what a repository's .kritik.yaml may choose; a bound
+// AllowBounds are what a repository's .kritique.yaml may choose; a bound
 // that is null leaves it only the operator's own value, or for a limit or
 // the settle time one at or below it.
 type AllowBounds struct {
@@ -214,7 +214,7 @@ type AllowAgentBounds struct {
 }
 
 // RepoSettings are a repository's settings as they resolve: the
-// operator's, or with the in-repo .kritik.yaml applied (RepoConfig).
+// operator's, or with the in-repo .kritique.yaml applied (RepoConfig).
 type RepoSettings struct {
 	Enabled       bool                  `json:"enabled"`
 	Mode          configfile.ReviewMode `json:"mode"`
@@ -230,7 +230,7 @@ type RepoSettings struct {
 	Allow         AllowBounds           `json:"allow"`
 }
 
-// RepoConfig is the repository's .kritik.yaml as the last review that ran
+// RepoConfig is the repository's .kritique.yaml as the last review that ran
 // read it, applied to the operator's settings as they are now.
 type RepoConfig struct {
 	ReviewID string `json:"reviewId"`
@@ -270,9 +270,9 @@ type IndexRun struct {
 // RepoDetail is one repository, its settings and recent index runs.
 // Sources says, by the policy table's keys, which layer each of the
 // operator's settings comes from: file, dashboard or default. RepoConfig
-// is null until a review has read the repository's .kritik.yaml. Tasks
+// is null until a review has read the repository's .kritique.yaml. Tasks
 // are the tasks that run for the repository, the operator's and those of
-// the .kritik.yaml RepoConfig read, after the operator's bounds clipped
+// the .kritique.yaml RepoConfig read, after the operator's bounds clipped
 // them; TaskNotes say what the bounds left out.
 type RepoDetail struct {
 	Repository
@@ -282,7 +282,7 @@ type RepoDetail struct {
 	IndexRuns  []IndexRun                   `json:"indexRuns"`
 	Tasks      []TaskDef                    `json:"tasks"`
 	TaskNotes  []TaskNote                   `json:"taskNotes"`
-	// TasksSource says which .kritik.yaml Tasks were resolved from: the one
+	// TasksSource says which .kritique.yaml Tasks were resolved from: the one
 	// a task dispatch last read at the default branch tip, where tasks run
 	// from, or, before any dispatch, the one the last review read at its
 	// merge base. TasksCommit is that file's commit, "" when neither exists.
@@ -300,7 +300,7 @@ const (
 )
 
 // TaskDef is one resolved task. Source is where it is defined: file (the
-// operator's configuration file), dashboard or repository (.kritik.yaml).
+// operator's configuration file), dashboard or repository (.kritique.yaml).
 // Triggers are the event names it runs on, as allow.tasks.events globs
 // them, and Actions the action kinds it declares.
 type TaskDef struct {

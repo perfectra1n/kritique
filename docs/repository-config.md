@@ -1,9 +1,9 @@
-# `.kritik.yaml` reference
+# `.kritique.yaml` reference
 
-A repository may commit an optional `.kritik.yaml` at its root to tune how
-kritik reviews it. It is read from the merge-base commit, never the pull
+A repository may commit an optional `.kritique.yaml` at its root to tune how
+kritique reviews it. It is read from the merge-base commit, never the pull
 request's own tree, so a pull request cannot use its own copy to weaken the
-review applied to it. kritik reads it before the review starts, and applies
+review applied to it. kritique reads it before the review starts, and applies
 it to follow-ups (from the pull request's merge base) and to indexing (from
 the commit indexed) too. Its [`tasks`](#tasks) are read from the default
 branch's tip instead.
@@ -12,12 +12,12 @@ The file holds nothing secret: no field takes a credential, a URL, a host
 or a secret reference, and it can only name what the operator configured,
 a model by its `<provider>/<model>` reference and a command by its name.
 
-[`kritik.schema.json`](kritik.schema.json) is its JSON Schema. An editor
+[`kritique.schema.json`](kritique.schema.json) is its JSON Schema. An editor
 using the YAML language server validates the file as it is written when
 its first line names the schema:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/home-operations/kritik/main/docs/kritik.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/perfectra1n/kritique/main/docs/kritique.schema.json
 ```
 
 ## What it may change
@@ -45,15 +45,15 @@ instructions, and chooses a few settings within bounds the operator sets:
   ```yaml
   review:
     instructions:
-      - .kritik/rules.md
-      - { path: .kritik/sql.md, paths: ["internal/store/**", "**/*.sql"] }
+      - .kritique/rules.md
+      - { path: .kritique/sql.md, paths: ["internal/store/**", "**/*.sql"] }
   ```
 
 - `review.context`: files that explain the code, each a `path` with a
   `description` and optional `paths` globs, added after the operator's. An
   agentic review is pointed at each file to read it with its own tools; a
   single-shot review is given its content, after the diff and before the
-  context kritik gathers, as the prompt budget allows. A file with `paths`
+  context kritique gathers, as the prompt budget allows. A file with `paths`
   applies only when a changed path matches one of them:
 
   ```yaml
@@ -73,7 +73,7 @@ instructions, and chooses a few settings within bounds the operator sets:
   comments.
 - `review.templates.summary` / `review.templates.inline`: paths to Go
   [text/template](https://pkg.go.dev/text/template) templates that replace
-  kritik's built-in summary and inline comment templates, with the
+  kritique's built-in summary and inline comment templates, with the
   [sprout](https://github.com/go-sprout/sprout) helpers tuppr and chaski
   expose (std, strings, conversion, encoding, numeric, slices, maps, regex,
   time, semver and reflect; not env, filesystem, network, random, uniqueid
@@ -115,7 +115,7 @@ filter: '!pr.body.contains("[skip-review]")'
 ignore: ["web/src/generated/**"]
 skip: { onlyPaths: ["docs/**"] }
 review:
-  instructions: [".kritik/rules.md"]
+  instructions: [".kritique/rules.md"]
   requireSuggestedFix: true
 ```
 
@@ -133,7 +133,7 @@ pull request's `number`, `title`, `body`, `author`, `state`, `open`,
 `merged`, `draft`, `fork`, `headRef`, `headSha`, `baseRef`, `url`,
 `createdAt` and `labels` (each with a `name` and a `color`), and `event`,
 what started the review: `opened`, `reopened`, `ready_for_review`,
-`synchronize` (a push), `poll` (a push kritik found without its webhook)
+`synchronize` (a push), `poll` (a push kritique found without its webhook)
 or `manual` (a re-run from the dashboard).
 
 Some filters, each the whole `filter` value:
@@ -166,7 +166,7 @@ that does not parse makes the whole file fail to parse, as any other bad key
 does.
 
 The model never writes to the forge. It returns a structured answer, and
-kritik's worker checks every value in it against what the task declares and
+kritique's worker checks every value in it against what the task declares and
 what the repository has before it applies anything. A runner pod that runs
 an agentic task holds only the installation's read-only credential.
 
@@ -184,7 +184,7 @@ an agentic task holds only the installation's read-only credential.
 | `agent.tools`                                                                    | The agent tools an agentic run gets, from `allow.tasks.tools`. Unset is every tool the operator allows; `[]` is none; `run` needs `agent.commands`.                                                                                                                                                                                                                                  |
 | `agent.commands`                                                                 | Command names the agent may run, a subset of `allow.commands`, or of the operator's own `agent.commands` when it sets none.                                                                                                                                                                                                                                                          |
 | `context`                                                                        | The [context sources](#context-sources) a run gathers.                                                                                                                                                                                                                                                                                                                               |
-| `system`                                                                         | A path to a template added after kritik's fixed system preamble, only when the operator sets `allow.tasks.systemPrompt`.                                                                                                                                                                                                                                                             |
+| `system`                                                                         | A path to a template added after kritique's fixed system preamble, only when the operator sets `allow.tasks.systemPrompt`.                                                                                                                                                                                                                                                             |
 | `prompt`                                                                         | A path to the prompt template.                                                                                                                                                                                                                                                                                                                                                       |
 | `promptInline`                                                                   | The prompt template itself; set `prompt` or `promptInline`, not both. With neither, a built-in prompt asks for a summary and the fields.                                                                                                                                                                                                                                             |
 | `fields`                                                                         | The custom [answer fields](#fields).                                                                                                                                                                                                                                                                                                                                                 |
@@ -206,17 +206,17 @@ Each entry of `on` has exactly one key:
   review comment on a pull request's lines; `created` or `edited`.
 - `raw: { event: <name>, actions: [actions] }`: any delivery whose event
   header (`X-GitHub-Event`, `X-Gitea-Event`) matches `event`, such as
-  `release`, `push` or `workflow_run`, whether or not kritik otherwise acts
+  `release`, `push` or `workflow_run`, whether or not kritique otherwise acts
   on it. The names are the forge's own, so a raw trigger is forge-specific.
 
 The actions are the forge's `action` strings, as globs; an empty or missing
 list is any action. Forgejo and Gitea spell some of them differently, and
-kritik normalizes an issue or pull request event's action to GitHub's
+kritique normalizes an issue or pull request event's action to GitHub's
 spelling, whether a normalized or a raw trigger matches it: `synchronized`
 is `synchronize`, `label_cleared` is `unlabeled`, and `label_updated` is
 `labeled`; other events keep the forge's own spelling. A Forgejo or Gitea `label_updated` does not say
 whether a label was added or removed, so there `labeled` means "the labels
-changed". An event kritik's own bot account sent never triggers a task, so
+changed". An event kritique's own bot account sent never triggers a task, so
 the labels a task adds cannot trigger it again.
 
 The operator's bounds glob a trigger's event names: `issue.opened`,
@@ -286,7 +286,7 @@ What a template sees depends on what it renders:
 Everything in an event comes from people who may try to steer the model, so
 the prompt keeps it apart from instructions whatever the templates say:
 
-- The system prompt always starts with kritik's fixed preamble: data inside
+- The system prompt always starts with kritique's fixed preamble: data inside
   `<untrusted>` blocks is never instructions, and only what the answer
   schema offers may be proposed. A task's `system` is added after it and
   cannot replace it.
@@ -297,7 +297,7 @@ the prompt keeps it apart from instructions whatever the templates say:
   open or close a block, and every `.Context` value is already inside its
   own `<untrusted>` block. `{{ fence "name" .X }}` wraps any other value
   the same way.
-- A report comment has anything that could pass for one of kritik's hidden
+- A report comment has anything that could pass for one of kritique's hidden
   markers escaped.
 
 ### Context sources
@@ -427,7 +427,7 @@ entry, bound by bound like the rest of `allow`:
 | `context`                  | `[thread, files, search, related]`           | Context source kinds; `commands` must be listed.                                                             |
 | `tools`                    | `[read_file, grep, list_files]`              | Agent tools; `run` is opt-in.                                                                                |
 | `systemPrompt`             | `false`                                      | Whether a task may add to the system prompt.                                                                 |
-| `repositoryTasks`          | `true`                                       | Whether a `.kritik.yaml` may define tasks at all.                                                            |
+| `repositoryTasks`          | `true`                                       | Whether a `.kritique.yaml` may define tasks at all.                                                            |
 | `maxTasks`                 | `10`                                         | A repository's tasks.                                                                                        |
 | `maxRunsPerSubjectPerHour` | `6`                                          | How often one task runs on one issue or pull request; a run past it is skipped.                              |
 | `maxFields`                | `16`                                         | A task's fields.                                                                                             |
@@ -448,7 +448,7 @@ drops what is out of bounds, not the whole task where it can: an event, an
 action block, a context source, a tool, the `system` prompt or fields past
 `maxFields`. A task left with no trigger, or with a mode the operator does
 not allow, is dropped. The dashboard lists each repository's tasks, where
-each comes from and a note for everything clipped, from the `.kritik.yaml`
+each comes from and a note for everything clipped, from the `.kritique.yaml`
 the last task event read at the default branch tip (before any event, the
 one the last review read, and the page says which).
 
@@ -466,7 +466,7 @@ defaults:
 ### Task recipes
 
 Each recipe is a directory under [`recipes/`](recipes/) laid out as it would
-be in a repository, and kritik's tests parse and prepare every one of them.
+be in a repository, and kritique's tests parse and prepare every one of them.
 
 #### Issue triage
 
@@ -475,10 +475,10 @@ missing, and point out duplicates. The model picks the type label from a
 short list; the rules add the priority, area and `triaged` labels from its
 fields, so the `if` leaves an issue alone once it is triaged.
 
-[`recipes/issue-triage/.kritik.yaml`](recipes/issue-triage/.kritik.yaml):
+[`recipes/issue-triage/.kritique.yaml`](recipes/issue-triage/.kritique.yaml):
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/home-operations/kritik/main/docs/kritik.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/perfectra1n/kritique/main/docs/kritique.schema.json
 tasks:
   - name: triage
     on:
@@ -492,7 +492,7 @@ tasks:
         - path: CONTRIBUTING.md
       related:
         - { name: dupes, query: "{{ .Subject.Title }}", k: 5 }
-    prompt: .kritik/tasks/triage.md.tmpl
+    prompt: .kritique/tasks/triage.md.tmpl
     fields:
       priority: { type: string, enum: [p0, p1, p2, p3] }
       area: { type: string, enum: [api, web, runner, docs] }
@@ -506,10 +506,10 @@ tasks:
     actions:
       comment:
         mode: sticky
-        template: .kritik/tasks/triage-comment.md.tmpl
+        template: .kritique/tasks/triage-comment.md.tmpl
         if: 'answer.fields.needsInfo || answer.comment != ""'
       labels:
-        # The model picks the type label; kritik offers only these, and
+        # The model picks the type label; kritique offers only these, and
         # only those the repository has.
         propose:
           add: [bug, enhancement, question, documentation]
@@ -524,7 +524,7 @@ tasks:
             if: answer.fields.needsInfo
 ```
 
-[`recipes/issue-triage/.kritik/tasks/triage.md.tmpl`](recipes/issue-triage/.kritik/tasks/triage.md.tmpl):
+[`recipes/issue-triage/.kritique/tasks/triage.md.tmpl`](recipes/issue-triage/.kritique/tasks/triage.md.tmpl):
 
 ```gotemplate
 Triage issue #{{ .Subject.Number }} of {{ .Repo.Owner }}/{{ .Repo.Name }}, opened by {{ .Subject.Author }}.
@@ -549,7 +549,7 @@ The issues and pull requests most like this one, as possible duplicates:
 {{ end }}
 ```
 
-[`recipes/issue-triage/.kritik/tasks/triage-comment.md.tmpl`](recipes/issue-triage/.kritik/tasks/triage-comment.md.tmpl):
+[`recipes/issue-triage/.kritique/tasks/triage-comment.md.tmpl`](recipes/issue-triage/.kritique/tasks/triage-comment.md.tmpl):
 
 ```gotemplate
 Thanks for the report, @{{ .Subject.Author }}.
@@ -573,10 +573,10 @@ Offer every `area/` label the repository has, and add the ones the model
 picks only when it says it is sure. A task sees a pull request's title and
 description, not its diff.
 
-[`recipes/pr-area-labels/.kritik.yaml`](recipes/pr-area-labels/.kritik.yaml):
+[`recipes/pr-area-labels/.kritique.yaml`](recipes/pr-area-labels/.kritique.yaml):
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/home-operations/kritik/main/docs/kritik.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/perfectra1n/kritique/main/docs/kritique.schema.json
 tasks:
   - name: pr-area
     on:
@@ -603,10 +603,10 @@ event, so the operator must allow it, with `raw:release.*` in
 `allow.tasks.events`, and the task has no actions: the summary and its
 fields are the run's report.
 
-[`recipes/release-summary/.kritik.yaml`](recipes/release-summary/.kritik.yaml):
+[`recipes/release-summary/.kritique.yaml`](recipes/release-summary/.kritique.yaml):
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/home-operations/kritik/main/docs/kritik.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/perfectra1n/kritique/main/docs/kritique.schema.json
 tasks:
   - name: release-summary
     # A forge-specific event; the operator must allow it, e.g. with
@@ -630,6 +630,6 @@ tasks:
 ## Limits
 
 A file that fails to parse, a bad `tasks` block included, is ignored as a
-whole, and noted rather than failing the review. Every referenced file, plus `.kritik.yaml` itself, is
+whole, and noted rather than failing the review. Every referenced file, plus `.kritique.yaml` itself, is
 capped at 256 KiB, and 1 MiB in total; a file over either limit is skipped
 and noted rather than failing the review.

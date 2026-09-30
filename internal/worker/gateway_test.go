@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 func TestRefuseRetries(t *testing.T) {
@@ -29,13 +29,13 @@ func TestMaskProvider(t *testing.T) {
 	f, err := configfile.Parse([]byte(`providers:
   p:
     type: openai
-    baseUrl: https://kritik:url-secret@llm.example/v1
+    baseUrl: https://kritique:url-secret@llm.example/v1
     apiKey: { env: TEST_PROVIDER_KEY }
 ` + minimalGatewayFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := maskProvider(`POST "https://kritik:url-secret@llm.example/v1/chat/completions": 401 {"error":"bad key sk-provider"}`, f.Providers["p"])
+	got := maskProvider(`POST "https://kritique:url-secret@llm.example/v1/chat/completions": 401 {"error":"bad key sk-provider"}`, f.Providers["p"])
 	want := `POST "https://***@llm.example/v1/chat/completions": 401 {"error":"bad key ***"}`
 	if got != want {
 		t.Fatalf("masked = %s\nwant     %s", got, want)

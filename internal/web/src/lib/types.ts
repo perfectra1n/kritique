@@ -195,7 +195,7 @@ export interface ReviewBlock {
   context: ContextFile[];
 }
 
-// What a repository's .kritik.yaml may choose; a null bound leaves it the
+// What a repository's .kritique.yaml may choose; a null bound leaves it the
 // operator's own value, or a limit or settle time at or below it.
 export interface AllowBounds {
   modes: ReviewMode[] | null;
@@ -236,7 +236,7 @@ export interface InstanceSetting {
   source: ConfigSource;
 }
 
-// The repository's .kritik.yaml as the last review that ran read it, at
+// The repository's .kritique.yaml as the last review that ran read it, at
 // its merge base, applied to the operator's settings as they are now.
 export interface RepoConfig {
   reviewId: string;
@@ -289,7 +289,7 @@ export interface RepoDetail extends Repository {
   sources: Record<string, ConfigSource>;
   repoConfig: RepoConfig | null;
   indexRuns: IndexRun[];
-  // The tasks that run: the operator's, then those of the .kritik.yaml
+  // The tasks that run: the operator's, then those of the .kritique.yaml
   // tasksSource names, at tasksCommit ('' when there is none).
   tasks: TaskDef[];
   taskNotes: TaskNote[];
@@ -718,7 +718,7 @@ export type RepoRule =
   | 'replace';
 
 // One setting of the policy table: where the operator may write it,
-// whether a tenant admin may too, what a repository's .kritik.yaml may do
+// whether a tenant admin may too, what a repository's .kritique.yaml may do
 // with it, and whether the caller may change it on this tenant.
 export interface FieldPolicy {
   key: string;

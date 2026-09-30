@@ -25,7 +25,7 @@ func TestLoad(t *testing.T) {
 				if c.LogFormat != "json" {
 					t.Fatalf("log format default = %q", c.LogFormat)
 				}
-				if c.ConfigFile != "/etc/kritik/config.yaml" || c.ConfigReloadInterval != 10*time.Second {
+				if c.ConfigFile != "/etc/kritique/config.yaml" || c.ConfigReloadInterval != 10*time.Second {
 					t.Fatalf("config file defaults = %q, %s", c.ConfigFile, c.ConfigReloadInterval)
 				}
 				if c.EmbeddingEnabled() || c.DatabaseOwnerURL != "" || c.ReindexOnModelChange {
@@ -44,7 +44,7 @@ func TestLoad(t *testing.T) {
 		},
 		{
 			name: "explicit values",
-			env:  map[string]string{"KRITIK_ADDR": ":9090", "KRITIK_LOG_LEVEL": "debug", "KRITIK_LOG_FORMAT": "text"},
+			env:  map[string]string{"KRITIQUE_ADDR": ":9090", "KRITIQUE_LOG_LEVEL": "debug", "KRITIQUE_LOG_FORMAT": "text"},
 			check: func(t *testing.T, c *Config) {
 				if c.Addr != ":9090" {
 					t.Fatalf("addr = %q", c.Addr)
@@ -54,20 +54,20 @@ func TestLoad(t *testing.T) {
 				}
 			},
 		},
-		{name: "bad level", env: map[string]string{"KRITIK_LOG_LEVEL": "loud"}, wantErr: true},
-		{name: "bad format", env: map[string]string{"KRITIK_LOG_FORMAT": "xml"}, wantErr: true},
-		{name: "zero reload interval", env: map[string]string{"KRITIK_CONFIG_RELOAD_INTERVAL": "0s"}, wantErr: true},
-		{name: "database url required", env: map[string]string{"KRITIK_DATABASE_URL": ""}, wantErr: true},
-		{name: "embedder half configured", env: map[string]string{"KRITIK_EMBED_MODEL": "m", "KRITIK_EMBED_DIMS": "1024"}, wantErr: true},
-		{name: "embedder dims over halfvec limit", env: map[string]string{"KRITIK_EMBED_BASE_URL": "https://e", "KRITIK_EMBED_API_KEY": "k", "KRITIK_EMBED_MODEL": "m", "KRITIK_EMBED_DIMS": "4096"}, wantErr: true},
-		{name: "embedder max batch zero", env: map[string]string{"KRITIK_EMBED_MAX_BATCH": "0"}, wantErr: true},
-		{name: "same role for app and runner", env: map[string]string{"KRITIK_DATABASE_RUNNER_ROLE": "kritik_app"}, wantErr: true},
-		{name: "zero leader retry", env: map[string]string{"KRITIK_LEADER_RETRY_INTERVAL": "0"}, wantErr: true},
-		{name: "unknown executor", env: map[string]string{"KRITIK_EXECUTOR": "docker"}, wantErr: true},
-		{name: "zero review workers", env: map[string]string{"KRITIK_REVIEW_WORKERS": "0"}, wantErr: true},
+		{name: "bad level", env: map[string]string{"KRITIQUE_LOG_LEVEL": "loud"}, wantErr: true},
+		{name: "bad format", env: map[string]string{"KRITIQUE_LOG_FORMAT": "xml"}, wantErr: true},
+		{name: "zero reload interval", env: map[string]string{"KRITIQUE_CONFIG_RELOAD_INTERVAL": "0s"}, wantErr: true},
+		{name: "database url required", env: map[string]string{"KRITIQUE_DATABASE_URL": ""}, wantErr: true},
+		{name: "embedder half configured", env: map[string]string{"KRITIQUE_EMBED_MODEL": "m", "KRITIQUE_EMBED_DIMS": "1024"}, wantErr: true},
+		{name: "embedder dims over halfvec limit", env: map[string]string{"KRITIQUE_EMBED_BASE_URL": "https://e", "KRITIQUE_EMBED_API_KEY": "k", "KRITIQUE_EMBED_MODEL": "m", "KRITIQUE_EMBED_DIMS": "4096"}, wantErr: true},
+		{name: "embedder max batch zero", env: map[string]string{"KRITIQUE_EMBED_MAX_BATCH": "0"}, wantErr: true},
+		{name: "same role for app and runner", env: map[string]string{"KRITIQUE_DATABASE_RUNNER_ROLE": "kritique_app"}, wantErr: true},
+		{name: "zero leader retry", env: map[string]string{"KRITIQUE_LEADER_RETRY_INTERVAL": "0"}, wantErr: true},
+		{name: "unknown executor", env: map[string]string{"KRITIQUE_EXECUTOR": "docker"}, wantErr: true},
+		{name: "zero review workers", env: map[string]string{"KRITIQUE_REVIEW_WORKERS": "0"}, wantErr: true},
 		{
 			name: "embedder fully configured",
-			env:  map[string]string{"KRITIK_EMBED_BASE_URL": "https://e", "KRITIK_EMBED_API_KEY": "k", "KRITIK_EMBED_MODEL": "m", "KRITIK_EMBED_DIMS": "1024"},
+			env:  map[string]string{"KRITIQUE_EMBED_BASE_URL": "https://e", "KRITIQUE_EMBED_API_KEY": "k", "KRITIQUE_EMBED_MODEL": "m", "KRITIQUE_EMBED_DIMS": "1024"},
 			check: func(t *testing.T, c *Config) {
 				if !c.EmbeddingEnabled() || c.EmbedDims != 1024 || c.EmbedMaxBatch != 64 {
 					t.Fatalf("embedder = %+v", c)
@@ -77,7 +77,7 @@ func TestLoad(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("KRITIK_DATABASE_URL", "postgres://app@db/kritik")
+			t.Setenv("KRITIQUE_DATABASE_URL", "postgres://app@db/kritique")
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}
@@ -114,8 +114,8 @@ func TestWebURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("KRITIK_DATABASE_URL", "postgres://app@db/kritik")
-			t.Setenv("KRITIK_WEB_URL", tt.url)
+			t.Setenv("KRITIQUE_DATABASE_URL", "postgres://app@db/kritique")
+			t.Setenv("KRITIQUE_WEB_URL", tt.url)
 			cfg, err := Load()
 			if tt.wantErr {
 				if err == nil {
@@ -151,7 +151,7 @@ func TestWebURL(t *testing.T) {
 }
 
 func TestRoleValidation(t *testing.T) {
-	t.Setenv("KRITIK_DATABASE_URL", "postgres://app@db/kritik")
+	t.Setenv("KRITIQUE_DATABASE_URL", "postgres://app@db/kritique")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -170,12 +170,12 @@ func TestRoleValidation(t *testing.T) {
 	if err := cfg.ValidateRunner(); err == nil {
 		t.Fatal("runner without its inputs must fail")
 	}
-	cfg.RunSpecFile = "/var/run/kritik/spec.json"
+	cfg.RunSpecFile = "/var/run/kritique/spec.json"
 	if err := cfg.ValidateRunner(); err != nil {
 		t.Fatal(err)
 	}
 	if err := cfg.ValidateWeb(); err == nil {
-		t.Fatal("web role without KRITIK_WEB_URL must fail")
+		t.Fatal("web role without KRITIQUE_WEB_URL must fail")
 	}
 	cfg.WebURL = "https://dash.example.com"
 	if err := cfg.ValidateWeb(); err != nil {
@@ -221,16 +221,16 @@ func TestDashboardKeyring(t *testing.T) {
 		wantNil bool
 	}{
 		{name: "unset", wantNil: true},
-		{name: "current key", env: map[string]string{"KRITIK_DASHBOARD_KEY": key('a')}},
-		{name: "current and old keys", env: map[string]string{"KRITIK_DASHBOARD_KEY": key('a'), "KRITIK_DASHBOARD_OLD_KEYS": key('b') + "," + key('c')}},
-		{name: "short key", env: map[string]string{"KRITIK_DASHBOARD_KEY": "c2hvcnQ="}, wantErr: "KRITIK_DASHBOARD_KEY"},
-		{name: "bad old key", env: map[string]string{"KRITIK_DASHBOARD_KEY": key('a'), "KRITIK_DASHBOARD_OLD_KEYS": "nope"}, wantErr: "KRITIK_DASHBOARD_OLD_KEYS"},
-		{name: "old key repeats the current one", env: map[string]string{"KRITIK_DASHBOARD_KEY": key('a'), "KRITIK_DASHBOARD_OLD_KEYS": key('a')}, wantErr: "duplicate"},
-		{name: "old keys without a current key", env: map[string]string{"KRITIK_DASHBOARD_OLD_KEYS": key('b')}, wantErr: "KRITIK_DASHBOARD_KEY"},
+		{name: "current key", env: map[string]string{"KRITIQUE_DASHBOARD_KEY": key('a')}},
+		{name: "current and old keys", env: map[string]string{"KRITIQUE_DASHBOARD_KEY": key('a'), "KRITIQUE_DASHBOARD_OLD_KEYS": key('b') + "," + key('c')}},
+		{name: "short key", env: map[string]string{"KRITIQUE_DASHBOARD_KEY": "c2hvcnQ="}, wantErr: "KRITIQUE_DASHBOARD_KEY"},
+		{name: "bad old key", env: map[string]string{"KRITIQUE_DASHBOARD_KEY": key('a'), "KRITIQUE_DASHBOARD_OLD_KEYS": "nope"}, wantErr: "KRITIQUE_DASHBOARD_OLD_KEYS"},
+		{name: "old key repeats the current one", env: map[string]string{"KRITIQUE_DASHBOARD_KEY": key('a'), "KRITIQUE_DASHBOARD_OLD_KEYS": key('a')}, wantErr: "duplicate"},
+		{name: "old keys without a current key", env: map[string]string{"KRITIQUE_DASHBOARD_OLD_KEYS": key('b')}, wantErr: "KRITIQUE_DASHBOARD_KEY"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("KRITIK_DATABASE_URL", "postgres://app@db/kritik")
+			t.Setenv("KRITIQUE_DATABASE_URL", "postgres://app@db/kritique")
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}
@@ -252,8 +252,8 @@ func TestDashboardKeyring(t *testing.T) {
 }
 
 func TestEnv(t *testing.T) {
-	t.Setenv("KRITIK_DATABASE_URL", "postgres://app:secret@db/kritik")
-	t.Setenv("KRITIK_ADDR", ":9090")
+	t.Setenv("KRITIQUE_DATABASE_URL", "postgres://app:secret@db/kritique")
+	t.Setenv("KRITIQUE_ADDR", ":9090")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -263,11 +263,11 @@ func TestEnv(t *testing.T) {
 		vars[e.Name] = e
 	}
 	for name, want := range map[string]EnvVar{
-		"KRITIK_ADDR":                   {Name: "KRITIK_ADDR", Value: ":9090", Set: true},
-		"KRITIK_METRICS_ADDR":           {Name: "KRITIK_METRICS_ADDR", Value: ":8081"},
-		"KRITIK_CONFIG_RELOAD_INTERVAL": {Name: "KRITIK_CONFIG_RELOAD_INTERVAL", Value: "10s"},
-		"KRITIK_DATABASE_URL":           {Name: "KRITIK_DATABASE_URL", Value: "set", Secret: true, Set: true},
-		"KRITIK_DASHBOARD_KEY":          {Name: "KRITIK_DASHBOARD_KEY", Value: "not set", Secret: true},
+		"KRITIQUE_ADDR":                   {Name: "KRITIQUE_ADDR", Value: ":9090", Set: true},
+		"KRITIQUE_METRICS_ADDR":           {Name: "KRITIQUE_METRICS_ADDR", Value: ":8081"},
+		"KRITIQUE_CONFIG_RELOAD_INTERVAL": {Name: "KRITIQUE_CONFIG_RELOAD_INTERVAL", Value: "10s"},
+		"KRITIQUE_DATABASE_URL":           {Name: "KRITIQUE_DATABASE_URL", Value: "set", Secret: true, Set: true},
+		"KRITIQUE_DASHBOARD_KEY":          {Name: "KRITIQUE_DASHBOARD_KEY", Value: "not set", Secret: true},
 	} {
 		if vars[name] != want {
 			t.Errorf("%s = %+v, want %+v", name, vars[name], want)

@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/forge"
+	"github.com/perfectra1n/kritique/internal/forge"
 )
 
 // testToken is the fixed token every newTestServer client authenticates
@@ -96,7 +96,7 @@ func TestMergeBase(t *testing.T) {
 func TestFileAt(t *testing.T) {
 	srv, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.EscapedPath() + "?" + r.URL.RawQuery {
-		case "/api/v1/repos/acme/widgets/raw/.kritik/my%20rules.md?ref=deadbeef":
+		case "/api/v1/repos/acme/widgets/raw/.kritique/my%20rules.md?ref=deadbeef":
 			_, _ = w.Write([]byte("rules"))
 		case "/api/v1/repos/acme/widgets/raw/big.bin?ref=deadbeef":
 			_, _ = w.Write(bytes.Repeat([]byte("x"), forge.MaxFileBytes+1))
@@ -105,7 +105,7 @@ func TestFileAt(t *testing.T) {
 		}
 	})
 	defer srv.Close()
-	got, err := c.FileAt(t.Context(), "acme", "widgets", "deadbeef", ".kritik/my rules.md")
+	got, err := c.FileAt(t.Context(), "acme", "widgets", "deadbeef", ".kritique/my rules.md")
 	if err != nil || string(got) != "rules" {
 		t.Fatalf("FileAt = %q, %v", got, err)
 	}
@@ -202,16 +202,16 @@ func TestBotLoginCaches(t *testing.T) {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		hits++
-		_, _ = w.Write([]byte(`{"login":"kritik-bot"}`))
+		_, _ = w.Write([]byte(`{"login":"kritique-bot"}`))
 	})
 	defer srv.Close()
 
 	first, err := c.BotLogin(t.Context())
-	if err != nil || first != "kritik-bot" {
+	if err != nil || first != "kritique-bot" {
 		t.Fatalf("BotLogin = %q, %v", first, err)
 	}
 	second, err := c.BotLogin(t.Context())
-	if err != nil || second != "kritik-bot" || hits != 1 {
+	if err != nil || second != "kritique-bot" || hits != 1 {
 		t.Fatalf("BotLogin second = %q, %v, hits = %d, want 1", second, err, hits)
 	}
 }
@@ -223,18 +223,18 @@ func TestFindComment(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`[
 			{"id":1,"body":"unrelated","user":{"login":"someone"},"created_at":"2026-01-01T00:00:00Z"},
-			{"id":2,"body":"kritik-marker: v1","user":{"login":"kritik-bot"},"created_at":"2026-01-02T00:00:00Z"},
-			{"id":3,"body":"kritik-marker: v2","user":{"login":"kritik-bot"},"created_at":"2026-01-03T00:00:00Z"}
+			{"id":2,"body":"kritique-marker: v1","user":{"login":"kritique-bot"},"created_at":"2026-01-02T00:00:00Z"},
+			{"id":3,"body":"kritique-marker: v2","user":{"login":"kritique-bot"},"created_at":"2026-01-03T00:00:00Z"}
 		]`))
 	})
 	defer srv.Close()
 
-	id, err := c.FindComment(t.Context(), "acme", "widgets", 9, "kritik-bot", "kritik-marker")
+	id, err := c.FindComment(t.Context(), "acme", "widgets", 9, "kritique-bot", "kritique-marker")
 	if err != nil || id != 2 {
 		t.Fatalf("FindComment = %d, %v", id, err)
 	}
 
-	id, err = c.FindComment(t.Context(), "acme", "widgets", 9, "kritik-bot", "nope")
+	id, err = c.FindComment(t.Context(), "acme", "widgets", 9, "kritique-bot", "nope")
 	if err != nil || id != 0 {
 		t.Fatalf("FindComment (no match) = %d, %v", id, err)
 	}
@@ -244,11 +244,11 @@ func TestCreateUpdateGetComment(t *testing.T) {
 	srv, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/acme/widgets/issues/9/comments":
-			_, _ = w.Write([]byte(`{"id":42,"body":"hello","user":{"login":"kritik-bot"},"created_at":"2026-01-01T00:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"id":42,"body":"hello","user":{"login":"kritique-bot"},"created_at":"2026-01-01T00:00:00Z"}`))
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/repos/acme/widgets/issues/comments/42":
-			_, _ = w.Write([]byte(`{"id":42,"body":"updated","user":{"login":"kritik-bot"},"created_at":"2026-01-01T00:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"id":42,"body":"updated","user":{"login":"kritique-bot"},"created_at":"2026-01-01T00:00:00Z"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/issues/comments/42":
-			_, _ = w.Write([]byte(`{"id":42,"body":"updated","user":{"login":"kritik-bot"},"created_at":"2026-01-01T00:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"id":42,"body":"updated","user":{"login":"kritique-bot"},"created_at":"2026-01-01T00:00:00Z"}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -266,7 +266,7 @@ func TestCreateUpdateGetComment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetComment: %v", err)
 	}
-	if cm.ID != 42 || cm.Body != "updated" || cm.Author != "kritik-bot" || cm.Inline {
+	if cm.ID != 42 || cm.Body != "updated" || cm.Author != "kritique-bot" || cm.Inline {
 		t.Fatalf("GetComment = %+v", cm)
 	}
 }
@@ -341,7 +341,7 @@ func TestSetStatus(t *testing.T) {
 	if err := c.SetStatus(t.Context(), "acme", "widgets", "deadbeef", forge.StatusPending, long); err != nil {
 		t.Fatalf("SetStatus: %v", err)
 	}
-	if !strings.Contains(gotBody, `"state":"pending"`) || !strings.Contains(gotBody, `"context":"kritik/review"`) {
+	if !strings.Contains(gotBody, `"state":"pending"`) || !strings.Contains(gotBody, `"context":"kritique/review"`) {
 		t.Fatalf("status body = %q", gotBody)
 	}
 	if strings.Count(gotBody, "x") >= 200 {
@@ -451,7 +451,7 @@ func TestListInlineAndReplyAndGetComment(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"id":100,"commit_id":"sha1","submitted_at":"2026-01-01T00:00:00Z"}]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/pulls/9/reviews/100/comments":
 			_, _ = w.Write([]byte(`[
-				{"id":200,"body":"first","path":"a.go","position":5,"commit_id":"sha1","user":{"login":"kritik-bot"},"created_at":"2026-01-01T00:00:01Z"},
+				{"id":200,"body":"first","path":"a.go","position":5,"commit_id":"sha1","user":{"login":"kritique-bot"},"created_at":"2026-01-01T00:00:01Z"},
 				{"id":201,"body":"second","path":"b.go","position":9,"commit_id":"sha1","user":{"login":"alice"},"created_at":"2026-01-01T00:00:02Z"}
 			]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/acme/widgets/pulls/9/reviews":
@@ -516,7 +516,7 @@ func TestGetCommentInCodeConversation(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/pulls/9/reviews":
 			_, _ = w.Write([]byte(`[{"id":100,"commit_id":"sha1","submitted_at":"2026-01-01T00:00:00Z"}]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/pulls/9/reviews/100/comments":
-			_, _ = w.Write([]byte(`[{"id":200,"body":"@kritik why?","path":"a.go","position":5,"commit_id":"sha1","user":{"login":"alice"},"created_at":"2026-01-01T00:00:01Z"}]`))
+			_, _ = w.Write([]byte(`[{"id":200,"body":"@kritique why?","path":"a.go","position":5,"commit_id":"sha1","user":{"login":"alice"},"created_at":"2026-01-01T00:00:01Z"}]`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -579,7 +579,7 @@ func TestGetCommentWithoutPriorListInline(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/pulls/9/reviews":
 			_, _ = w.Write([]byte(`[{"id":100,"commit_id":"sha1","submitted_at":"2026-01-01T00:00:00Z"}]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/pulls/9/reviews/100/comments":
-			_, _ = w.Write([]byte(`[{"id":200,"body":"first","path":"a.go","position":5,"commit_id":"sha1","user":{"login":"kritik-bot"},"created_at":"2026-01-01T00:00:01Z"}]`))
+			_, _ = w.Write([]byte(`[{"id":200,"body":"first","path":"a.go","position":5,"commit_id":"sha1","user":{"login":"kritique-bot"},"created_at":"2026-01-01T00:00:01Z"}]`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1004,7 +1004,7 @@ func TestIsBot(t *testing.T) {
 		login string
 		want  bool
 	}{
-		{"kritik-bot", false},
+		{"kritique-bot", false},
 		{"some-bot", false},
 		{"dependabot[bot]", true},
 		{"renovate[bot]", true},

@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// EventKind is the kind of row a kritik_events notification describes.
+// EventKind is the kind of row a kritique_events notification describes.
 type EventKind string
 
 const (
@@ -34,7 +34,7 @@ func (k EventKind) Valid() bool {
 
 func (k EventKind) String() string { return string(k) }
 
-// Event is one row change published on the kritik_events channel: a new or
+// Event is one row change published on the kritique_events channel: a new or
 // changed reviews, runner_runs, index_runs, followups, model_calls or
 // task_runs row.
 // ReviewID is nil for a row whose table has no review_id column, or whose
@@ -46,7 +46,7 @@ type Event struct {
 	ReviewID *string
 }
 
-// eventPayload mirrors the JSON kritik_notify_event() publishes.
+// eventPayload mirrors the JSON kritique_notify_event() publishes.
 type eventPayload struct {
 	TenantID string  `json:"tenant_id"`
 	Kind     string  `json:"kind"`
@@ -54,7 +54,7 @@ type eventPayload struct {
 	ReviewID *string `json:"review_id"`
 }
 
-// parseEvent decodes one kritik_events notification payload.
+// parseEvent decodes one kritique_events notification payload.
 func parseEvent(payload string) (Event, error) {
 	var p eventPayload
 	if err := json.Unmarshal([]byte(payload), &p); err != nil {
@@ -147,8 +147,8 @@ func (w *dropWarner) drop() {
 	}
 }
 
-// Listen holds one dedicated connection LISTENing on kritik_events and
-// kritik_config, reconnecting with backoff on any error, until ctx ends
+// Listen holds one dedicated connection LISTENing on kritique_events and
+// kritique_config, reconnecting with backoff on any error, until ctx ends
 // (the only condition under which Listen returns).
 //
 // The connection's read loop never calls a handler directly: it decodes
@@ -159,8 +159,8 @@ func (w *dropWarner) drop() {
 // apply backpressure to unrelated writers. See ListenHandlers for the
 // resulting callback contract.
 //
-// A malformed kritik_events payload is logged and skipped rather than
-// ending the listener. kritik_config payloads are raw tenant slugs, passed
+// A malformed kritique_events payload is logged and skipped rather than
+// ending the listener. kritique_config payloads are raw tenant slugs, passed
 // to OnConfig unparsed.
 func (s *Store) Listen(ctx context.Context, handlers ListenHandlers) {
 	notifications := make(chan func(), listenBufferSize)
@@ -230,7 +230,7 @@ func (s *Store) listenOnce(
 	if connConfig.RuntimeParams == nil {
 		connConfig.RuntimeParams = map[string]string{}
 	}
-	connConfig.RuntimeParams["application_name"] = "kritik-listen"
+	connConfig.RuntimeParams["application_name"] = "kritique-listen"
 
 	conn, err := pgx.ConnectConfig(ctx, connConfig)
 	if err != nil {
@@ -242,11 +242,11 @@ func (s *Store) listenOnce(
 		_ = conn.Close(closeCtx)
 	}()
 
-	if _, err := conn.Exec(ctx, `LISTEN kritik_events`); err != nil {
-		return false, fmt.Errorf("store: listen kritik_events: %w", err)
+	if _, err := conn.Exec(ctx, `LISTEN kritique_events`); err != nil {
+		return false, fmt.Errorf("store: listen kritique_events: %w", err)
 	}
-	if _, err := conn.Exec(ctx, `LISTEN kritik_config`); err != nil {
-		return false, fmt.Errorf("store: listen kritik_config: %w", err)
+	if _, err := conn.Exec(ctx, `LISTEN kritique_config`); err != nil {
+		return false, fmt.Errorf("store: listen kritique_config: %w", err)
 	}
 
 	// From here on this attempt counts as having reached the loop,
@@ -267,7 +267,7 @@ func (s *Store) listenOnce(
 		}
 		var fn func()
 		switch n.Channel {
-		case "kritik_events":
+		case "kritique_events":
 			event, err := parseEvent(n.Payload)
 			if err != nil {
 				s.logger.Warn("dropped malformed event notification", "error", err, "payload", n.Payload)
@@ -277,7 +277,7 @@ func (s *Store) listenOnce(
 				continue
 			}
 			fn = func() { handlers.OnEvent(event) }
-		case "kritik_config":
+		case "kritique_config":
 			if handlers.OnConfig == nil {
 				continue
 			}

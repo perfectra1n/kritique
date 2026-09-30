@@ -1,5 +1,5 @@
-// Package repoconfig parses .kritik.yaml, the optional per-repository file
-// that lets a repository narrow how kritik reviews it (a filter ANDed with
+// Package repoconfig parses .kritique.yaml, the optional per-repository file
+// that lets a repository narrow how kritique reviews it (a filter ANDed with
 // the operator's own filter, path globs to ignore, a skip-review rule),
 // add review instructions and templates read from the repository itself,
 // and choose its mode, models, agent limits and settle time within the
@@ -7,7 +7,7 @@
 //
 // Everything here is read from the merge-base commit (the base branch history
 // a PR cannot rewrite), never the PR's own tree, so a PR cannot use its own
-// .kritik.yaml to weaken the review applied to it. The worker reads the
+// .kritique.yaml to weaken the review applied to it. The worker reads the
 // file itself and hands it to Merge; Collect's read callback is how the
 // runner reads the files it names from the same commit. This package only
 // decides which paths to read and how much of what comes back to keep.
@@ -28,13 +28,13 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"go.yaml.in/yaml/v3"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/prfilter"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/prfilter"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // FileName is the repository-relative path of the per-repository config file.
-const FileName = ".kritik.yaml"
+const FileName = ".kritique.yaml"
 
 // Byte budgets for Collect. A repository config is meant to point at a
 // handful of small instruction/template files, not embed arbitrary content;
@@ -49,7 +49,7 @@ const (
 // cannot crowd the diff out of the prompt budget.
 const MaxInstructionBytes = 32 << 10
 
-// Templates names in-repo files whose contents replace kritik's built-in
+// Templates names in-repo files whose contents replace kritique's built-in
 // summary/inline comment templates.
 type Templates struct {
 	Summary string `yaml:"summary,omitempty"`
@@ -120,7 +120,7 @@ type Agent struct {
 	Commands           []string       `yaml:"commands,omitempty"`
 }
 
-// File is the decoded content of .kritik.yaml. Nothing in it is a secret or
+// File is the decoded content of .kritique.yaml. Nothing in it is a secret or
 // a reference to one: it can only name what the operator configured.
 type File struct {
 	Enabled *bool                 `yaml:"enabled,omitempty"`
@@ -136,7 +136,7 @@ type File struct {
 	Tasks []tasks.Task `yaml:"tasks,omitempty"`
 }
 
-// Parse decodes data as .kritik.yaml. Unknown fields, invalid glob patterns
+// Parse decodes data as .kritique.yaml. Unknown fields, invalid glob patterns
 // and a filter that fails to compile or that fails a smoke test against
 // configfile.SamplePR are rejected, as is any referenced path (an
 // instruction or template) that is absolute or escapes the repository via

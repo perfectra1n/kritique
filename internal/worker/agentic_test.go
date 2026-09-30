@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/agent"
-	"github.com/home-operations/kritik/internal/executor"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/executor"
 )
 
 func TestAgentRunStopError(t *testing.T) {

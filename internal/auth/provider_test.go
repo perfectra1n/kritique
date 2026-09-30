@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 func TestForgeProviderURLs(t *testing.T) {
@@ -74,7 +74,7 @@ func TestForgeProviderURLs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, err := buildProvider(context.Background(), tt.signIn, "https://kritik.example.com/auth/callback/"+tt.signIn.Name, http.DefaultClient, nil)
+			p, err := buildProvider(context.Background(), tt.signIn, "https://kritique.example.com/auth/callback/"+tt.signIn.Name, http.DefaultClient, nil)
 			if err != nil {
 				t.Fatalf("buildProvider: %v", err)
 			}
@@ -95,7 +95,7 @@ func TestForgeProviderURLs(t *testing.T) {
 			q := u.Query()
 			want := map[string]string{
 				"client_id": "cid", "state": "st", "response_type": "code", "scope": tt.scope,
-				"redirect_uri":          "https://kritik.example.com/auth/callback/" + tt.signIn.Name,
+				"redirect_uri":          "https://kritique.example.com/auth/callback/" + tt.signIn.Name,
 				"code_challenge_method": "S256",
 			}
 			for k, v := range want {
@@ -112,9 +112,9 @@ func TestForgeProviderURLs(t *testing.T) {
 
 func TestRedirectURL(t *testing.T) {
 	tests := []struct{ web, want string }{
-		{"https://kritik.example.com", "https://kritik.example.com/auth/callback/gh"},
-		{"https://kritik.example.com/", "https://kritik.example.com/auth/callback/gh"},
-		{"https://example.com/kritik/", "https://example.com/kritik/auth/callback/gh"},
+		{"https://kritique.example.com", "https://kritique.example.com/auth/callback/gh"},
+		{"https://kritique.example.com/", "https://kritique.example.com/auth/callback/gh"},
+		{"https://example.com/kritique/", "https://example.com/kritique/auth/callback/gh"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.web, func(t *testing.T) {
@@ -128,7 +128,7 @@ func TestRedirectURL(t *testing.T) {
 
 func TestProvidersCacheRebuildsOnChange(t *testing.T) {
 	web := configfile.Web{SignIn: []configfile.SignIn{{Name: "gh", Type: configfile.SignInGitHub, Host: "github.com", ClientID: "one"}}}
-	u, _ := url.Parse("https://kritik.example.com")
+	u, _ := url.Parse("https://kritique.example.com")
 	ps := newProviders(u, http.DefaultClient, nil)
 	a, _, err := ps.get(context.Background(), web, "gh")
 	if err != nil {
@@ -178,7 +178,7 @@ func TestProvidersRemembersFailedDiscovery(t *testing.T) {
 	}))
 	defer srv.Close()
 	now := time.Now()
-	u, _ := url.Parse("https://kritik.example.com")
+	u, _ := url.Parse("https://kritique.example.com")
 	ps := newProviders(u, srv.Client(), func() time.Time { return now })
 	web := configfile.Web{SignIn: []configfile.SignIn{{Name: "corp", Type: configfile.SignInOIDC, Issuer: srv.URL, ClientID: "c"}}}
 	for range 3 {
@@ -203,7 +203,7 @@ func TestProvidersDoesNotRememberAnEndedRequest(t *testing.T) {
 		http.Error(w, "down", http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
-	u, _ := url.Parse("https://kritik.example.com")
+	u, _ := url.Parse("https://kritique.example.com")
 	ps := newProviders(u, srv.Client(), nil)
 	web := configfile.Web{SignIn: []configfile.SignIn{{Name: "corp", Type: configfile.SignInOIDC, Issuer: srv.URL, ClientID: "c"}}}
 	canceled, cancel := context.WithCancel(context.Background())
@@ -230,7 +230,7 @@ func TestProvidersRemembersASlowIssuer(t *testing.T) {
 	defer close(release)
 	client := srv.Client()
 	client.Timeout = 50 * time.Millisecond
-	u, _ := url.Parse("https://kritik.example.com")
+	u, _ := url.Parse("https://kritique.example.com")
 	ps := newProviders(u, client, nil)
 	web := configfile.Web{SignIn: []configfile.SignIn{{Name: "corp", Type: configfile.SignInOIDC, Issuer: srv.URL, ClientID: "c"}}}
 	if _, _, err := ps.get(context.Background(), web, "corp"); !errors.Is(err, context.DeadlineExceeded) {

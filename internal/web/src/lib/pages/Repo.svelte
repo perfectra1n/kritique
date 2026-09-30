@@ -86,10 +86,10 @@
     env: 'environment',
     file: 'config file',
     dashboard: 'dashboard',
-    repository: '.kritik.yaml',
+    repository: '.kritique.yaml',
   };
 
-  // The bounds a repository's .kritik.yaml chooses within, each "own" when
+  // The bounds a repository's .kritique.yaml chooses within, each "own" when
   // the operator set none.
   function bounds(s: RepoSettings): { label: string; value: string }[] {
     const a = s.allow;
@@ -173,7 +173,7 @@
 
           <div class="grid-2">
             <section class="panel" aria-labelledby="repo-file">
-              <header class="panel-head"><h2 id="repo-file" class="mono">.kritik.yaml</h2></header>
+              <header class="panel-head"><h2 id="repo-file" class="mono">.kritique.yaml</h2></header>
               {#if !rc}
                 <p class="state-msg">No review has read it yet.</p>
               {:else}
@@ -189,7 +189,7 @@
                   {/if}
                 </dl>
                 {#if !rc.found}
-                  <p class="state-msg">There was no .kritik.yaml at that commit.</p>
+                  <p class="state-msg">There was no .kritique.yaml at that commit.</p>
                 {/if}
                 {#if rc.ignored}
                   <p class="notice" role="note">Ignored as a whole: {rc.ignored}</p>
@@ -203,7 +203,7 @@
               {/if}
             </section>
             <section class="panel" aria-labelledby="repo-bounds">
-              <header class="panel-head"><h2 id="repo-bounds">What .kritik.yaml may choose</h2></header>
+              <header class="panel-head"><h2 id="repo-bounds">What .kritique.yaml may choose</h2></header>
               <dl class="deflist">
                 {#each bounds(s) as b (b.label)}
                   <dt>{b.label}</dt><dd class="mono">{b.value}</dd>
@@ -216,13 +216,13 @@
             <header class="panel-head"><h2 id="repo-tasks">Tasks</h2></header>
             <p class="muted small" data-testid="tasks-source">
               {#if d.tasksSource === 'defaultBranch'}
-                Resolved from the <span class="mono">.kritik.yaml</span> at the default branch tip
+                Resolved from the <span class="mono">.kritique.yaml</span> at the default branch tip
                 <span class="mono" title={d.tasksCommit}>{shortSha(d.tasksCommit)}</span>, as the last task event read it.
               {:else if d.tasksCommit}
-                No task event has been handled yet; resolved from the <span class="mono">.kritik.yaml</span> the last review read at
+                No task event has been handled yet; resolved from the <span class="mono">.kritique.yaml</span> the last review read at
                 <span class="mono" title={d.tasksCommit}>{shortSha(d.tasksCommit)}</span>. Tasks run from the default branch tip.
               {:else}
-                No task event has been handled yet, and no review has read a <span class="mono">.kritik.yaml</span>.
+                No task event has been handled yet, and no review has read a <span class="mono">.kritique.yaml</span>.
               {/if}
             </p>
             {#if d.tasksIgnored}

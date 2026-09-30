@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // TestDispatchIgnoresNonPullComments runs without a store: a comment on

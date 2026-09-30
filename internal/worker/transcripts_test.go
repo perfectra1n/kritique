@@ -3,7 +3,7 @@ package worker
 import (
 	"testing"
 
-	"github.com/home-operations/kritik/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 func TestTranscriptMask(t *testing.T) {
@@ -12,7 +12,7 @@ func TestTranscriptMask(t *testing.T) {
 	f, err := configfile.Parse([]byte(`providers:
   p:
     type: openai
-    baseUrl: https://kritik:url-secret@llm.example/v1
+    baseUrl: https://kritique:url-secret@llm.example/v1
     apiKey: { env: TEST_PROVIDER_KEY }
 egress:
   allowHosts: [api.example.com]
@@ -25,7 +25,7 @@ egress:
 	mask := transcriptMask(f, f.Providers["p"], "krk_run", "", `se"cr\et<x`)
 	tests := map[string]string{
 		"key sk-provider":                           "key ***",
-		"https://kritik:url-secret@llm/":            "https://***@llm/",
+		"https://kritique:url-secret@llm/":          "https://***@llm/",
 		"auth Bearer ghp-egress or bare ghp-egress": "auth *** or bare ***",
 		"token krk_run":                             "token ***",
 		`plain se"cr\et<x`:                          "plain ***",

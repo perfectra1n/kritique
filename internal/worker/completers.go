@@ -5,8 +5,8 @@ import (
 	"maps"
 	"sync"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/model"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 // Completers resolves a configured provider to its model adapter, building

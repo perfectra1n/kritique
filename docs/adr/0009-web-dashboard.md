@@ -6,8 +6,8 @@
   §6's question of editing file-managed tenants (it may not), leaves out
   the file tenant in a collision of §2.12 instead of blocking the whole
   reload, and replaces §2.15's list with one policy table.
-- **Amends:** [ADR-0002](0002-kritik-pr-review-service.md) §2.17 and
-  [ADR-0001](0001-kritik-pr-review-service.md) §2.14, the deferred v2
+- **Amends:** [ADR-0002](0002-kritique-pr-review-service.md) §2.17 and
+  [ADR-0001](0001-kritique-pr-review-service.md) §2.14, the deferred v2
   dashboard sketch in both: this ADR is that dashboard, built.
 - **Authors:** perfectra1n.
 
@@ -19,7 +19,7 @@
 
 ## 1. Context
 
-kritik has no UI. Its state lives only in Postgres and in forge comments.
+kritique has no UI. Its state lives only in Postgres and in forge comments.
 ADR-0002 §2.17 and ADR-0001 §2.14 deferred a dashboard to v2 and had v1 do
 three things so it could be additive: Postgres is the source of truth even
 though the file is the only writer, usage and review history are recorded
@@ -70,14 +70,14 @@ theme, keyboard and command-palette patterns are copied from konflate
 rather than redesigned.
 
 A new `--role web` serves it, also included in `all`. It listens on
-`KRITIK_WEB_ADDR` (default `:8083`), with `KRITIK_WEB_URL` as the external
+`KRITIQUE_WEB_ADDR` (default `:8083`), with `KRITIQUE_WEB_URL` as the external
 URL for OAuth redirects. It uses the app DSN only, and holds an
 insert-only River client, the same shape as ingest's.
 
 ### 2.2 Live updates: server-sent events, not a websocket
 
 `GET /api/events` is fed by Postgres `LISTEN`/`NOTIFY`: a trigger calls
-`pg_notify('kritik_events', {tenant_id, kind, id, review_id})` on status
+`pg_notify('kritique_events', {tenant_id, kind, id, review_id})` on status
 and phase changes, never on heartbeats. The payload carries IDs only; the
 server filters by the caller's tenants, and the client re-fetches the
 full state for whatever the notification named.
@@ -108,7 +108,7 @@ providers and models the file already declares.
 The alternative was environment variables, which is how ADR-0002 §2.17
 and ADR-0001 §2.14 originally sketched it: "an environment-configured
 allowlist" and "a key from the environment." Every other piece of
-instance configuration in kritik already has exactly one source of truth,
+instance configuration in kritique already has exactly one source of truth,
 the config file, hot-reloaded and validated as a whole. A list of
 provider objects and an operator allowlist would need their own
 delimiter-and-parsing convention as environment variables, and a second
@@ -180,14 +180,14 @@ A session cookie holds a random 256-bit value, stored server-side only as
 its SHA-256, never the raw token: the server only ever needs to verify a
 presented value against the hash, so a database read alone can't hand out
 a usable session. Cookies are `HttpOnly; SameSite=Lax`, and `Secure`
-whenever `KRITIK_WEB_URL` is https (it is dropped only for a plain-http
+whenever `KRITIQUE_WEB_URL` is https (it is dropped only for a plain-http
 URL, such as a local run). Over https their names carry the `__Host-`
 prefix when the dashboard is served at the root, binding them to exactly
 that host so a sibling subdomain cannot plant one, and `__Secure-` under a
 path.
 
 Every mutating request must carry a matching `Origin` or a
-`Sec-Fetch-Site: same-origin` header, plus an `X-Kritik: 1` header. A
+`Sec-Fetch-Site: same-origin` header, plus an `X-Kritique: 1` header. A
 cross-site form submission cannot add a custom header, so requiring one
 forces the browser into a CORS preflight, and the preflight only succeeds
 if the server's CORS policy allows the calling origin — closing the
@@ -217,7 +217,7 @@ usage are kept. Everything is passed through `maskProvider` and the
 egress credentials mask before it is written, the same masking the log
 tail already gets. "Raw output" means the model's text plus its tool-call
 input exactly as returned; the vendor's wire JSON is not kept, which
-bounds what "raw" means to kritik's own contract rather than
+bounds what "raw" means to kritique's own contract rather than
 provider-specific framing.
 
 ### 2.9 Re-run: a `Request` field, not bypassing uniqueness
@@ -347,7 +347,7 @@ Sessions, cookies and CSRF are as described in §2.7. Credentials are
 sealed with envelope encryption from `internal/sealbox` (§2.5): each
 secret gets a random 256-bit data key and AES-256-GCM, and the data key is
 itself wrapped with AES-GCM under a key-encryption key from
-`KRITIK_DASHBOARD_KEY` (32 bytes base64, or `_FILE`); `KRITIK_DASHBOARD_
+`KRITIQUE_DASHBOARD_KEY` (32 bytes base64, or `_FILE`); `KRITIQUE_DASHBOARD_
 OLD_KEYS` lists older keys, used only to decrypt, and each sealed value
 records its key ID, the first 8 bytes of the SHA-256 of the key. Every
 non-runner role needs the key once dashboard rows exist; startup fails
@@ -380,7 +380,7 @@ of age, by the per-row and per-run caps in §2.8.
 
 ## 5. Consequences
 
-- kritik gains a UI without a second source of truth for tenant
+- kritique gains a UI without a second source of truth for tenant
   configuration: every runtime component keeps reading
   `configfile.Current`, now fed by a merge of file and dashboard rows.
 - The full model conversation becomes inspectable after the fact, for
@@ -405,5 +405,5 @@ of age, by the per-row and per-run caps in §2.8.
   question. The default answer is no, so that git stays the source of
   truth for anything declared in git.
 - Rotating the key-encryption key needs a job that re-seals every sealed
-  value under the new key. `KRITIK_DASHBOARD_OLD_KEYS` covers reading old
+  value under the new key. `KRITIQUE_DASHBOARD_OLD_KEYS` covers reading old
   ciphertext in the meantime, but the re-seal job itself is deferred.

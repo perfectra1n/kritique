@@ -18,7 +18,7 @@ type label struct {
 	Color string `json:"color"`
 }
 
-// repository is the subset of Forgejo's Repository model kritik reads.
+// repository is the subset of Forgejo's Repository model kritique reads.
 type repository struct {
 	FullName      string `json:"full_name"`
 	DefaultBranch string `json:"default_branch"`
@@ -34,7 +34,7 @@ type branchInfo struct {
 	Repo *repository `json:"repo"`
 }
 
-// pullRequest is the subset of Forgejo's PullRequest model kritik reads.
+// pullRequest is the subset of Forgejo's PullRequest model kritique reads.
 type pullRequest struct {
 	Number    int        `json:"number"`
 	Title     string     `json:"title"`
@@ -52,7 +52,7 @@ type pullRequest struct {
 	Labels    []label    `json:"labels"`
 }
 
-// repoInfo is the subset of GET /repos/{owner}/{repo} kritik reads.
+// repoInfo is the subset of GET /repos/{owner}/{repo} kritique reads.
 type repoInfo struct {
 	DefaultBranch string `json:"default_branch"`
 }
@@ -63,7 +63,7 @@ type commit struct {
 }
 
 // branch is the subset of GET /repos/{owner}/{repo}/branches/{branch}
-// kritik reads.
+// kritique reads.
 type branch struct {
 	Commit commit `json:"commit"`
 }
@@ -135,7 +135,7 @@ type createStatusOption struct {
 	Description string `json:"description"`
 }
 
-// issue is the subset of Forgejo's Issue model kritik reads. Forgejo
+// issue is the subset of Forgejo's Issue model kritique reads. Forgejo
 // represents a pull request as an issue with a non-nil pull_request field;
 // only that field's presence, never its content, distinguishes the two here.
 type issue struct {

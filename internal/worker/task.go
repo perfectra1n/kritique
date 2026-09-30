@@ -12,15 +12,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/executor"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/jobs"
-	"github.com/home-operations/kritik/internal/model"
-	"github.com/home-operations/kritik/internal/review"
-	"github.com/home-operations/kritik/internal/store"
-	"github.com/home-operations/kritik/internal/taskrun"
-	"github.com/home-operations/kritik/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/taskrun"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // Task context bounds: the thread comments a task sees by default, and
@@ -200,7 +200,7 @@ type taskRunner struct {
 	in          tasks.Input
 	// spent is what the run's model steps cost so far.
 	spent []store.TaskUsage
-	// headSHA and baseRef are a pull request subject's, as kritik last
+	// headSHA and baseRef are a pull request subject's, as kritique last
 	// recorded it; empty for an issue or a pull request it never saw.
 	headSHA, baseRef string
 	// notes say what the run's context left out, and contextLeft is what
@@ -667,7 +667,7 @@ func (r *taskRunner) anchor(ctx context.Context, pl *tasks.Plan) {
 		return
 	}
 	if r.headSHA == "" {
-		taskrun.DropInline(pl, "kritik has not recorded the pull request's head")
+		taskrun.DropInline(pl, "kritique has not recorded the pull request's head")
 		return
 	}
 	base, err := r.client.MergeBase(ctx, r.owner, r.name, r.ev.SubjectNumber, r.baseRef, r.headSHA)

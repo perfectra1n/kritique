@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/home-operations/kritik/internal/configfile"
-	"github.com/home-operations/kritik/internal/forge"
-	"github.com/home-operations/kritik/internal/forge/forgejo"
-	"github.com/home-operations/kritik/internal/forge/github"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/forge/forgejo"
+	"github.com/perfectra1n/kritique/internal/forge/github"
 )
 
 // BuildForge constructs the forge client for an installation from its
