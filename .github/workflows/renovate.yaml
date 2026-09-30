@@ -70,18 +70,52 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Restore Renovate repository cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/renovate/cache/renovate/repository
+          key: renovate-repository-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: renovate-repository-cache-
+
+      - name: Align cache ownership for the Renovate container
+        run: |
+          sudo mkdir -p /tmp/renovate/cache/renovate/repository
+          # Renovate runs in its container as uid 12021; give it ownership so it
+          # can read and rewrite the restored cache.
+          sudo chown -R 12021:0 /tmp/renovate
+
       # RENOVATE_TOKEN, a fine-grained PAT with contents, pull requests,
       # issues and workflows write on this repository, is optional but
       # recommended: pull requests opened with the built-in token don't start
       # CI, so they never go green to automerge, and the built-in token can't
       # change files under .github/workflows.
+      #
+      # The entrypoint installs helm-docs and helm-schema, which the shared
+      # preset's post-upgrade tasks regenerate the chart README and schema
+      # with, and the allowlists below are the ones the org-wide Renovate in
+      # home-operations/.github ran these presets with.
       - name: Renovate
         uses: renovatebot/github-action@6d26fcf0275dc65624cbc3d51fe78bc773f98321 # v46.3.6
-        with:
-          token: ${{ secrets.RENOVATE_TOKEN || github.token }}
         env:
           LOG_LEVEL: ${{ inputs.logLevel || 'info' }}
           RENOVATE_REPOSITORIES: ${{ github.repository }}
           RENOVATE_ONBOARDING: "false"
           RENOVATE_REQUIRE_CONFIG: optional
-          RENOVATE_PLATFORM_COMMIT: enabled
+          RENOVATE_PLATFORM: github
+          RENOVATE_PLATFORM_COMMIT: "true"
+          RENOVATE_INTERNAL_CHECKS_FILTER: strict
+          RENOVATE_CUSTOM_ENV_VARIABLES: '{"MISE_TRUSTED_CONFIG_PATHS":"/tmp/renovate/repos"}'
+          RENOVATE_ALLOWED_UNSAFE_EXECUTIONS: '["goGenerate", "mise"]'
+          RENOVATE_ALLOWED_COMMANDS: '["^helm-docs ", "^helm-schema ", "^npm "]'
+          RENOVATE_REPOSITORY_CACHE: enabled
+        with:
+          docker-cmd-file: .github/renovate-entrypoint.sh
+          docker-user: root
+          token: ${{ secrets.RENOVATE_TOKEN || github.token }}
+
+      - name: Save Renovate repository cache
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/renovate/cache/renovate/repository
+          key: renovate-repository-cache-${{ github.run_id }}-${{ github.run_attempt }}
