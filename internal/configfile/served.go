@@ -1,29 +1,35 @@
 package configfile
 
+import "strings"
+
 // servedAccounts is every account conns serve, in their order, with its
-// entry where there is one, and the entries no connection serves.
+// entry where there is one, and the entries no connection serves. The
+// file keys an entry by the account's name alone, so it applies to the
+// account of that name on whichever forge a connection serves it.
 func servedAccounts(conns []Connection, entries []Account) (served, unserved []Account) {
-	byKey := map[string]*Account{}
+	byName := map[string]*Account{}
 	for i := range entries {
-		byKey[entries[i].Key()] = &entries[i]
+		byName[strings.ToLower(entries[i].Name)] = &entries[i]
 	}
-	used := map[string]bool{}
+	used, usedName := map[string]bool{}, map[string]bool{}
 	for _, in := range conns {
 		for _, name := range in.Accounts {
 			key := AccountKey(in.Forge, name)
 			if used[key] {
 				continue
 			}
-			used[key] = true
-			if e, ok := byKey[key]; ok {
-				served = append(served, *e)
+			used[key], usedName[strings.ToLower(name)] = true, true
+			if e, ok := byName[strings.ToLower(name)]; ok {
+				a := *e
+				a.Forge = in.Forge
+				served = append(served, a)
 			} else {
 				served = append(served, Account{Forge: in.Forge, Name: name})
 			}
 		}
 	}
 	for _, e := range entries {
-		if !used[e.Key()] {
+		if !usedName[strings.ToLower(e.Name)] {
 			unserved = append(unserved, e)
 		}
 	}
