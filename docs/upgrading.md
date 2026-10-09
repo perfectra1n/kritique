@@ -14,15 +14,22 @@ make, in the order to make them.
 
 ## Before you start
 
-- **The database starts empty.** The schema history is not compatible:
-  both releases record a `0001_init` migration, so the new one would
-  skip it and fail on the next. Drop and recreate the database (or point
-  `database.*.existingSecret` at a new one) with the same roles and
-  extensions; kritique migrates it and onboards every repository again on
-  its first start. Reviews, findings, usage, transcripts and the index
-  from before are not carried over. Sticky summary comments already on
-  open pull requests are found again by their marker and updated in
-  place.
+- **The database is upgraded in place.** Keep pointing the chart at the
+  same database. Old kritique's migrations `0001`–`0014` are kept as they
+  were; `0015_users`, `0016_accounts` and `0017_kritika_schema` turn
+  tenants into accounts and installations into connections, giving each
+  row the id the new code derives from its name. What does not carry over:
+  - everyone signs in again (sessions are recreated);
+  - dashboard-managed tenants, memberships and pending invites are
+    dropped; each dashboard tenant's spec is first copied into
+    `audit_events` (action `migration.archive_dashboard_tenant`), so move
+    anything you still need into the configuration file;
+  - model leases, `reviews.mode`, `reviews.canceled_by`,
+    `pull_requests.base_sha` and a few other columns upstream removed.
+  The owner role needs the default `TEMPORARY` privilege on the database
+  (the account id hashing runs in temporary SQL functions). The migration
+  stops with an error if two installations of the same forge account held
+  the same repository.
 - **Uninstall the old release first, or delete its Deployments.** The
   Deployment that was `roles.all` keeps its name but its selector changes
   (`app.kubernetes.io/component: all` becomes `server`), which
@@ -186,11 +193,33 @@ settings for all of them. Now:
 - **A Forgejo or Gitea installation** (`forge: forgejo` or `gitea`, with
   `host`, `token`, `gitToken` and `webhookSecret`):
 
-  > **TODO (Forgejo/Gitea apps):** the `apps.<name>` keys for a Forgejo or
-  > Gitea connection: `forge: forgejo | gitea`, `url` (was `host`),
-  > `token`, `webhookSecret`, and what replaces `gitToken` and `account`.
-  > Fill in with a mapping table like the GitHub one above, and the
-  > gateway's egress for a forge on a private address.
+  | Old                     | New                                                              |
+  | ----------------------- | ---------------------------------------------------------------- |
+  | `forge`                 | `forge: forgejo` or `forge: gitea` (`github` is the default)     |
+  | `host`                  | `url`, the forge's base URL, e.g. `https://git.example.com`      |
+  | `account`               | an item of `accounts`                                            |
+  | `token`                 | `token: { env: NAME }`                                           |
+  | `gitToken`              | `gitToken: { env: NAME }`, optional read-only token for runners  |
+  | `webhookSecret`         | `webhookSecret: { env: NAME }`                                   |
+
+  The webhook URL becomes `<webUrl>/hooks/<app name>`. Each app also has
+  `KRITIQUE_APPS_FORGE`, `_URL`, `_TOKEN`, `_GIT_TOKEN` and
+  `_WEBHOOK_SECRET` variables for the environment's app. The forge's host
+  is always allowed through egress on 443; a forge on a private address
+  or another port also needs an `egress.allow` entry (and the port in
+  `networkPolicy.egressPorts`). Account ids are `forgejo/<owner>` or
+  `gitea/<owner>`, as before, so existing rows match.
+
+  ```yaml
+  apps:
+    home-forgejo:
+      forge: forgejo
+      url: https://git.example.com
+      accounts: [perfectra1n, my-org]
+      token: { env: FORGEJO_TOKEN }
+      gitToken: { env: FORGEJO_READ_TOKEN }
+      webhookSecret: { env: FORGEJO_WEBHOOK_SECRET }
+  ```
 
 - **A tenant's limits** move to `accounts.<account name>.limits`, one per
   forge account, with the same keys: `concurrency`, `reviewsPerDay`,
@@ -204,8 +233,8 @@ settings for all of them. Now:
   - `installation` (which installation an entry belongs to) is removed:
     an entry belongs to the app that serves its owner.
 
-    > **TODO (Forgejo/Gitea apps):** how an entry names a repository of
-    > the same `owner/name` on two forges.
+    The same owner name on two forges is one account, so the
+    configuration refuses an owner served by two apps.
 
   - `enabled` may no longer be set on an `owner/name` entry, only at the
     root or on `owner/*`: it says where repositories start, and an admin
@@ -290,8 +319,8 @@ name is allowed. See [the egress gateway](security.md#the-egress-gateway).
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `web.signIn[]` with `type: oidc`                      | `auth.oidc`, one provider: `name`, `issuer`, `clientId`, `clientSecret`, `scopes`, and new `rolesClaim`, `roleMappingExpr`, `defaultRole`                                           |
 | `web.signIn[]` with `type: github`                    | `auth.github`: `clientId`, `clientSecret`, `roleMappingExpr`; github.com only (`host` is gone)                                                                                       |
-| `web.signIn[]` with `type: forgejo` or `gitea`        | removed. **TODO (Forgejo/Gitea apps):** confirm whether Forgejo/Gitea sign-in returns, and its keys                                                                                  |
-| `web.signIn[].name`                                   | gone: the callback is `/auth/callback/oidc` or `/auth/callback/github`                                                                                                              |
+| `web.signIn[]` with `type: forgejo` or `gitea`        | `auth.forgejo` / `auth.gitea`: `url`, `clientId`, `clientSecret`, `roleMappingExpr` (`KRITIQUE_AUTH_FORGEJO_*`, `KRITIQUE_AUTH_GITEA_*`); callback `/auth/callback/forgejo` or `/gitea`                                                                                  |
+| `web.signIn[].name`                                   | gone: the callback is `/auth/callback/<provider>` (`oidc`, `github`, `forgejo`, `gitea`)                                                                                                              |
 | `web.operators`                                       | a `roleMappingExpr` yielding `"admin"`, e.g. `login == "user-1" ? "admin" : ""` for GitHub, or `"kritique-admins" in roles ? "admin" : ""` for OIDC; members get `"member"` or a per-account map |
 | (new)                                                 | `auth.admin.user`, `auth.admin.password`: a local admin, the way into a fresh instance                                                                                             |
 | `web.sessionTTL`                                      | `auth.sessionTTL`                                                                                                                                                                    |
