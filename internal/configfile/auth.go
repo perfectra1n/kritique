@@ -13,8 +13,8 @@ import (
 )
 
 // Auth configures how people sign in to the dashboard and what each may do:
-// a local admin, an OIDC issuer and GitHub, each optional, and each
-// provider's role mapping. Every key also has a KRITIQUE_AUTH_* environment
+// a local admin, an OIDC issuer, GitHub, Forgejo and Gitea, each optional,
+// and each provider's role mapping. Every key also has a KRITIQUE_AUTH_* environment
 // variable, which wins over the file (see overlayEnv).
 type Auth struct {
 	// SessionTTL is how long a dashboard session lasts; zero means
@@ -28,6 +28,11 @@ type Auth struct {
 	// GitHub signs in through a GitHub OAuth App, or a GitHub App's own
 	// client, on github.com.
 	GitHub *SignIn `yaml:"github,omitempty"`
+	// Forgejo and Gitea sign in through an OAuth2 application of the
+	// instance at their url. A person's organizations there grant them the
+	// forgejo or gitea accounts of the same names, as GitHub's do.
+	Forgejo *SignIn `yaml:"forgejo,omitempty"`
+	Gitea   *SignIn `yaml:"gitea,omitempty"`
 
 	// fromEnv holds the keys an environment variable set, by their dotted
 	// path under auth.
@@ -54,9 +59,11 @@ type SignInType string
 
 // Sign-in types. SignInLocal is the local admin's password form.
 const (
-	SignInLocal  SignInType = "local"
-	SignInOIDC   SignInType = "oidc"
-	SignInGitHub SignInType = "github"
+	SignInLocal   SignInType = "local"
+	SignInOIDC    SignInType = "oidc"
+	SignInGitHub  SignInType = "github"
+	SignInForgejo SignInType = "forgejo"
+	SignInGitea   SignInType = "gitea"
 )
 
 // SignIn is one identity provider people sign in through.
@@ -65,7 +72,9 @@ type SignIn struct {
 	// unset. A GitHub sign-in is labelled GitHub.
 	Name string `yaml:"name,omitempty"`
 	// Issuer is an OIDC sign-in's discovery issuer URL, https only.
-	Issuer       string    `yaml:"issuer,omitempty"`
+	Issuer string `yaml:"issuer,omitempty"`
+	// URL is a Forgejo or Gitea sign-in's instance, its base URL.
+	URL          string    `yaml:"url,omitempty"`
 	ClientID     string    `yaml:"clientId"`
 	ClientSecret SecretRef `yaml:"clientSecret"`
 	Scopes       []string  `yaml:"scopes,omitempty"`
@@ -98,8 +107,13 @@ func (s *SignIn) Type() SignInType { return s.typ }
 
 // Label is how the sign-in page labels the sign-in.
 func (s *SignIn) Label() string {
-	if s.typ == SignInGitHub {
+	switch s.typ {
+	case SignInGitHub:
 		return "GitHub"
+	case SignInForgejo:
+		return "Forgejo"
+	case SignInGitea:
+		return "Gitea"
 	}
 	return cmp.Or(s.Name, DefaultOIDCName)
 }
@@ -131,7 +145,7 @@ func (a *Auth) SessionTTLOrDefault() time.Duration {
 // SignIns lists the configured providers, OIDC first.
 func (a *Auth) SignIns() []*SignIn {
 	var out []*SignIn
-	for _, s := range []*SignIn{a.OIDC, a.GitHub} {
+	for _, s := range []*SignIn{a.OIDC, a.GitHub, a.Forgejo, a.Gitea} {
 		if s != nil {
 			out = append(out, s)
 		}
@@ -184,7 +198,11 @@ func (a *Auth) resolve(sec *secrets) error {
 		signIn *SignIn
 		typ    SignInType
 		kind   rolemap.Kind
-	}{{a.OIDC, SignInOIDC, rolemap.OIDC}, {a.GitHub, SignInGitHub, rolemap.GitHub}} {
+	}{
+		{a.OIDC, SignInOIDC, rolemap.OIDC}, {a.GitHub, SignInGitHub, rolemap.GitHub},
+		// A Forgejo or Gitea mapping sees what a GitHub one does.
+		{a.Forgejo, SignInForgejo, rolemap.GitHub}, {a.Gitea, SignInGitea, rolemap.GitHub},
+	} {
 		if s.signIn == nil {
 			continue
 		}
@@ -240,7 +258,10 @@ func (s *SignIn) validate(where string) error {
 		default:
 			return fmt.Errorf("configfile: %s.defaultRole must be %s or %s, got %q", where, DefaultRoleNone, DefaultRoleMember, s.DefaultRole)
 		}
-	case SignInGitHub:
+		if s.URL != "" {
+			return fmt.Errorf("configfile: %s.url is for forgejo and gitea sign-ins", where)
+		}
+	case SignInGitHub, SignInForgejo, SignInGitea:
 		for _, f := range []struct {
 			key string
 			set bool
@@ -250,6 +271,14 @@ func (s *SignIn) validate(where string) error {
 		} {
 			if f.set {
 				return fmt.Errorf("configfile: %s.%s is for oidc sign-ins", where, f.key)
+			}
+		}
+		if s.typ == SignInGitHub && s.URL != "" {
+			return fmt.Errorf("configfile: %s.url is for forgejo and gitea sign-ins; github signs in on github.com", where)
+		}
+		if s.typ != SignInGitHub {
+			if err := checkForgeURL(s.URL); err != nil {
+				return fmt.Errorf("configfile: %s.url: %w", where, err)
 			}
 		}
 	}
@@ -310,6 +339,14 @@ func (a *Auth) overlayEnv(environ []string) error {
 			a.github().ClientSecret, path = SecretRef{Env: name}, "github.clientSecret"
 		case "GITHUB_ROLE_MAPPING_EXPR":
 			a.github().RoleMappingExpr, path = value, "github.roleMappingExpr"
+		case "FORGEJO_URL", "GITEA_URL":
+			a.forgeSignIn(key).URL, path = value, forgeSignInPath(key, "url")
+		case "FORGEJO_CLIENT_ID", "GITEA_CLIENT_ID":
+			a.forgeSignIn(key).ClientID, path = value, forgeSignInPath(key, "clientId")
+		case "FORGEJO_CLIENT_SECRET", "GITEA_CLIENT_SECRET":
+			a.forgeSignIn(key).ClientSecret, path = SecretRef{Env: name}, forgeSignInPath(key, "clientSecret")
+		case "FORGEJO_ROLE_MAPPING_EXPR", "GITEA_ROLE_MAPPING_EXPR":
+			a.forgeSignIn(key).RoleMappingExpr, path = value, forgeSignInPath(key, "roleMappingExpr")
 		default:
 			return fmt.Errorf("configfile: environment variable %s names no auth setting", name)
 		}
@@ -333,6 +370,27 @@ func (a *Auth) github() *SignIn {
 		a.GitHub = &SignIn{}
 	}
 	return a.GitHub
+}
+
+// forgeSignIn is the Forgejo or Gitea sign-in the KRITIQUE_AUTH_ key
+// names by its first word.
+func (a *Auth) forgeSignIn(key string) *SignIn {
+	at := &a.Forgejo
+	if strings.HasPrefix(key, "GITEA_") {
+		at = &a.Gitea
+	}
+	if *at == nil {
+		*at = &SignIn{}
+	}
+	return *at
+}
+
+// forgeSignInPath is the dotted path of field of the sign-in key names.
+func forgeSignInPath(key, field string) string {
+	if strings.HasPrefix(key, "GITEA_") {
+		return "gitea." + field
+	}
+	return "forgejo." + field
 }
 
 // envList splits a comma-separated variable, dropping blanks.

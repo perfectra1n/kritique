@@ -96,6 +96,13 @@ func (p *forgeProvider) Exchange(ctx context.Context, code, pkceVerifier, _ stri
 	return id, facts, nil
 }
 
+// forgeMappingVars are the variables a forge sign-in's role mapping sees
+// (rolemap.GitHub): the user's login and email, the logins of their
+// organizations, and their teams as "org/team".
+func forgeMappingVars(id Identity, orgs, teams []string) map[string]any {
+	return map[string]any{"login": id.Login, "email": id.Email, "orgs": orgs, "teams": teams}
+}
+
 // apiClient calls a forge's REST API as the signed-in user.
 type apiClient struct {
 	base    string

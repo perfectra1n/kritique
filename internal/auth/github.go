@@ -116,7 +116,7 @@ func (githubAPI) mappingVars(ctx context.Context, c apiClient, id Identity) (map
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"login": id.Login, "email": id.Email, "orgs": orgs, "teams": teams}, nil
+	return forgeMappingVars(id, orgs, teams), nil
 }
 
 // githubPages calls fn with each page of the list at path, which must end
