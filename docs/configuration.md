@@ -61,6 +61,11 @@ keys of the chart's `config`, the secrets among them from existing Secrets.
 | `github.clientId`        | `KRITIQUE_AUTH_GITHUB_CLIENT_ID`             |
 | `github.clientSecret`    | `KRITIQUE_AUTH_GITHUB_CLIENT_SECRET`         |
 | `github.roleMappingExpr` | `KRITIQUE_AUTH_GITHUB_ROLE_MAPPING_EXPR`     |
+| `forgejo.url`             | `KRITIQUE_AUTH_FORGEJO_URL`                  |
+| `forgejo.clientId`        | `KRITIQUE_AUTH_FORGEJO_CLIENT_ID`            |
+| `forgejo.clientSecret`    | `KRITIQUE_AUTH_FORGEJO_CLIENT_SECRET`        |
+| `forgejo.roleMappingExpr` | `KRITIQUE_AUTH_FORGEJO_ROLE_MAPPING_EXPR`    |
+| `gitea.*`                 | `KRITIQUE_AUTH_GITEA_*`, as `forgejo.*`      |
 
 ```yaml
 auth:
@@ -91,11 +96,15 @@ auth:
 - `github` signs in on github.com with an OAuth App's client, or a GitHub
   App's own: the App kritique reviews through can serve both, with a client
   secret generated on its settings page (see [setup](setup.md)).
+- `forgejo` and `gitea` sign in through an OAuth2 application of the
+  instance at `url`, created under its site or user settings. A person's
+  organizations there place them as GitHub's do, on the `forgejo/` or
+  `gitea/` accounts of the same names.
 - `sessionTTL` is how long a dashboard session lasts, between 5 minutes and
   30 days. It defaults to 12 hours.
 
-A provider must allow the callback URL `<KRITIQUE_WEB_URL>/auth/callback/oidc`
-or `<KRITIQUE_WEB_URL>/auth/callback/github`. The dashboard refuses to start
+A provider must allow the callback URL `<KRITIQUE_WEB_URL>/auth/callback/<type>`:
+`oidc`, `github`, `forgejo` or `gitea`. The dashboard refuses to start
 with no way to sign in. The configuration is refused when nothing could
 make an admin: set an admin password, or a `roleMappingExpr` on a
 provider.
@@ -134,6 +143,7 @@ yields a role on one branch and a map on the other wraps one in `dyn()`.
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | OIDC     | `claims`, the ID token's claims merged with the UserInfo response; `roles`, the values of the claim `rolesClaim` names, read from a list, a map's keys, or a single string |
 | GitHub   | `login`; `email`; `orgs`, the organizations the user is an active member of; `teams`, each as `"<org>/<team>"`                                                             |
+| Forgejo, Gitea | as GitHub's, a team named by its name                                                                                                                                |
 
 When the mapping places nobody:
 
@@ -148,8 +158,9 @@ A mapping that fails to evaluate refuses the sign-in.
 
 ## `apps`
 
-`apps` declares the GitHub Apps kritique serves accounts through. The
-[setup guide](setup.md) covers creating one.
+`apps` declares the GitHub Apps, and the Forgejo and Gitea bot accounts,
+kritique serves accounts through. The [setup guide](setup.md) covers
+creating a GitHub App.
 
 ```yaml
 apps:
@@ -180,6 +191,49 @@ The same app can come from the environment instead:
 
 The environment declares at most one app. It replaces the file's app of
 the same name whole, or is added to the file's when none has that name.
+
+### Forgejo and Gitea
+
+An app with `forge: forgejo` or `forge: gitea` serves accounts on a
+self-hosted instance through a bot account's token instead of an App:
+
+```yaml
+apps:
+  home-forgejo:
+    forge: forgejo
+    url: https://git.example.com
+    accounts: [user-1, org-2]
+    token: { env: FORGEJO_TOKEN }
+    gitToken: { env: FORGEJO_READ_TOKEN }
+    webhookSecret: { env: FORGEJO_WEBHOOK_SECRET }
+```
+
+| Key             | What                                                                                                                                         |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `forge`         | `forgejo` or `gitea`; `github`, the default, for a GitHub App                                                                                |
+| `url`           | the instance's base URL, `http` or `https`, with its path when it is served under one; the API is under it at `/api/v1`                      |
+| `token`         | the bot's API token, which posts the reviews: it needs write access to issues and repositories, and repository admin to read a commenter's permission or dismiss an approval |
+| `gitToken`      | optional: a read-only token runners fetch the repository with; without one they get `token`, which can write, and kritique logs a warning   |
+| `webhookSecret` | the secret of the repository or organization webhook pointed at `/hooks/<name>`, sending pull request, issue comment, push and repository events |
+
+`KRITIQUE_APPS_FORGE`, `KRITIQUE_APPS_URL`, `KRITIQUE_APPS_TOKEN` and
+`KRITIQUE_APPS_GIT_TOKEN` declare the same keys from the environment. An
+app takes the keys of its forge alone: `clientId` and `privateKey` on a
+Forgejo or Gitea app, or `url` and the tokens on a GitHub one, are refused.
+
+What a review does there, and what it leaves out:
+
+| Feature                         | Forgejo                                                     | Gitea                                                          |
+| ------------------------------- | ----------------------------------------------------------- | -------------------------------------------------------------- |
+| summary, inline comments, status | yes, the status as `kritique/review`                       | yes                                                            |
+| approval and its dismissal      | yes; without repository admin the bot deletes its approval  | yes, likewise                                                  |
+| 👀 and 👍 reactions               | yes                                                         | yes                                                            |
+| a finding's suggestion          | a plain code block: no one-click suggestion                 | a plain code block                                             |
+| a comment over a range of lines | on its last line                                            | on its last line                                               |
+| replies in a finding's thread   | yes                                                         | yes where the instance has the replies API, else beside it     |
+| resolving a finding's thread    | no: the API has none, so threads are left open              | yes where the instance has the resolve API                     |
+| a person resolving a thread     | no webhook says so: dismiss with a mention instead          | likewise                                                       |
+| `gh` in runners                 | never offered                                               | never offered                                                  |
 
 ## `providers` and `embedding`
 
@@ -527,9 +581,10 @@ then keeps its index.
 
 ## `accounts`
 
-An account is a user or organization an app serves, `github/<name>`. Its
-entry under `accounts`, keyed by its name, holds what is the account's
-alone:
+An account is a user or organization an app serves, `<forge>/<name>`
+such as `github/org-1` or `forgejo/user-1`. Its entry under `accounts`,
+keyed by its name, holds what is the account's alone, on every forge an
+app serves that name on:
 
 ```yaml
 accounts:
@@ -558,7 +613,10 @@ served.
 ## `egress`
 
 `egress` is what runner pods may reach through kritique's gateway beyond
-`github.com` and `api.github.com`, which an app allows: `allow` and `deny`
+`github.com` and `api.github.com`, which a GitHub app allows, and a Forgejo
+or Gitea app's host: a host on a private address needs an `allow` entry
+covering the address too, and runners reach it over HTTPS on port 443
+alone. `allow` and `deny`
 list hosts, IP addresses and CIDRs, and `credentials` names hosts the
 gateway adds a token to. [Security](security.md#the-egress-gateway)
 describes them with the gateway.
