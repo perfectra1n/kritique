@@ -41,6 +41,9 @@ const (
 // Work implements river.Worker.
 func (w *Thread) Work(ctx context.Context, job *river.Job[jobs.ThreadArgs]) error {
 	args := job.Args
+	// A forge that finds a comment, or a merge base, only through its pull
+	// request reads the number from here.
+	ctx = forge.WithPullRequest(ctx, args.Number)
 	file := w.Current.Get()
 	account, err := w.account(file, args.AccountID)
 	if err != nil {

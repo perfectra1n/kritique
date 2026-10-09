@@ -7,6 +7,8 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"sync"
 	"testing"
@@ -209,5 +211,68 @@ func TestForgeCacheBuildOutlivesItsFirstCaller(t *testing.T) {
 	close(release)
 	if err := <-second; err != nil {
 		t.Fatalf("a caller sharing the build got %v", err)
+	}
+}
+
+// TestAppsForgejo: a Forgejo connection gets one client for every owner it
+// serves, fetching with its gitToken, and reaches each account's
+// repositories, an organization's or a user's.
+func TestAppsForgejo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/orgs/acme/repos":
+			_, _ = w.Write([]byte(`[{"full_name":"acme/widgets","default_branch":"main","archived":true}]`))
+		case "/api/v1/orgs/Me/repos":
+			w.WriteHeader(http.StatusNotFound)
+		case "/api/v1/users/Me/repos":
+			_, _ = w.Write([]byte(`[{"full_name":"Me/dots","default_branch":"trunk","fork":true}]`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("TEST_WEBHOOK_SECRET", "s")
+	t.Setenv("TEST_TOKEN", "write")
+	t.Setenv("TEST_GIT_TOKEN", "read")
+	file, err := configfile.Parse([]byte(`
+apps:
+  home:
+    forge: forgejo
+    url: ` + srv.URL + `
+    accounts: [acme, Me]
+    token: { env: TEST_TOKEN }
+    gitToken: { env: TEST_GIT_TOKEN }
+    webhookSecret: { env: TEST_WEBHOOK_SECRET }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, _ := file.Connection("home")
+	apps := &Apps{}
+	a, err := apps.Build(t.Context(), in, "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := apps.Build(t.Context(), in, "Me/dots")
+	if err != nil || a != b {
+		t.Fatalf("a second owner's client = %v, %v; want the connection's one", b, err)
+	}
+	if tok, err := a.GitToken(t.Context(), "widgets"); err != nil || tok != "read" {
+		t.Fatalf("GitToken = %q, %v; want the gitToken", tok, err)
+	}
+	if got := a.CloneURL("acme", "widgets"); got != srv.URL+"/acme/widgets.git" {
+		t.Fatalf("CloneURL = %s", got)
+	}
+	reach, err := apps.Reach(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := reach["acme"]; len(r) != 1 || r[0].FullName != "acme/widgets" || !r[0].Traits.Archived {
+		t.Fatalf("acme reaches %+v", r)
+	}
+	if r := reach["me"]; len(r) != 1 || r[0].DefaultBranch != "trunk" || !r[0].Traits.Fork {
+		t.Fatalf("me reaches %+v", r)
 	}
 }

@@ -12,25 +12,52 @@ import (
 
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/forge/forgejo"
 	"github.com/perfectra1n/kritique/internal/forge/github"
 	"github.com/perfectra1n/kritique/internal/metrics"
 	"github.com/perfectra1n/kritique/internal/store"
 )
 
-// Apps holds one GitHub App per connection, built on first use and kept
-// for the life of the process, as the configuration is, so the clients
-// and the listings of a connection share its installation tokens: minted
-// once an hour each, however often the connection is polled.
+// Apps holds one GitHub App per GitHub connection, and one Forgejo client
+// per Forgejo or Gitea connection, built on first use and kept for the
+// life of the process, as the configuration is, so the clients and the
+// listings of a connection share its installation tokens, minted once an
+// hour each however often the connection is polled, or its bot's login.
 type Apps struct {
 	// Metrics may be nil. Rate limits the forge answers with are logged
 	// and counted on it.
 	Metrics *metrics.Metrics
 
-	mu   sync.Mutex
-	apps map[string]*github.App
+	mu      sync.Mutex
+	apps    map[string]*github.App
+	forgejo map[string]*forgejo.Client
 }
 
-// app is connection in's App.
+// selfHosted is Forgejo or Gitea connection in's client. Without a gitToken
+// a runner is handed the API token, which can write; that is logged once.
+func (a *Apps) selfHosted(in *configfile.Connection) (*forgejo.Client, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if c, ok := a.forgejo[in.Name]; ok {
+		return c, nil
+	}
+	c, err := forgejo.NewClient(in.Forge, in.BaseURL(), in.TokenValue().Value(), nil)
+	if err != nil {
+		return nil, err
+	}
+	c.FetchToken = in.GitTokenValue().Value()
+	if c.FetchToken == "" {
+		slog.Warn("runners fetch with the connection's API token, which can write: set a read-only gitToken",
+			"connection", in.Name, "forge", in.Forge)
+	}
+	if a.forgejo == nil {
+		a.forgejo = map[string]*forgejo.Client{}
+	}
+	a.forgejo[in.Name] = c
+	return c, nil
+}
+
+// app is GitHub connection in's App.
 func (a *Apps) app(in *configfile.Connection) (*github.App, error) {
 	if in.Forge != configfile.ForgeGitHub {
 		return nil, fmt.Errorf("worker: forge %s is not implemented yet", in.Forge)
@@ -61,8 +88,12 @@ func (a *Apps) app(in *configfile.Connection) (*github.App, error) {
 }
 
 // Build constructs the forge client for a connection, for repositories of
-// repo's owner: ForgeCache's Build.
+// repo's owner: ForgeCache's Build. A Forgejo or Gitea connection's one
+// client serves every owner it does.
 func (a *Apps) Build(ctx context.Context, in *configfile.Connection, repo string) (forge.Client, error) {
+	if in.Forge.SelfHosted() {
+		return a.selfHosted(in)
+	}
 	app, err := a.app(in)
 	if err != nil {
 		return nil, err
@@ -77,10 +108,14 @@ func (a *Apps) Build(ctx context.Context, in *configfile.Connection, repo string
 	return github.NewClient(app, id)
 }
 
-// Reach lists the repositories connection in's App reaches, by the
-// lowercased login of the account each is under, as the store registers
-// them: the poller's Reach.
+// Reach lists the repositories connection in reaches, by the lowercased
+// login of the account each is under, as the store registers them: the
+// poller's Reach. A GitHub App reaches what it is installed on; a Forgejo
+// or Gitea bot what it can see of each account it serves.
 func (a *Apps) Reach(ctx context.Context, in *configfile.Connection) (map[string][]store.ReachedRepository, error) {
+	if in.Forge.SelfHosted() {
+		return a.reachSelfHosted(ctx, in)
+	}
 	app, err := a.app(in)
 	if err != nil {
 		return nil, err
@@ -102,7 +137,29 @@ func (a *Apps) Reach(ctx context.Context, in *configfile.Connection) (map[string
 	return out, nil
 }
 
-// ForgeCache is the forge.Clients over configured GitHub Apps. One client
+func (a *Apps) reachSelfHosted(ctx context.Context, in *configfile.Connection) (map[string][]store.ReachedRepository, error) {
+	c, err := a.selfHosted(in)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]store.ReachedRepository, len(in.Accounts))
+	for _, account := range in.Accounts {
+		repos, err := c.Repositories(ctx, account)
+		if err != nil {
+			return nil, err
+		}
+		reached := make([]store.ReachedRepository, 0, len(repos))
+		for _, r := range repos {
+			reached = append(reached, store.ReachedRepository{
+				FullName: r.FullName, DefaultBranch: r.DefaultBranch, Traits: &configfile.RepoTraits{Archived: r.Archived, Fork: r.Fork},
+			})
+		}
+		out[strings.ToLower(account)] = reached
+	}
+	return out, nil
+}
+
+// ForgeCache is the forge.Clients over the configured connections. One client
 // per App and repository owner, built on first use and kept for the life of
 // the process, as the configuration is.
 type ForgeCache struct {

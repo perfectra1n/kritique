@@ -89,6 +89,9 @@ func (pr *pullRequest) ownerRepo() (owner, repo string) {
 // Work implements river.Worker.
 func (w *Review) Work(ctx context.Context, job *river.Job[jobs.ReviewArgs]) (err error) {
 	args := job.Args
+	// A forge that finds a comment, or a merge base, only through its pull
+	// request reads the number from here.
+	ctx = forge.WithPullRequest(ctx, args.Number)
 	file := w.Current.Get()
 	account, err := w.account(file, args.AccountID)
 	if err != nil {

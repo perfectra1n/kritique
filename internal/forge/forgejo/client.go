@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/forge"
@@ -104,9 +105,23 @@ type Client struct {
 	noResolve atomic.Bool
 }
 
+// responseHeaderTimeout bounds how long a request waits for the forge to
+// start answering: the leader's poll runs on a context with no deadline,
+// and a job on one of hours.
+const responseHeaderTimeout = time.Minute
+
+// defaultHTTPClient is every Client's that is given none: the default
+// transport, which bounds the dial and the TLS handshake, with the wait for
+// response headers bounded too, so every Client shares one pool.
+var defaultHTTPClient = func() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = responseHeaderTimeout
+	return &http.Client{Transport: t}
+}()
+
 // NewClient builds a Client for the forge at baseURL, an http or https URL
 // that may carry a path for an instance served under one, authenticating
-// with token. A nil httpClient is http.DefaultClient.
+// with token. A nil httpClient is one whose wait for an answer is bounded.
 func NewClient(f configfile.Forge, baseURL, token string, httpClient *http.Client) (*Client, error) {
 	if !f.SelfHosted() {
 		return nil, fmt.Errorf("forgejo: forge %q is not forgejo or gitea", f)
@@ -116,7 +131,7 @@ func NewClient(f configfile.Forge, baseURL, token string, httpClient *http.Clien
 		return nil, fmt.Errorf("forgejo: base URL %q is not an http or https URL", baseURL)
 	}
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = defaultHTTPClient
 	}
 	web := strings.TrimRight(baseURL, "/")
 	return &Client{httpClient: httpClient, forge: f, web: web, api: web + "/api/v1", token: token}, nil
