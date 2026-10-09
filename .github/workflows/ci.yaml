@@ -27,15 +27,6 @@ env:
   HELM_UNITTEST_VERSION: "v1.2.1"
 
 jobs:
-  docs:
-    if: ${{ github.event_name != 'push' }}
-    name: Docs
-    uses: $/.github/workflows/docs.yaml
-    permissions:
-      contents: read
-    with:
-      deploy: false
-
   go-lint:
     if: >-
       ${{ !(startsWith(github.head_ref, 'release-please--')
@@ -375,7 +366,6 @@ jobs:
     if: ${{ !cancelled() }}
     name: Build Success
     needs:
-      - docs
       - go-lint
       - go-test
       - go-integration

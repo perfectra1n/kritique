@@ -55,7 +55,7 @@ strategy:
 # ServiceAccount, TTL, resources and tools) cannot be set here; the chart
 # refuses them, as it refuses a KRITIQUE_* variable under `env`.
 config:
-  # -- (required) Public URL the dashboard is reached at, e.g. https://kritique.example.com; the webhooks share it under `/hooks/<app name>`. Must be an absolute http(s) URL with no query or fragment. GitHub delivers webhooks to it and sign-in redirects back to it, so the chart's Ingress or HTTPRoute must route this name.
+  # -- (required) Public URL the dashboard is reached at, e.g. https://kritique.example.com; the webhooks share it under `/hooks/<app name>`. Must be an absolute http(s) URL with no query or fragment. Each forge delivers webhooks to it and sign-in redirects back to it, so the chart's Ingress or HTTPRoute must route this name.
   webUrl: ""
   # -- Log level: debug, info, warn or error.
   logLevel: info
@@ -147,6 +147,8 @@ config:
 
   # One GitHub App (an `apps` entry in the configuration file), which
   # replaces the file's app of the same name whole, or is added to them.
+  # Forgejo and Gitea connections are `apps` entries of `configFile`, their
+  # token and webhook secret set through `env` from a Secret.
 
   # -- The app's name, which is its webhook path, `/hooks/<name>`; `github` unless set.
   appsName: ""
@@ -254,7 +256,7 @@ config:
   embeddingDims: ""
 
 # The configuration file (docs/configuration.md) holds what is reviewed and
-# how: sign-in (`auth`), the GitHub `apps`, the instance's `providers`,
+# how: sign-in (`auth`), the forge `apps`, the instance's `providers`,
 # `embedding` and `egress`, the settings every repository gets (`review`,
 # `trigger`, `comments`, `agent`), the `repositories` entries keyed
 # `owner/*` or `owner/name`, and the `accounts` with their limits and
@@ -410,12 +412,12 @@ service:
   port: 8080
   # -- Metrics and probe port.
   metricsPort: 8081
-  # -- Port of the gateway the kritique serve pods run, on the pods and its Service: the forward proxy runner Jobs are handed as `HTTPS_PROXY`, allowing only the hosts the configuration names (github.com once an app is configured, `egress.allow` less `egress.deny`), so runner pods need no direct internet egress, and the model and similar-code endpoints a runner calls with a per-run token, so no provider key enters a runner pod.
+  # -- Port of the gateway the kritique serve pods run, on the pods and its Service: the forward proxy runner Jobs are handed as `HTTPS_PROXY`, allowing only the hosts the configuration names (the forge hosts of the configured apps, github.com for a GitHub App, and `egress.allow` less `egress.deny`), so runner pods need no direct internet egress, and the model and similar-code endpoints a runner calls with a per-run token, so no provider key enters a runner pod.
   gatewayPort: 8082
 
 # One Ingress, or one Gateway API HTTPRoute, to the public Service, which
 # serves the webhooks under `/hooks` and the dashboard. Its host must be
-# `config.webUrl`'s: GitHub delivers webhooks to that URL and sign-in
+# `config.webUrl`'s: the forges deliver webhooks to that URL and sign-in
 # redirects back to it, so a route for another name serves a dashboard
 # that cannot sign in.
 ingress:
@@ -490,7 +492,7 @@ networkPolicy:
   type: default
   # -- Allow DNS egress (UDP/TCP 53); the Cilium flavor allows it to kube-dns alone.
   allowDNS: true
-  # -- TCP ports the service pods may egress to for forges and model endpoints. Runner pods reach the gateway alone.
+  # -- TCP ports the service pods may egress to for forges and model endpoints, to any address. Add the port of a forge or model endpoint served on another, such as an in-cluster Forgejo on 3000. Runner pods reach the gateway alone.
   egressPorts:
     - 443
   # -- Postgres port allowed for egress.

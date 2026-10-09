@@ -8,7 +8,8 @@ chart also ships a
 for editor completion and `helm install` validation.
 
 This page is the orientation: which groups of values exist and where their
-behavior is explained, followed by the full `values.yaml`.
+behavior is explained; the full, commented defaults are in
+[`values.yaml`](https://github.com/perfectra1n/kritique/blob/main/charts/kritique/values.yaml).
 
 | Values                                                         | What they set                                                                                                                                                                                                                                     | Explained in                                                                                               |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -24,8 +25,3 @@ behavior is explained, followed by the full `values.yaml`.
 | `monitoring`, the probes                                       | the ServiceMonitor, alerts and Grafana dashboard                                                                                                                                                                                                  | [Metrics](metrics.md)                                                                                      |
 | `tests`                                                        | the `helm test` pod                                                                                                                                                                                                                               |                                                                                                            |
 
-## values.yaml
-
-```yaml
---8<-- "charts/kritique/values.yaml"
-```

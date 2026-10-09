@@ -13,7 +13,7 @@ glob = [
 ]
 run = "mise run generate && git add charts/kritique/README.md charts/kritique/values.schema.json"
 
-# The generated chart README and schema and the authored MkDocs site under
+# The generated chart README and schema and the hand-wrapped pages under
 # docs/ are .prettierignore'd; exclude them from the shared formatters too.
 # The hooks pass staged paths explicitly, so a commit whose only Markdown or
 # JSON is ignored hands oxfmt an empty target set, and it exits non-zero

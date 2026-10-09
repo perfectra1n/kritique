@@ -22,18 +22,9 @@ built, to skip the build.
 
 ## Docs
 
-This site is MkDocs Material, declared in `pyproject.toml`, pinned in
-`uv.lock` and run through uv, which mise installs. Pages live in `docs/`, and their order in
-`mkdocs.yml`'s `nav`.
-
-```sh
-mise run docs-serve   # live preview at http://127.0.0.1:8000/
-mise run docs         # build into site/ with --strict, as CI does
-```
-
-`--strict` fails the build on a broken link or a page missing from `nav`.
-Pull requests into `main` build the site; a push to `main` publishes it to
-GitHub Pages.
+The docs are plain GitHub-flavored Markdown under `docs/`, read on GitHub;
+there is no generated site. Link between pages with relative paths
+(`setup.md#section`) so the links work in the repository browser.
 
 ## Evaluation
 

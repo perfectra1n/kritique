@@ -23,7 +23,7 @@ reviewed like any other unless the configuration excludes it. One deployment ser
 number of forge accounts, and every index, review and follow-up job runs in
 its own Kubernetes Job pod that holds no provider key or App key.
 
-📖 **Docs site: <https://kritique.perfectra1n.github.io/>**
+📖 **Docs: [docs/](docs/)**, plus an [upgrade guide](docs/upgrading.md) for installs of the earlier kritique layout.
 
 ## Features
 
@@ -83,7 +83,7 @@ its own Kubernetes Job pod that holds no provider key or App key.
 
 kritique ships as an OCI Helm chart, `oci://ghcr.io/perfectra1n/charts/kritique`.
 The chart's [README](charts/kritique/README.md) lists every value, and
-[Postgres with CloudNativePG](https://kritique.perfectra1n.github.io/database/)
+[Postgres with CloudNativePG](docs/database.md)
 sets up the database and its three roles. In short, it needs:
 
 - a Postgres with [VectorChord](https://github.com/tensorchord/VectorChord)
@@ -98,7 +98,7 @@ It runs as one Deployment of `kritique serve`, one replica by default,
 which creates a runner Job for each review, follow-up and index run; the
 chart README's Topology section covers when to run two.
 
-The [setup guide](https://kritique.perfectra1n.github.io/setup/) takes a
+The [setup guide](docs/setup.md) takes a
 fresh instance through its GitHub App, model key and embedder to its first
 review; the dashboard's setup checklist shows what is still missing.
 
@@ -111,24 +111,25 @@ review; the dashboard's setup checklist shows what is still missing.
 - **Run runner Jobs under a sandboxed RuntimeClass** such as gVisor, since
   the pod parses untrusted content.
 
-[Security](https://kritique.perfectra1n.github.io/security/) covers what a
+[Security](docs/security.md) covers what a
 runner holds, the gateway and the sandbox.
 
 ## Documentation
 
-| Page                                                                                    | What it covers                                                                              |
-| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| [Setup](https://kritique.perfectra1n.github.io/setup/)                                  | from install to the first review: the GitHub App, its permissions and its webhook           |
-| [Configuration](https://kritique.perfectra1n.github.io/configuration/)                  | the configuration file: sign-in, GitHub Apps, repository settings, accounts and egress      |
-| [Models](https://kritique.perfectra1n.github.io/models/)                                | providers and their keys, retries, fallback, the embedder, local models and OpenCode        |
-| [`.kritique.yaml` reference](https://kritique.perfectra1n.github.io/repository-config/) | what a repository's own file can change                                                     |
-| [Security](https://kritique.perfectra1n.github.io/security/)                            | hardening an install, what a runner holds, the egress gateway, runner tools and the sandbox |
-| [Chart values](charts/kritique/README.md)                                               | every value of the Helm chart                                                               |
-| [Reviews](https://kritique.perfectra1n.github.io/reviews/)                              | when a review runs, what it posts, and the commands that steer it                           |
-| [Confidence and approvals](https://kritique.perfectra1n.github.io/confidence/)          | the confidence score, the commit status it can gate, risk, and when kritique approves       |
-| [Dashboard](https://kritique.perfectra1n.github.io/dashboard/)                          | the setup checklist, the Configuration page, repository on/off and actions                  |
-| [Metrics](https://kritique.perfectra1n.github.io/metrics/)                              | what kritique exports to Prometheus, and the chart's alerts and Grafana dashboard           |
-| [Development](https://kritique.perfectra1n.github.io/development/)                      | building, testing, evaluation and the cluster loop                                          |
+| Page                                                    | What it covers                                                                              |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [Setup](docs/setup.md)                                  | from install to the first review: the GitHub App, its permissions and its webhook           |
+| [Configuration](docs/configuration.md)                  | the configuration file: sign-in, GitHub Apps, repository settings, accounts and egress      |
+| [Models](docs/models.md)                                | providers and their keys, retries, fallback, the embedder, local models and OpenCode        |
+| [`.kritique.yaml` reference](docs/repository-config.md) | what a repository's own file can change                                                     |
+| [Security](docs/security.md)                            | hardening an install, what a runner holds, the egress gateway, runner tools and the sandbox |
+| [Chart values](charts/kritique/README.md)               | every value of the Helm chart                                                               |
+| [Reviews](docs/reviews.md)                              | when a review runs, what it posts, and the commands that steer it                           |
+| [Confidence and approvals](docs/confidence.md)          | the confidence score, the commit status it can gate, risk, and when kritique approves       |
+| [Dashboard](docs/dashboard.md)                          | the setup checklist, the Configuration page, repository on/off and actions                  |
+| [Metrics](docs/metrics.md)                              | what kritique exports to Prometheus, and the chart's alerts and Grafana dashboard           |
+| [Development](docs/development.md)                      | building, testing, evaluation and the cluster loop                                          |
+| [Upgrading](docs/upgrading.md)                          | moving an install of the earlier kritique layout to this one                                |
 
 ## License
 

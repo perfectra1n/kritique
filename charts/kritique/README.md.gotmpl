@@ -70,8 +70,8 @@ takes a `valueFrom` map, like the admin password above, which is the way
 into a fresh instance. The chart's Ingress or HTTPRoute must route
 `webUrl`'s host.
 
-`configFile` is what is reviewed and how: sign-in (`auth`), the GitHub
-`apps`, model `providers`, the `embedding`, `egress`, the settings every
+`configFile` is what is reviewed and how: sign-in (`auth`), the forge
+`apps` (GitHub Apps, and Forgejo or Gitea connections), model `providers`, the `embedding`, `egress`, the settings every
 repository gets (`review`, `confidence`, `trigger`, `comments`, `agent`),
 `repositories` entries keyed `owner/*` or `owner/name`, and `accounts`,
 with the `config` variables winning over it.
@@ -115,7 +115,7 @@ connection. A transaction-mode pooler, such as PgBouncer or a CloudNativePG
 between transactions, which breaks both. `kritique_leader` is 1 on the replica
 that holds the lock.
 
-[Postgres with CloudNativePG](https://kritique.perfectra1n.github.io/database/)
+[Postgres with CloudNativePG](https://github.com/perfectra1n/kritique/blob/main/docs/database.md)
 sets this up end to end: a two-instance cluster with VectorChord mounted as
 an image volume extension, the extensions through a `Database` resource, the
 application and runner roles as `DatabaseRole` resources, the Secrets with
@@ -130,14 +130,14 @@ chart confines them:
   Postgres and the egress gateway kritique serve runs on
   `service.gatewayPort`, which allows what the configuration file's
   `egress` lists and is the runner's only way to its model.
-- A runner holds no provider key or App key: only a GitHub token for its
+- A runner holds no provider key or App key: only a forge token for its
   run, a gateway token and the runner role's database URI.
 - `runner.tools` adds programs a review's `agent.commands` may run, from
   their own images; `config.runnerRuntimeClass` puts runner Jobs under a
   sandboxed runtime such as gVisor; `runner.resources` keeps a runaway run
   in its own cgroup.
 
-[Security](https://kritique.perfectra1n.github.io/security/) covers the
+[Security](https://github.com/perfectra1n/kritique/blob/main/docs/security.md) covers the
 gateway, runner tools and the sandbox in full.
 
 ### Topology

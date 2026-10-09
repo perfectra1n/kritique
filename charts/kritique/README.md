@@ -1,10 +1,10 @@
 # kritique
 
-![Version](https://img.shields.io/static/v1?label=Version&message=0.0.51&color=informational&style=flat-square) <!-- x-release-please-version -->
+![Version](https://img.shields.io/static/v1?label=Version&message=0.1.0&color=informational&style=flat-square) <!-- x-release-please-version -->
 ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
-![AppVersion](https://img.shields.io/static/v1?label=AppVersion&message=0.0.51&color=informational&style=flat-square) <!-- x-release-please-version -->
+![AppVersion](https://img.shields.io/static/v1?label=AppVersion&message=0.1.0&color=informational&style=flat-square) <!-- x-release-please-version -->
 
-Self-hosted AI pull request reviewer for GitHub, backed by Postgres and per-review Kubernetes Jobs
+Self-hosted AI pull request reviewer for GitHub, Forgejo and Gitea, backed by Postgres and per-review Kubernetes Jobs
 
 **Homepage:** <https://github.com/perfectra1n/kritique>
 
@@ -65,8 +65,8 @@ takes a `valueFrom` map, like the admin password above, which is the way
 into a fresh instance. The chart's Ingress or HTTPRoute must route
 `webUrl`'s host.
 
-`configFile` is what is reviewed and how: sign-in (`auth`), the GitHub
-`apps`, model `providers`, the `embedding`, `egress`, the settings every
+`configFile` is what is reviewed and how: sign-in (`auth`), the forge
+`apps` (GitHub Apps, and Forgejo or Gitea connections), model `providers`, the `embedding`, `egress`, the settings every
 repository gets (`review`, `confidence`, `trigger`, `comments`, `agent`),
 `repositories` entries keyed `owner/*` or `owner/name`, and `accounts`,
 with the `config` variables winning over it.
@@ -110,7 +110,7 @@ connection. A transaction-mode pooler, such as PgBouncer or a CloudNativePG
 between transactions, which breaks both. `kritique_leader` is 1 on the replica
 that holds the lock.
 
-[Postgres with CloudNativePG](https://kritique.perfectra1n.github.io/database/)
+[Postgres with CloudNativePG](https://github.com/perfectra1n/kritique/blob/main/docs/database.md)
 sets this up end to end: a two-instance cluster with VectorChord mounted as
 an image volume extension, the extensions through a `Database` resource, the
 application and runner roles as `DatabaseRole` resources, the Secrets with
@@ -125,14 +125,14 @@ chart confines them:
   Postgres and the egress gateway kritique serve runs on
   `service.gatewayPort`, which allows what the configuration file's
   `egress` lists and is the runner's only way to its model.
-- A runner holds no provider key or App key: only a GitHub token for its
+- A runner holds no provider key or App key: only a forge token for its
   run, a gateway token and the runner role's database URI.
 - `runner.tools` adds programs a review's `agent.commands` may run, from
   their own images; `config.runnerRuntimeClass` puts runner Jobs under a
   sandboxed runtime such as gVisor; `runner.resources` keeps a runaway run
   in its own cgroup.
 
-[Security](https://kritique.perfectra1n.github.io/security/) covers the
+[Security](https://github.com/perfectra1n/kritique/blob/main/docs/security.md) covers the
 gateway, runner tools and the sandbox in full.
 
 ### Topology
@@ -157,7 +157,7 @@ left, and a remaining replica works them.
 
 | Name | Email | Url |
 | ---- | ------ | --- |
-| home-operations | <contact@home-operations.com> |  |
+| perfectra1n |  | <https://github.com/perfectra1n> |
 
 ## Source Code
 
@@ -228,7 +228,7 @@ Kubernetes: `>=1.25.0-0`
 | config.transcriptRetention | string | `""` | How long a review's full model transcript is kept, at least 24h; 720h unless set. |
 | config.triggerLimit | string | `""` | How many automatic reviews a pull request gets before kritique pauses them, so a long-lived pull request stops spending on every push; unlimited unless set. |
 | config.triggerSettle | string | `""` | How long a review waits after a push, so a burst of pushes collapses onto the last one before anything is spent, e.g. `30s`; immediate unless set. |
-| config.webUrl | required | `""` | Public URL the dashboard is reached at, e.g. https://kritique.example.com; the webhooks share it under `/hooks/<app name>`. Must be an absolute http(s) URL with no query or fragment. GitHub delivers webhooks to it and sign-in redirects back to it, so the chart's Ingress or HTTPRoute must route this name. |
+| config.webUrl | required | `""` | Public URL the dashboard is reached at, e.g. https://kritique.example.com; the webhooks share it under `/hooks/<app name>`. Must be an absolute http(s) URL with no query or fragment. Each forge delivers webhooks to it and sign-in redirects back to it, so the chart's Ingress or HTTPRoute must route this name. |
 | configFile | optional | `{}` | The configuration file, as YAML: what is reviewed and how, from `auth` and `apps` to `repositories` and `accounts`. Passed through verbatim, not tpl'd. See docs/configuration.md. |
 | database.app.existingSecret | required | `""` | Secret holding the application role's connection URI. |
 | database.app.key | string | `"uri"` | Key in that Secret. |
@@ -292,7 +292,7 @@ Kubernetes: `>=1.25.0-0`
 | monitoring.serviceMonitor.scrapeTimeout | string | `"10s"` | Scrape timeout. |
 | nameOverride | string | `""` | Override the chart name used in resource names. |
 | networkPolicy.allowDNS | bool | `true` | Allow DNS egress (UDP/TCP 53); the Cilium flavor allows it to kube-dns alone. |
-| networkPolicy.egressPorts | list | `[443]` | TCP ports the service pods may egress to for forges and model endpoints. Runner pods reach the gateway alone. |
+| networkPolicy.egressPorts | list | `[443]` | TCP ports the service pods may egress to for forges and model endpoints, to any address. Add the port of a forge or model endpoint served on another, such as an in-cluster Forgejo on 3000. Runner pods reach the gateway alone. |
 | networkPolicy.enabled | bool | `false` | Create the NetworkPolicies. |
 | networkPolicy.postgresPort | int | `5432` | Postgres port allowed for egress. |
 | networkPolicy.type | string | `"default"` | Policy flavor for your CNI: "default" (networking.k8s.io/v1 NetworkPolicy), "cilium" (CiliumNetworkPolicy) or "calico" (projectcalico.org/v3 NetworkPolicy). |
@@ -319,7 +319,7 @@ Kubernetes: `>=1.25.0-0`
 | runner.tools | list | `[]` | Command-line tools a runner pod mounts from an image for the agent's run tool (KRITIQUE_RUNNER_TOOLS), each a `name`, a digest-pinned `image`, the `path` of its binaries and the `commands` it provides. Needs Kubernetes 1.33 or newer, which mounts an image volume with a subPath; the chart refuses to render them on an older cluster. |
 | runner.ttl | string | `"10m"` | How long a finished Job stays for kubectl before Kubernetes removes it (Go duration); the run row keeps everything the Job knew. |
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}` | Container securityContext (no privilege escalation, read-only root filesystem, drops ALL capabilities). |
-| service.gatewayPort | int | `8082` | Port of the gateway the kritique serve pods run, on the pods and its Service: the forward proxy runner Jobs are handed as `HTTPS_PROXY`, allowing only the hosts the configuration names (github.com once an app is configured, `egress.allow` less `egress.deny`), so runner pods need no direct internet egress, and the model and similar-code endpoints a runner calls with a per-run token, so no provider key enters a runner pod. |
+| service.gatewayPort | int | `8082` | Port of the gateway the kritique serve pods run, on the pods and its Service: the forward proxy runner Jobs are handed as `HTTPS_PROXY`, allowing only the hosts the configuration names (the forge hosts of the configured apps, github.com for a GitHub App, and `egress.allow` less `egress.deny`), so runner pods need no direct internet egress, and the model and similar-code endpoints a runner calls with a per-run token, so no provider key enters a runner pod. |
 | service.metricsPort | int | `8081` | Metrics and probe port. |
 | service.port | int | `8080` | Public port: the webhooks (`POST /hooks/{app}`) and the dashboard. |
 | service.type | string | `"ClusterIP"` | Service type of the public Service. |
