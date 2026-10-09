@@ -52,6 +52,8 @@ func Run(ctx context.Context, st *store.Store, spec Spec, secrets Secrets, logge
 		run = runIndex
 	case KindFollowUp:
 		run = runFollowUp
+	case KindTask:
+		run = runTask
 	}
 	// The first thing either kind does is fetch through the gateway, which
 	// a runner started with the service may reach before its Service
