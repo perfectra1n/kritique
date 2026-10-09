@@ -169,6 +169,7 @@ func (s *Server) routes() http.Handler {
 func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/events", s.hub.serve)
 	s.registerReads(mux)
+	s.registerTasks(mux)
 	s.registerConnections(mux)
 	s.registerSetup(mux)
 	s.registerActions(mux)

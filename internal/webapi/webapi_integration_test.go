@@ -65,7 +65,7 @@ const (
 
 // seeded is what seedAccount wrote for one account.
 type seeded struct {
-	accountID, repoID, prID, reviewID, runID string
+	accountID, repoID, prID, reviewID, runID, taskRunID string
 }
 
 type apiEnv struct {
@@ -177,7 +177,48 @@ func (e *apiEnv) seedAccount(slug, repo string) seeded {
 	})
 	e.exec(`INSERT INTO river_job (kind, args, max_attempts, state) VALUES ('review', $1, 5, 'available')`, args)
 	e.seedModelCalls(s, slug)
+	s.taskRunID = e.seedTaskRun(s, slug)
 	return s
+}
+
+// seedTaskRun records a finished triage run on an issue event, with one
+// model call, and the default branch's .kritique.yaml a dispatch read.
+func (e *apiEnv) seedTaskRun(s seeded, slug string) string {
+	e.t.Helper()
+	a, _ := e.file.AccountByID(s.accountID)
+	conn := e.file.ConnectionFor(a).ID()
+	ev := e.scalar(`INSERT INTO task_events (account_id, connection_id, repository_id, forge, event, raw_event, action, sender,
+		subject_kind, subject_number)
+		VALUES ($1, $2, $3, 'github', 'issue', 'issues', 'opened', $4, 'issue', 12) RETURNING id::text`,
+		s.accountID, conn, s.repoID, "sender of "+slug)
+	id := e.scalar(`INSERT INTO task_runs (account_id, repository_id, task, event_id, subject_kind, subject_number, trigger, mode,
+		status, model, fields, proposed, applied, dropped, notes, started_at, finished_at)
+		VALUES ($1, $2, 'triage', $3, 'issue', 12, 'issue.opened', 'single', 'succeeded', 'acme/large', $4,
+			'{"summary":"a crash","labels":{"add":["bug","x"],"remove":[]}}', '{"add_labels":["bug"],"comment":"sticky"}',
+			'[{"Action":"labels.add","Value":"x","Reason":"it is not a label the task lets the model add"}]', $5, now(), now())
+		RETURNING id::text`, s.accountID, s.repoID, ev, fmt.Sprintf(`{"who":%q}`, slug), []string{"note of " + slug})
+	e.exec(`UPDATE repositories SET task_config_sha = 'tip7', task_config_doc = $2, task_config_at = now() WHERE id = $1`,
+		s.repoID, "tasks: [{ name: "+slug+"-triage, on: [{ issue: [opened] }] }]\n")
+	// Every integration package shares the database, and the task worker's
+	// suite counts every task row.
+	e.t.Cleanup(func() {
+		e.exec(`DELETE FROM model_calls WHERE task_run_id = $1`, id)
+		e.exec(`DELETE FROM task_runs WHERE id = $1`, id)
+		e.exec(`DELETE FROM task_events WHERE id = $1`, ev)
+	})
+	ctx := context.Background()
+	err := e.st.WithAccount(ctx, s.accountID, func(tx pgx.Tx) error {
+		row := transcript.Delta(transcript.State{}, model.StepRequest{System: "task of " + slug}, nil)
+		row.Response = transcript.Response{Text: "{}", Stop: model.StopEndTurn}
+		return store.InsertModelCall(ctx, tx, store.ModelCall{
+			AccountID: s.accountID, TaskRunID: id, Kind: store.ModelCallTask, Model: "acme/large", Row: row.Encode(),
+			Usage: model.Usage{Input: 30, Output: 4}, CostUSD: 0.01,
+		})
+	})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return id
 }
 
 // seedModelCalls records two agent steps of the review and one follow-up
@@ -315,6 +356,15 @@ func testReadEndpointsScopeToAccount(t *testing.T, e *apiEnv) {
 		{a + "/attention", `"blocking":1,"paused":0`},
 		{a + "/pulls?is=blocking", `"title":"PR of webapi-a"`},
 		{a + "/queue", `"repository":"wa/one"`},
+		{a + "/task-runs", `"task":"triage"`},
+		{a + "/task-runs?repo=wa/one&task=triage&status=succeeded", `"droppedCount":1`},
+		{a + "/task-runs/" + e.a.taskRunID, `"sender":"sender of webapi-a"`},
+		{a + "/task-runs/" + e.a.taskRunID, `"fields":{"who":"webapi-a"}`},
+		{a + "/task-runs/" + e.a.taskRunID, `"notes":["note of webapi-a"],"modelCalls":1`},
+		{a + "/task-runs/" + e.a.taskRunID, `"dropped":[{"action":"labels.add","value":"x"`},
+		{a + "/task-runs/" + e.a.taskRunID + "/transcript", `"system":"task of webapi-a"`},
+		{a + "/repos/wa/one/tasks", `"source":"defaultBranch","commit":"tip7"`},
+		{a + "/repos/wa/one/tasks", `{"task":"webapi-a-triage","what":"task","reason":"tasks are disabled"}`},
 	}
 	for _, ep := range endpoints {
 		t.Run(ep.path, func(t *testing.T) {
@@ -346,7 +396,8 @@ func testReadEndpointsScopeToAccount(t *testing.T, e *apiEnv) {
 func (e *apiEnv) bMarkers() []string {
 	return []string{
 		"webapi-b", "wb/one", "PR of webapi-b", "tail of webapi-b", "diff of webapi-b", "sys of webapi-b", "follow of webapi-b",
-		e.b.reviewID, e.b.prID, e.b.runID, e.b.repoID,
+		"sender of webapi-b", "task of webapi-b", "note of webapi-b", "webapi-b-triage",
+		e.b.reviewID, e.b.prID, e.b.runID, e.b.repoID, e.b.taskRunID,
 	}
 }
 
@@ -359,6 +410,7 @@ func testCrossAccountIDs(t *testing.T, e *apiEnv) {
 		a + "/reviews/" + e.b.reviewID, a + "/reviews/" + e.b.reviewID + "/diff",
 		a + "/reviews/" + e.b.reviewID + "/transcript", a + "/reviews/" + e.b.reviewID + "/raw",
 		a + fmt.Sprintf("/followups/%d/transcript", onlyBComment), a + "/pulls/wb/one/7", a + "/repos/wb/one",
+		a + "/task-runs/" + e.b.taskRunID, a + "/task-runs/" + e.b.taskRunID + "/transcript", a + "/repos/wb/one/tasks",
 	}
 	for _, path := range paths {
 		for _, who := range []string{"member-a", "admin"} {
