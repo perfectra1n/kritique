@@ -9,8 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // NewReview is a review the worker starts: its pull request and head, and

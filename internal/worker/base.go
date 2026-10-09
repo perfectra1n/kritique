@@ -9,11 +9,11 @@ import (
 
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritika/internal/adapter"
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/metrics"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/adapter"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/metrics"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Base is what every worker shares: the store, the live configuration,

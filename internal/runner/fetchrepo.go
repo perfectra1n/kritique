@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritika/internal/agent"
-	"github.com/home-operations/kritika/internal/gitfetch"
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/upstream"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/upstream"
 )
 
 // What fetch_repo may take: a run makes at most fetchMax fetches and writes

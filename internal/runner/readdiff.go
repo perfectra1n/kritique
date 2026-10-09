@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/textcut"
-	"github.com/home-operations/kritika/internal/udiff"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/udiff"
 )
 
 var readDiffSchema = json.RawMessage(`{

@@ -5,12 +5,12 @@ import (
 	"strings"
 )
 
-// JobCause is why a job's last attempt failed, where kritika can tell from
+// JobCause is why a job's last attempt failed, where kritique can tell from
 // the error: what the dashboard says in place of the error's own text.
 type JobCause string
 
 // CauseForgeUnavailable is GitHub not answering a call, or answering it
-// with a server error: nothing kritika or its admin can fix, and the job's
+// with a server error: nothing kritique or its admin can fix, and the job's
 // next attempt may well pass.
 const CauseForgeUnavailable JobCause = "forge_unavailable"
 

@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // Review threads are GraphQL-only on GitHub: REST knows the comments but

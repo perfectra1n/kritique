@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 func TestCarryWindow(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/runner"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/runner"
 )
 
 // Spec is one runner invocation.
@@ -19,7 +19,7 @@ type Spec struct {
 	// Annotations carry the River job id and head SHA.
 	Annotations map[string]string
 	// Job is the runner's job document, mounted from the run's Secret as the
-	// file KRITIKA_RUN_SPEC_FILE names.
+	// file KRITIQUE_RUN_SPEC_FILE names.
 	Job runner.Spec
 	// Secrets reach the runner through a Secret owned by its Job, and are
 	// masked out of the log tail.

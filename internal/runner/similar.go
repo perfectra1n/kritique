@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritika/internal/agent"
-	"github.com/home-operations/kritika/internal/contextpack"
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/contextpack"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // similarTimeout bounds one similar-code request to the gateway, which

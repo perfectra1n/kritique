@@ -10,12 +10,12 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
-	"github.com/home-operations/kritika/internal/ingest"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/store/storetest"
-	"github.com/home-operations/kritika/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/ingest"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // TestCarriedConfidence: an unchanged patch keeps the score its last

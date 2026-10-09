@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // The environment may set some of the file's keys: one model provider, the
@@ -18,11 +18,11 @@ import (
 
 // Environment variable prefixes of the keys the environment may set.
 const (
-	providerEnvPrefix   = "KRITIKA_PROVIDERS_"
-	reviewEnvPrefix     = "KRITIKA_REVIEW_"
-	confidenceEnvPrefix = "KRITIKA_CONFIDENCE_"
-	triggerEnvPrefix    = "KRITIKA_TRIGGER_"
-	embeddingEnvPrefix  = "KRITIKA_EMBEDDING_"
+	providerEnvPrefix   = "KRITIQUE_PROVIDERS_"
+	reviewEnvPrefix     = "KRITIQUE_REVIEW_"
+	confidenceEnvPrefix = "KRITIQUE_CONFIDENCE_"
+	triggerEnvPrefix    = "KRITIQUE_TRIGGER_"
+	embeddingEnvPrefix  = "KRITIQUE_EMBEDDING_"
 )
 
 // settingEnvPrefixes start the variables that set the file's own
@@ -31,16 +31,16 @@ var settingEnvPrefixes = []string{reviewEnvPrefix, confidenceEnvPrefix, triggerE
 
 // reviewWorkersEnv shares reviewEnvPrefix and is no key of the file: it is
 // how many review jobs a replica runs at once (internal/config).
-const reviewWorkersEnv = "KRITIKA_REVIEW_WORKERS"
+const reviewWorkersEnv = "KRITIQUE_REVIEW_WORKERS"
 
 // DefaultEnvProvider names the environment's provider when
-// KRITIKA_PROVIDERS_NAME is unset.
+// KRITIQUE_PROVIDERS_NAME is unset.
 const DefaultEnvProvider = "openrouter"
 
 // overlayProviderEnv declares the one provider the environment may: it
 // replaces the file's provider of its name whole, or joins them. Its type
 // defaults to its name when that is a provider type. It returns the
-// provider's name, "" when no KRITIKA_PROVIDERS_* variable is set; a
+// provider's name, "" when no KRITIQUE_PROVIDERS_* variable is set; a
 // variable that names no key is an error.
 func overlayProviderEnv(providers *map[string]Provider, environ []string) (string, error) {
 	name, p := DefaultEnvProvider, Provider{}
@@ -85,7 +85,7 @@ func overlayProviderEnv(providers *map[string]Provider, environ []string) (strin
 }
 
 // overlayDefaultsEnv sets the file's own review, confidence and trigger
-// keys from KRITIKA_REVIEW_*, KRITIKA_CONFIDENCE_* and KRITIKA_TRIGGER_*,
+// keys from KRITIQUE_REVIEW_*, KRITIQUE_CONFIDENCE_* and KRITIQUE_TRIGGER_*,
 // recording each key it sets in from.
 func overlayDefaultsEnv(d *Defaults, environ []string, from map[string]bool) error {
 	for _, kv := range environ {
@@ -179,7 +179,7 @@ func overlayDefaultsEnv(d *Defaults, environ []string, from map[string]bool) err
 }
 
 // overlayEmbeddingEnv sets the file's embedder key by key from
-// KRITIKA_EMBEDDING_*, starting one when the file has none, and records in
+// KRITIQUE_EMBEDDING_*, starting one when the file has none, and records in
 // from that the environment set it.
 func overlayEmbeddingEnv(e **Embedding, environ []string, from map[string]bool) error {
 	for _, kv := range environ {

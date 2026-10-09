@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // approvalForge records the approval calls a publish makes.
@@ -36,7 +36,7 @@ func (f *approvalForge) DismissApprovals(_ context.Context, owner, repo string, 
 func TestApprove(t *testing.T) {
 	t.Parallel()
 	scored := configfile.Confidence{Model: "p/judge", Threshold: 4, Risk: review.RiskMedium}
-	const approves, withdraws = "o/r#7@abcdef1234: kritika: ", "o/r#7: kritika: "
+	const approves, withdraws = "o/r#7@abcdef1234: kritique: ", "o/r#7: kritique: "
 	tests := []struct {
 		name                string
 		counts              review.Counts

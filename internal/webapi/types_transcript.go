@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/transcript"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
 // ToolDef is a tool a model was offered.

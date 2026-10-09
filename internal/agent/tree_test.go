@@ -10,7 +10,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/storage/memory"
 
-	"github.com/home-operations/kritika/internal/gittest"
+	"github.com/perfectra1n/kritique/internal/gittest"
 )
 
 // binaryContent has a NUL byte inside the first 8 KiB, so it must be

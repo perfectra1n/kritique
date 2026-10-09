@@ -1,5 +1,5 @@
-// Package configfile is kritika's configuration: the configuration file with
-// its KRITIKA_* environment overlay, and the settings for how kritika runs
+// Package configfile is kritique's configuration: the configuration file with
+// its KRITIQUE_* environment overlay, and the settings for how kritique runs
 // that come from the environment alone. Process configuration (addresses,
 // database, log level) is environment variables too and lives in
 // internal/config.
@@ -20,16 +20,16 @@ import (
 
 	"go.yaml.in/yaml/v4"
 
-	"github.com/home-operations/kritika/internal/agent"
-	"github.com/home-operations/kritika/internal/egress"
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/egress"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // ProviderType selects the model adapter a provider uses.
 type ProviderType = model.ProviderType
 
-// Provider types kritika implements. Each accepts a baseUrl, so any gateway
+// Provider types kritique implements. Each accepts a baseUrl, so any gateway
 // compatible with the OpenAI or Anthropic API is a provider.
 const (
 	ProviderOpenRouter = model.ProviderOpenRouter
@@ -41,7 +41,7 @@ const (
 // Forge identifies which forge a connection talks to.
 type Forge string
 
-// ForgeGitHub is github.com, the one forge kritika supports. Forge stays a
+// ForgeGitHub is github.com, the one forge kritique supports. Forge stays a
 // type, and the code that switches on it keeps its switch, so another forge
 // has a place.
 const ForgeGitHub Forge = "github"
@@ -198,7 +198,7 @@ type LimitsSpec struct {
 // DefaultConcurrency applies when no level of the configuration sets one.
 const DefaultConcurrency = 2
 
-// DefaultRunnerDeadline bounds a runner Job when KRITIKA_RUNNER_DEADLINE
+// DefaultRunnerDeadline bounds a runner Job when KRITIQUE_RUNNER_DEADLINE
 // sets none.
 const DefaultRunnerDeadline = 15 * time.Minute
 
@@ -214,7 +214,7 @@ type Defaults struct {
 // file's own, an account and a repository entry. A field a narrower scope
 // writes replaces the broader scope's, even when it is empty or zero; a
 // field it leaves out inherits. Ignore globs are unioned instead, and rules
-// add up by id. The keys are the ones a .kritika.yaml takes too, at the
+// add up by id. The keys are the ones a .kritique.yaml takes too, at the
 // same level, with the admin's own beside them.
 type Overrides struct {
 	// Enabled is where a repository starts, on or off, until an admin turns
@@ -230,7 +230,7 @@ type Overrides struct {
 	Rules   []Rule        `yaml:"rules,omitempty"`
 	Context []ContextFile `yaml:"context,omitempty"`
 	Skills  SkillsSpec    `yaml:"skills,omitempty"`
-	// Ignore are globs of the paths kritika leaves out of a review's
+	// Ignore are globs of the paths kritique leaves out of a review's
 	// context and of the index; a pull request that changes nothing else
 	// is skipped. They add to the broader scope's.
 	Ignore []string `yaml:"ignore,omitempty"`
@@ -457,7 +457,7 @@ type Connection struct {
 	// Accounts are the users and organizations the connection serves: a
 	// webhook for any other account is ignored, and a repository belongs to
 	// the connection serving its owner. A public GitHub App installed on
-	// several organizations lists each one kritika reviews for; nothing is
+	// several organizations lists each one kritique reviews for; nothing is
 	// served that is not listed.
 	Accounts []string `yaml:"accounts"`
 
@@ -481,7 +481,7 @@ type Repository struct {
 	where string
 }
 
-// RepoTraits is what kritika knows of a repository beyond its name: what the
+// RepoTraits is what kritique knows of a repository beyond its name: what the
 // forge says of it, that an archived repository is read-only and a fork a
 // copy of another one, and whether an admin turned it on or off from the
 // dashboard, nil until one does.
@@ -707,7 +707,7 @@ type File struct {
 	Egress      Egress
 	// Embedding is the instance's embedder, nil when indexing is off.
 	Embedding *Embedding
-	// Run is how kritika runs, from the environment.
+	// Run is how kritique runs, from the environment.
 	Run Run
 	// Accounts are every account a running connection serves, in the order
 	// the connections list them.
@@ -759,7 +759,7 @@ type Settings struct {
 	Confidence     Confidence
 	Skills         Skills
 	// Providers name the model providers the repository's account may use,
-	// the instance's and its own, sorted: the ones a .kritika.yaml may
+	// the instance's and its own, sorted: the ones a .kritique.yaml may
 	// choose a model of.
 	Providers []string
 }

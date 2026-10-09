@@ -316,8 +316,8 @@ func TestPublic(t *testing.T) {
 
 func TestProxyURL(t *testing.T) {
 	for raw, ok := range map[string]bool{
-		"http://kritika-gateway:8082": true, "http://kritika-gateway:8082/": true,
-		"https://kritika-gateway:8082": false, "http://": false, "http://gw/path": false, "gw:8082": false,
+		"http://kritique-gateway:8082": true, "http://kritique-gateway:8082/": true,
+		"https://kritique-gateway:8082": false, "http://": false, "http://gw/path": false, "gw:8082": false,
 	} {
 		if _, err := ProxyURL(raw); (err == nil) != ok {
 			t.Errorf("ProxyURL(%q) err = %v, want ok=%v", raw, err, ok)

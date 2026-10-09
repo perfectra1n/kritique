@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // skillDoc is a SKILL.md with the frontmatter keys given, one per line.

@@ -166,7 +166,7 @@
     "ruleIds": ["wrap-errors", "no-tokens"],
     "repoFiles": [
       {
-        "path": ".kritika.yaml",
+        "path": ".kritique.yaml",
         "size": 42
       }
     ],

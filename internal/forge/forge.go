@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // Clients builds a forge client per App and repository owner: a GitHub
@@ -87,7 +87,7 @@ type InlineComment struct {
 // stands from a review's start until its outcome replaces it.
 type StatusState string
 
-// States kritika reports.
+// States kritique reports.
 const (
 	StatusPending StatusState = "pending"
 	StatusSuccess StatusState = "success"
@@ -95,8 +95,8 @@ const (
 	StatusError   StatusState = "error"
 )
 
-// StatusContext is the commit status context kritika reports under.
-const StatusContext = "Kritika / Review"
+// StatusContext is the commit status context kritique reports under.
+const StatusContext = "Kritique / Review"
 
 // MaxStatusDescription is the length, in characters, GitHub truncates a
 // commit status description to.
@@ -199,7 +199,7 @@ type Client interface {
 	// DismissApprovals dismisses each of the bot's standing approvals of
 	// the pull request with message, and returns how many it dismissed.
 	DismissApprovals(ctx context.Context, owner, repo string, number int, message string) (int, error)
-	// SetStatus sets the kritika commit status on sha.
+	// SetStatus sets the kritique commit status on sha.
 	SetStatus(ctx context.Context, owner, repo, sha string, state StatusState, description string) error
 	// FileURL links lines line through endLine (0 for line alone) of path
 	// at sha in the forge's web UI.

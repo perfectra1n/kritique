@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/chunk"
+	"github.com/perfectra1n/kritique/internal/chunk"
 )
 
 // PartBytes is the most diff one part of a split review holds: about

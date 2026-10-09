@@ -52,8 +52,8 @@ func TestRedirectReferences(t *testing.T) {
 	for _, tt := range []struct {
 		name, in, want string
 	}{
-		{"shorthand", "fixed in home-operations/kritika#362.",
-			"fixed in [home-operations/kritika#362](https://redirect.github.com/home-operations/kritika/issues/362)."},
+		{"shorthand", "fixed in perfectra1n/kritique#362.",
+			"fixed in [perfectra1n/kritique#362](https://redirect.github.com/perfectra1n/kritique/issues/362)."},
 		{"shorthand at the start", "a/b#1 says so", "[a/b#1](https://redirect.github.com/a/b/issues/1) says so"},
 		{"shorthand with a dotted repository", "see a/b.js#12\n", "see [a/b.js#12](https://redirect.github.com/a/b.js/issues/12)\n"},
 		{"url", "see https://github.com/a/b/pull/12/files for the diff",

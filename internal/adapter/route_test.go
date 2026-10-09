@@ -9,9 +9,9 @@ import (
 
 	"github.com/openai/openai-go/v3"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
-	"github.com/home-operations/kritika/internal/model"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 func TestRoute(t *testing.T) {

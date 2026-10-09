@@ -24,7 +24,7 @@ import (
 
 	"go.yaml.in/yaml/v4"
 
-	"github.com/home-operations/kritika/bench"
+	"github.com/perfectra1n/kritique/bench"
 )
 
 var (

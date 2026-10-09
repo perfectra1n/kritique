@@ -17,15 +17,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritika/internal/adapter"
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/executor"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/gitfetch"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/runner"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/adapter"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Review works the review queue.
@@ -117,7 +117,7 @@ func (w *Review) Work(ctx context.Context, job *river.Job[jobs.ReviewArgs]) (err
 	}
 	// The status says the review is under way until its outcome replaces
 	// it, so a head is never silent while its runner works.
-	if err := client.SetStatus(ctx, owner, repo, args.HeadSHA, forge.StatusPending, "kritika: review running"); err != nil {
+	if err := client.SetStatus(ctx, owner, repo, args.HeadSHA, forge.StatusPending, "kritique: review running"); err != nil {
 		logger.Warn("commit status not set", "error", err)
 	}
 	// An error on the last attempt has River discard the job, so nothing
@@ -128,7 +128,7 @@ func (w *Review) Work(ctx context.Context, job *river.Job[jobs.ReviewArgs]) (err
 		}
 		sctx, cancel := detach(ctx)
 		defer cancel()
-		if serr := client.SetStatus(sctx, owner, repo, args.HeadSHA, forge.StatusError, "kritika: review failed"); serr != nil {
+		if serr := client.SetStatus(sctx, owner, repo, args.HeadSHA, forge.StatusError, "kritique: review failed"); serr != nil {
 			logger.Warn("commit status not set", "error", serr)
 		}
 	}()
@@ -310,7 +310,7 @@ type earlyEnd struct {
 	args                              jobs.ReviewArgs
 	pr                                *pullRequest
 	accountKey, mergeBase, forgePatch string
-	// skip is why the review was skipped: the repository's .kritika.yaml
+	// skip is why the review was skipped: the repository's .kritique.yaml
 	// did (a repoconfig.SkipReason), or a bot's patch was unchanged.
 	skip string
 	// filter is the name of the exclusion that filtered the review out, ""
@@ -358,9 +358,9 @@ func (w *Review) end(ctx context.Context, e earlyEnd, status store.ReviewStatus,
 func (e earlyEnd) status(status store.ReviewStatus, reason string) (forge.StatusState, string) {
 	switch status {
 	case store.ReviewFailed:
-		return forge.StatusError, "kritika: review failed (" + reason + ")"
+		return forge.StatusError, "kritique: review failed (" + reason + ")"
 	case store.ReviewCapped:
-		return forge.StatusSuccess, "kritika: capped (" + reason + ")"
+		return forge.StatusSuccess, "kritique: capped (" + reason + ")"
 	case store.ReviewSkipped:
 		// A skip with no reason of its own is an admission's, whose
 		// reason is the error it records.
@@ -368,7 +368,7 @@ func (e earlyEnd) status(status store.ReviewStatus, reason string) (forge.Status
 			reason = skipDescription(e.skip, e.filter)
 		}
 		state, desc := skipVerdict(e.carried, e.gate, reason)
-		return state, "kritika: " + desc
+		return state, "kritique: " + desc
 	}
 	return "", ""
 }
@@ -411,7 +411,7 @@ func (w *Review) skipUnchangedBot(
 
 // begun is a review job past everything before its admission: its pull
 // request is current, a model slot was free when it looked, the forge
-// answered, the repository's .kritika.yaml is applied and does not skip it,
+// answered, the repository's .kritique.yaml is applied and does not skip it,
 // its settle time is over, and it is not an unchanged bot rebase. notes are
 // what the review's summary says about the file.
 type begun struct {
@@ -424,7 +424,7 @@ type begun struct {
 
 // begin takes a review job up to its admission, or ends it: superseded,
 // snoozed while every model slot is held or until its settle time is over,
-// or skipped by the merge-base .kritika.yaml or as an unchanged bot rebase.
+// or skipped by the merge-base .kritique.yaml or as an unchanged bot rebase.
 // The admin's model's slots are checked before any forge call, so a job
 // snoozed through a busy spell costs the forge nothing each time it wakes;
 // a repository that chooses another model then waits for that model's

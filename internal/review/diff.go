@@ -3,7 +3,7 @@ package review
 import (
 	"strings"
 
-	"github.com/home-operations/kritika/internal/udiff"
+	"github.com/perfectra1n/kritique/internal/udiff"
 )
 
 // FitDiff keeps the whole file sections of a unified diff that fit in room

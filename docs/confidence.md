@@ -2,7 +2,7 @@
 
 Two opt-in features judge a reviewed pull request beyond its findings: a
 second model's confidence score, which can gate the commit status, and
-approvals, which kritika posts when the review allows it.
+approvals, which kritique posts when the review allows it.
 
 ```yaml
 review:
@@ -26,7 +26,7 @@ leaves out, such as a release note no check covers, rather than guessing
 at what the review read. A different vendor's model than the review's
 makes it a second opinion.
 
-| Key                       | Default                 | What                                                                                       | From a `.kritika.yaml`                     |
+| Key                       | Default                 | What                                                                                       | From a `.kritique.yaml`                     |
 | ------------------------- | ----------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------ |
 | `confidence.model`        | none: nothing is scored | the model that scores, a `<provider>/<model>` held to the same providers as `review.model` | replaces                                   |
 | `confidence.fallback`     | none                    | the model that takes the scorer's call when the confidence model fails ([fallback](models.md#fallback)) | replaces                                   |
@@ -121,7 +121,7 @@ its reason, and keeps that rating unless the change now does something
 the reason does not account for, so a second reading of the same change
 does not move it. A re-run of the same head rates afresh, as does one
 someone asked for with `@<app slug> review` or from the dashboard, and the
-first review after kritika's scoring instructions or
+first review after kritique's scoring instructions or
 `confidence.instructions` change.
 
 `confidence.instructions` is plain guidance to the scorer on rating risk
@@ -129,7 +129,7 @@ in your code, such as "the media apps under `kubernetes/apps/default` are
 low whatever moves" or "anything under `db/migrations` is critical"; it
 refines the tables above and changes nothing else about the score. It is
 the admin's alone, so a pull request cannot talk its own risk down. The
-[`kritika_confidence_scores_total`](metrics.md) series counts the scored
+[`kritique_confidence_scores_total`](metrics.md) series counts the scored
 reviews by score and risk, so what a change to the instructions does
 shows over time.
 
@@ -138,9 +138,9 @@ that scores well passes its check and waits for a person.
 
 ## Approvals
 
-With `review.approve: true`, kritika approves a pull request its review
+With `review.approve: true`, kritique approves a pull request its review
 allows, as a review pinned to the head it saw. Off unless set; a
-repository's `.kritika.yaml` replaces the admin's in either direction, so
+repository's `.kritique.yaml` replaces the admin's in either direction, so
 a repository can turn it on where the instance leaves it off.
 
 | Setting               | A pull request is approved when                                                                                            |
@@ -149,11 +149,11 @@ a repository can turn it on where the instance leaves it off.
 | a `confidence.model`  | its score reaches `confidence.threshold` and its risk is within `confidence.risk`; a review left unscored approves nothing |
 
 So one threshold decides the approval and, where gated, the check: a
-repository can have kritika approve what scores well without ever failing
+repository can have kritique approve what scores well without ever failing
 a check, or fail the check and leave approving to people.
 
 - **Withdrawn:** a later review of the same pull request whose verdict no
-  longer allows it dismisses kritika's approval, as does a reviewer who
+  longer allows it dismisses kritique's approval, as does a reviewer who
   stands as requesting changes. A head that moved while it was reviewed is
   left to its own review.
 - **Merged or closed:** a review someone asks for of a merged or closed

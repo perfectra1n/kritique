@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
-	"github.com/home-operations/kritika/internal/jobtimeout"
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // fixture sets the variables testdata/full.yaml's secrets name and returns
@@ -164,17 +164,17 @@ func TestConnectionCredentials(t *testing.T) {
 
 func TestConfigHashLeavesSecretValuesOut(t *testing.T) {
 	raw := []byte("auth: {}\n")
-	secrets := []string{"KRITIKA_AUTH_ADMIN_PASSWORD"}
-	base := configHash(raw, []string{"KRITIKA_AUTH_ADMIN_PASSWORD=hunter2", "KRITIKA_TRIGGER_SETTLE=30s", "HOME=/x"}, secrets)
+	secrets := []string{"KRITIQUE_AUTH_ADMIN_PASSWORD"}
+	base := configHash(raw, []string{"KRITIQUE_AUTH_ADMIN_PASSWORD=hunter2", "KRITIQUE_TRIGGER_SETTLE=30s", "HOME=/x"}, secrets)
 	for name, tt := range map[string]struct {
 		environ []string
 		secrets []string
 		same    bool
 	}{
-		"another password":        {[]string{"KRITIKA_AUTH_ADMIN_PASSWORD=other", "KRITIKA_TRIGGER_SETTLE=30s"}, secrets, true},
-		"a variable not overlaid": {[]string{"KRITIKA_AUTH_ADMIN_PASSWORD=hunter2", "KRITIKA_TRIGGER_SETTLE=30s", "USER=y"}, secrets, true},
-		"another overlay value":   {[]string{"KRITIKA_AUTH_ADMIN_PASSWORD=hunter2", "KRITIKA_TRIGGER_SETTLE=90s"}, secrets, false},
-		"another secret named":    {[]string{"KRITIKA_AUTH_ADMIN_PASSWORD=hunter2", "KRITIKA_TRIGGER_SETTLE=30s"}, []string{"KRITIKA_AUTH_ADMIN_PASSWORD", "OIDC_SECRET"}, false},
+		"another password":        {[]string{"KRITIQUE_AUTH_ADMIN_PASSWORD=other", "KRITIQUE_TRIGGER_SETTLE=30s"}, secrets, true},
+		"a variable not overlaid": {[]string{"KRITIQUE_AUTH_ADMIN_PASSWORD=hunter2", "KRITIQUE_TRIGGER_SETTLE=30s", "USER=y"}, secrets, true},
+		"another overlay value":   {[]string{"KRITIQUE_AUTH_ADMIN_PASSWORD=hunter2", "KRITIQUE_TRIGGER_SETTLE=90s"}, secrets, false},
+		"another secret named":    {[]string{"KRITIQUE_AUTH_ADMIN_PASSWORD=hunter2", "KRITIQUE_TRIGGER_SETTLE=30s"}, []string{"KRITIQUE_AUTH_ADMIN_PASSWORD", "OIDC_SECRET"}, false},
 	} {
 		if got := configHash(raw, tt.environ, tt.secrets) == base; got != tt.same {
 			t.Errorf("%s: hash unchanged = %v, want %v", name, got, tt.same)
@@ -195,7 +195,7 @@ func TestHashAndConnectionLookup(t *testing.T) {
 	}
 	// The environment overlay is part of the configuration, so a replica
 	// with another one does not hash alike.
-	t.Setenv("KRITIKA_TRIGGER_SETTLE", "90s")
+	t.Setenv("KRITIQUE_TRIGGER_SETTLE", "90s")
 	if g, err := load(t, fixture(t)); err != nil || g.Hash() == f.Hash() {
 		t.Fatalf("hash unchanged by an overlay variable: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestDefaultIgnore(t *testing.T) {
 		{"kubernetes/apps/foo/secret.sops.yaml", false},
 		{"web/dist/index.html", false},
 		{"build/ci.sh", false},
-		{"charts/kritika/Chart.yaml", false},
+		{"charts/kritique/Chart.yaml", false},
 		{"CHANGELOG.md", false},
 		{"kubernetes/apps/foo/crds/bar.yaml", false},
 	}
@@ -819,7 +819,7 @@ func TestRepositoryAgentReview(t *testing.T) {
       agent: { steps: 12, output: 4096, tokens: 250000, prompt: 120000, parts: 3, timeout: 3m, commands: [curl, rg], commandTimeout: 10s },
       review: { incremental: 5, fixes: true },
       rules: [{ id: style, file: docs/rules.md }],
-      comments: { summary: .kritika/summary.md.tmpl, finding: .kritika/inline.md.tmpl } }`)))
+      comments: { summary: .kritique/summary.md.tmpl, finding: .kritique/inline.md.tmpl } }`)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -830,10 +830,10 @@ func TestRepositoryAgentReview(t *testing.T) {
 			t.Fatalf("agent=%+v incremental=%+v", s.Agent, s.Incremental)
 		}
 		if !s.Review.RequireSuggestedFix || len(s.Review.Rules) != 1 || s.Review.Rules[0].File != "docs/rules.md" ||
-			s.Review.Templates.Summary != ".kritika/summary.md.tmpl" || s.Review.Templates.Inline != ".kritika/inline.md.tmpl" {
+			s.Review.Templates.Summary != ".kritique/summary.md.tmpl" || s.Review.Templates.Inline != ".kritique/inline.md.tmpl" {
 			t.Fatalf("review = %+v", s.Review)
 		}
-		if got := s.Review.Referenced(); strings.Join(got, ",") != "docs/rules.md,.kritika/summary.md.tmpl,.kritika/inline.md.tmpl" {
+		if got := s.Review.Referenced(); strings.Join(got, ",") != "docs/rules.md,.kritique/summary.md.tmpl,.kritique/inline.md.tmpl" {
 			t.Fatalf("referenced = %v", got)
 		}
 	})

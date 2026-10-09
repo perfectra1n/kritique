@@ -151,7 +151,7 @@
   ] as const;
 </script>
 
-<svelte:head><title>Pull requests · {slug} · kritika</title></svelte:head>
+<svelte:head><title>Pull requests · {slug} · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">

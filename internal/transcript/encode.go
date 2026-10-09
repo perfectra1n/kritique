@@ -3,7 +3,7 @@ package transcript
 import (
 	"encoding/json"
 
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // Size caps.

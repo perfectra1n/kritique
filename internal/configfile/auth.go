@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritika/internal/rolemap"
+	"github.com/perfectra1n/kritique/internal/rolemap"
 )
 
 // Auth configures how people sign in to the dashboard and what each may do:
 // a local admin, an OIDC issuer and GitHub, each optional, and each
-// provider's role mapping. Every key also has a KRITIKA_AUTH_* environment
+// provider's role mapping. Every key also has a KRITIQUE_AUTH_* environment
 // variable, which wins over the file (see overlayEnv).
 type Auth struct {
 	// SessionTTL is how long a dashboard session lasts; zero means
@@ -263,9 +263,9 @@ func (s *SignIn) validate(where string) error {
 }
 
 // authEnvPrefix starts every environment variable that sets an auth key.
-const authEnvPrefix = "KRITIKA_AUTH_"
+const authEnvPrefix = "KRITIQUE_AUTH_"
 
-// overlayEnv sets every auth key a KRITIKA_AUTH_* variable in environ names,
+// overlayEnv sets every auth key a KRITIQUE_AUTH_* variable in environ names,
 // over what the file says; a secret's variable carries the value itself. A
 // variable that names no key is an error, so a typo is refused rather than
 // ignored.

@@ -9,7 +9,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // MaxConfidence is the highest confidence score.
@@ -74,7 +74,7 @@ func (c Confidence) Passed() bool { return c.Score >= c.Threshold }
 
 // ConfidenceSystem is the scorer's standing instructions. The ceilings it
 // states are the ones ConfidenceCeiling enforces.
-const ConfidenceSystem = `You are kritika's second reviewer. Another model reviewed a pull request with tools that read the repository and
+const ConfidenceSystem = `You are kritique's second reviewer. Another model reviewed a pull request with tools that read the repository and
 upstream sources. You see the pull request's title, description and diff, the review's account of what it checked
 and read, and the findings it reported. Judge how ready the pull request is to merge, as a confidence score from 0
 to 5.

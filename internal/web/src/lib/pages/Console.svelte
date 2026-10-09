@@ -25,7 +25,7 @@
   const sourceLabel: Record<string, string> = { env: 'environment', file: 'config file', default: 'default' };
 </script>
 
-<svelte:head><title>Configuration · kritika</title></svelte:head>
+<svelte:head><title>Configuration · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">

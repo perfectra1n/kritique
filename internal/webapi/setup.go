@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // How far the instance is from reviewing, for the Configuration page's

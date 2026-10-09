@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // Issue is an issue the pull request description says the change closes,

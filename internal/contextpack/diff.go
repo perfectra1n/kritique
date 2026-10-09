@@ -3,8 +3,8 @@ package contextpack
 import (
 	"strings"
 
-	"github.com/home-operations/kritika/internal/chunk"
-	"github.com/home-operations/kritika/internal/udiff"
+	"github.com/perfectra1n/kritique/internal/chunk"
+	"github.com/perfectra1n/kritique/internal/udiff"
 )
 
 // diffLines is what a unified diff says per path: the head-side lines it

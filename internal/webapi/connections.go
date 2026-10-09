@@ -10,10 +10,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/auth"
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge/github"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge/github"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // registerConnections mounts the admin's view of the running connections

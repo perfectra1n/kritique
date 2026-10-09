@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/agent"
-	"github.com/home-operations/kritika/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
 )
 
 // TestToolsTakeZeroValuesAsLeftOut: a model may send every property of a

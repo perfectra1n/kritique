@@ -1,34 +1,34 @@
 # Configuration
 
-kritika takes its settings from three places, each for what it suits:
+kritique takes its settings from three places, each for what it suits:
 
 | Where                                                                                                                                                                                          | What                                                                                                                                                              | Changed by                         |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| The configuration file, and its `KRITIKA_AUTH_*`, `KRITIKA_APPS_*`, `KRITIKA_PROVIDERS_*`, `KRITIKA_REVIEW_*`, `KRITIKA_CONFIDENCE_*`, `KRITIKA_TRIGGER_*` and `KRITIKA_EMBEDDING_*` variables | What is reviewed and how: sign-in, the GitHub Apps, model providers, the embedder, egress, the repository settings, the repository entries and the accounts       | a restart                          |
-| The other `KRITIKA_*` variables                                                                                                                                                                | How kritika runs: its addresses, the database, `KRITIKA_WEB_URL`, logging, polling, onboarding, retention and runner Jobs ([how kritika runs](#how-kritika-runs)) | a restart                          |
+| The configuration file, and its `KRITIQUE_AUTH_*`, `KRITIQUE_APPS_*`, `KRITIQUE_PROVIDERS_*`, `KRITIQUE_REVIEW_*`, `KRITIQUE_CONFIDENCE_*`, `KRITIQUE_TRIGGER_*` and `KRITIQUE_EMBEDDING_*` variables | What is reviewed and how: sign-in, the GitHub Apps, model providers, the embedder, egress, the repository settings, the repository entries and the accounts       | a restart                          |
+| The other `KRITIQUE_*` variables                                                                                                                                                                | How kritique runs: its addresses, the database, `KRITIQUE_WEB_URL`, logging, polling, onboarding, retention and runner Jobs ([how kritique runs](#how-kritique-runs)) | a restart                          |
 | The dashboard                                                                                                                                                                                  | Whether each repository is on or off                                                                                                                              | an admin, on the Repositories page |
 
-A repository's own [`.kritika.yaml`](repository-config.md) narrows what the
+A repository's own [`.kritique.yaml`](repository-config.md) narrows what the
 configuration sets for it, from its own git.
 
-- **The file** is optional: `KRITIKA_CONFIG_FILE` names it, and the chart's
+- **The file** is optional: `KRITIQUE_CONFIG_FILE` names it, and the chart's
   `configFile` renders it, so the configuration lives in git with the rest
   of the deployment.
 - **A secret** in the file is `{ env: NAME }`, the variable holding it,
   never the value itself; the chart's `env` and `envFrom` set such a
   variable from an existing Secret. Once the configuration is read,
-  kritika removes every variable a secret came from from its own
+  kritique removes every variable a secret came from from its own
   environment.
 - **Variables** also set sign-in, one app, one provider, the review
   models, some review, confidence and trigger settings, and the embedder.
   A variable wins over the file and carries a secret itself, so a small
   deployment can be configured from the environment alone. A variable
   under one of the prefixes above that names no key is refused at startup
-  rather than ignored; `KRITIKA_REVIEW_WORKERS`, a process setting, is the
+  rather than ignored; `KRITIQUE_REVIEW_WORKERS`, a process setting, is the
   one exception.
-- **The chart's `config`** has a key for every `KRITIKA_*` variable it
+- **The chart's `config`** has a key for every `KRITIQUE_*` variable it
   does not derive from its other values, its name without the prefix in
-  camelCase (`KRITIKA_AUTH_OIDC_ISSUER` is `authOidcIssuer`); a secret's
+  camelCase (`KRITIQUE_AUTH_OIDC_ISSUER` is `authOidcIssuer`); a secret's
   key takes a `valueFrom` from a Secret.
 - **An expression:** a key whose value is a [CEL](https://cel.dev)
   expression ends in `Expr`, or is the `expr` of a condition:
@@ -47,20 +47,20 @@ keys of the chart's `config`, the secrets among them from existing Secrets.
 
 | Key                      | Environment variable                        |
 | ------------------------ | ------------------------------------------- |
-| `sessionTTL`             | `KRITIKA_AUTH_SESSION_TTL`                  |
-| `admin.user`             | `KRITIKA_AUTH_ADMIN_USER`                   |
-| `admin.password`         | `KRITIKA_AUTH_ADMIN_PASSWORD`               |
-| `oidc.name`              | `KRITIKA_AUTH_OIDC_NAME`                    |
-| `oidc.issuer`            | `KRITIKA_AUTH_OIDC_ISSUER`                  |
-| `oidc.clientId`          | `KRITIKA_AUTH_OIDC_CLIENT_ID`               |
-| `oidc.clientSecret`      | `KRITIKA_AUTH_OIDC_CLIENT_SECRET`           |
-| `oidc.scopes`            | `KRITIKA_AUTH_OIDC_SCOPES`, comma-separated |
-| `oidc.rolesClaim`        | `KRITIKA_AUTH_OIDC_ROLES_CLAIM`             |
-| `oidc.roleMappingExpr`   | `KRITIKA_AUTH_OIDC_ROLE_MAPPING_EXPR`       |
-| `oidc.defaultRole`       | `KRITIKA_AUTH_OIDC_DEFAULT_ROLE`            |
-| `github.clientId`        | `KRITIKA_AUTH_GITHUB_CLIENT_ID`             |
-| `github.clientSecret`    | `KRITIKA_AUTH_GITHUB_CLIENT_SECRET`         |
-| `github.roleMappingExpr` | `KRITIKA_AUTH_GITHUB_ROLE_MAPPING_EXPR`     |
+| `sessionTTL`             | `KRITIQUE_AUTH_SESSION_TTL`                  |
+| `admin.user`             | `KRITIQUE_AUTH_ADMIN_USER`                   |
+| `admin.password`         | `KRITIQUE_AUTH_ADMIN_PASSWORD`               |
+| `oidc.name`              | `KRITIQUE_AUTH_OIDC_NAME`                    |
+| `oidc.issuer`            | `KRITIQUE_AUTH_OIDC_ISSUER`                  |
+| `oidc.clientId`          | `KRITIQUE_AUTH_OIDC_CLIENT_ID`               |
+| `oidc.clientSecret`      | `KRITIQUE_AUTH_OIDC_CLIENT_SECRET`           |
+| `oidc.scopes`            | `KRITIQUE_AUTH_OIDC_SCOPES`, comma-separated |
+| `oidc.rolesClaim`        | `KRITIQUE_AUTH_OIDC_ROLES_CLAIM`             |
+| `oidc.roleMappingExpr`   | `KRITIQUE_AUTH_OIDC_ROLE_MAPPING_EXPR`       |
+| `oidc.defaultRole`       | `KRITIQUE_AUTH_OIDC_DEFAULT_ROLE`            |
+| `github.clientId`        | `KRITIQUE_AUTH_GITHUB_CLIENT_ID`             |
+| `github.clientSecret`    | `KRITIQUE_AUTH_GITHUB_CLIENT_SECRET`         |
+| `github.roleMappingExpr` | `KRITIQUE_AUTH_GITHUB_ROLE_MAPPING_EXPR`     |
 
 ```yaml
 auth:
@@ -69,11 +69,11 @@ auth:
   oidc:
     name: Company SSO
     issuer: https://idp.example.com
-    clientId: kritika-dashboard
+    clientId: kritique-dashboard
     clientSecret: { env: OIDC_CLIENT_SECRET }
     scopes: [openid, email, profile]
     rolesClaim: groups
-    roleMappingExpr: '"kritika-admins" in roles ? "admin" : ("kritika-users" in roles ? "member" : "")'
+    roleMappingExpr: '"kritique-admins" in roles ? "admin" : ("kritique-users" in roles ? "member" : "")'
   github:
     clientId: Iv1.abc123
     clientSecret: { env: GITHUB_CLIENT_SECRET }
@@ -89,13 +89,13 @@ auth:
 - `oidc` signs in through any OpenID Connect issuer, an `https` URL. The
   sign-in page labels it `name`, or "SSO" when unset.
 - `github` signs in on github.com with an OAuth App's client, or a GitHub
-  App's own: the App kritika reviews through can serve both, with a client
+  App's own: the App kritique reviews through can serve both, with a client
   secret generated on its settings page (see [setup](setup.md)).
 - `sessionTTL` is how long a dashboard session lasts, between 5 minutes and
   30 days. It defaults to 12 hours.
 
-A provider must allow the callback URL `<KRITIKA_WEB_URL>/auth/callback/oidc`
-or `<KRITIKA_WEB_URL>/auth/callback/github`. The dashboard refuses to start
+A provider must allow the callback URL `<KRITIQUE_WEB_URL>/auth/callback/oidc`
+or `<KRITIQUE_WEB_URL>/auth/callback/github`. The dashboard refuses to start
 with no way to sign in. The configuration is refused when nothing could
 make an admin: set an admin password, or a `roleMappingExpr` on a
 provider.
@@ -108,7 +108,7 @@ provider.
 | Member | reads reviews, conversations and transcripts, with no write access: every account, or only the accounts serving the forge accounts their sign-in placed them on                                                  |
 
 The Configuration page lists the instance settings read-only, each with
-its source: the environment, the configuration file, or kritika's default.
+its source: the environment, the configuration file, or kritique's default.
 A secret shows only whether it is set, and a URL's credentials are hidden.
 Every admin write is audit-logged in the same transaction as the change it
 makes.
@@ -148,7 +148,7 @@ A mapping that fails to evaluate refuses the sign-in.
 
 ## `apps`
 
-`apps` declares the GitHub Apps kritika serves accounts through. The
+`apps` declares the GitHub Apps kritique serves accounts through. The
 [setup guide](setup.md) covers creating one.
 
 ```yaml
@@ -172,11 +172,11 @@ The same app can come from the environment instead:
 
 | Variable                      | Key                          |
 | ----------------------------- | ---------------------------- |
-| `KRITIKA_APPS_NAME`           | the key, `github` unless set |
-| `KRITIKA_APPS_ACCOUNTS`       | `accounts`, comma-separated  |
-| `KRITIKA_APPS_CLIENT_ID`      | `clientId`                   |
-| `KRITIKA_APPS_PRIVATE_KEY`    | `privateKey`                 |
-| `KRITIKA_APPS_WEBHOOK_SECRET` | `webhookSecret`              |
+| `KRITIQUE_APPS_NAME`           | the key, `github` unless set |
+| `KRITIQUE_APPS_ACCOUNTS`       | `accounts`, comma-separated  |
+| `KRITIQUE_APPS_CLIENT_ID`      | `clientId`                   |
+| `KRITIQUE_APPS_PRIVATE_KEY`    | `privateKey`                 |
+| `KRITIQUE_APPS_WEBHOOK_SECRET` | `webhookSecret`              |
 
 The environment declares at most one app. It replaces the file's app of
 the same name whole, or is added to the file's when none has that name.
@@ -214,8 +214,8 @@ one. They come in five groups, with a few keys beside them:
 | `agent`      | `steps`, `output`, `tokens`, `prompt`, `timeout`, `commands`, `commandTimeout`      | the bounds of a review's tool loop         |
 | beside them  | `enabled`, `rules`, `context`, `skills`, `ignore`, and `limits` at the root alone   |                                            |
 
-`ignore` lists globs of the paths kritika never looks at: they are left out
-of a review's context and of the index, on top of kritika's own (vendored
+`ignore` lists globs of the paths kritique never looks at: they are left out
+of a review's context and of the index, on top of kritique's own (vendored
 trees, lockfiles, generated and minified code, source maps and logs), and a
 pull request that changes nothing else is skipped.
 
@@ -256,8 +256,8 @@ repositories:
 
 ### What only the admin sets
 
-The root and each entry take the keys a repository's own `.kritika.yaml`
-takes, which the [`.kritika.yaml` reference](repository-config.md)
+The root and each entry take the keys a repository's own `.kritique.yaml`
+takes, which the [`.kritique.yaml` reference](repository-config.md)
 describes, and these, which are the admin's alone:
 
 | Key                       | What                                                                                                                                                                                                                                                                                |
@@ -266,18 +266,18 @@ describes, and these, which are the admin's alone:
 | `review.cost`             | `true` ends the summary's footer with what the pull request's reviews have cost together, every model call charged to one of them. Off unless set: the comment is public, on a fork's pull request too, and the figure is the instance's spend                                      |
 | `review.incremental`      | how many files of the change may move since the last review before a re-review covers the whole pull request again; 25 unless set ([incremental reviews](#incremental-reviews))                                                                                                     |
 | `trigger.settle`          | how long a new head waits before its review starts, so a burst of pushes is reviewed once; no wait unless set                                                                                                                                                                       |
-| `trigger.limit`           | how many automatic reviews a pull request gets before kritika pauses them, so a long-lived pull request stops spending on every push; unlimited unless set. The summary of the last one says so, and `@<app slug> review` and `resume` still work ([commands](reviews.md#commands)) |
+| `trigger.limit`           | how many automatic reviews a pull request gets before kritique pauses them, so a long-lived pull request stops spending on every push; unlimited unless set. The summary of the last one says so, and `@<app slug> review` and `resume` still work ([commands](reviews.md#commands)) |
 | `agent`                   | the bounds of a review's tool loop ([the agent](#the-agent))                                                                                                                                                                                                                        |
 | `limits`                  | at the root alone: every account's limits ([`accounts`](#accounts))                                                                                                                                                                                                                 |
-| `enabled`                 | at the root and `owner/*` only: where repositories start ([which repositories run](#which-repositories-run)). A repository's `.kritika.yaml` can only set `enabled: false`, which turns its own repository off                                                                      |
+| `enabled`                 | at the root and `owner/*` only: where repositories start ([which repositories run](#which-repositories-run)). A repository's `.kritique.yaml` can only set `enabled: false`, which turns its own repository off                                                                      |
 
 ### Precedence
 
-A value applies in this order: kritika's default, the file's root,
-`owner/*`, `owner/name`, and the repository's `.kritika.yaml`. A narrower
+A value applies in this order: kritique's default, the file's root,
+`owner/*`, `owner/name`, and the repository's `.kritique.yaml`. A narrower
 value replaces the broader one's, except:
 
-| Key                                  | Across the root, `owner/*` and `owner/name`                              | From a `.kritika.yaml`                                            |
+| Key                                  | Across the root, `owner/*` and `owner/name`                              | From a `.kritique.yaml`                                            |
 | ------------------------------------ | ------------------------------------------------------------------------ | ----------------------------------------------------------------- |
 | `ignore`                             | globs add up                                                             | globs add up                                                      |
 | `rules`                              | add up by id                                                             | added; a rule under an admin's id is dropped                      |
@@ -340,7 +340,7 @@ trigger:
 - **Across scopes:** the lists add up across the root, `owner/*` and
   `owner/name`, and a named condition replaces the broader scope's of that
   name where it stands. A name may not be given twice in one list.
-- **A repository's lists:** a `.kritika.yaml` has lists of its own,
+- **A repository's lists:** a `.kritique.yaml` has lists of its own,
   judged beside the admin's: a pull request must pass both, and a
   condition in the file under a name an admin's has is dropped.
 - **Checked at startup:** an expression is compiled and smoke-tested
@@ -349,7 +349,7 @@ trigger:
   excluded, such as with `exclude: [{ name: forks, expr: pr.fork }]`.
 - **Asked-for reviews:** a review someone asks for, with
   `@<app slug> review` or a re-run from the dashboard, passes the admin's
-  lists whatever they say; a `.kritika.yaml`'s lists still apply to it.
+  lists whatever they say; a `.kritique.yaml`'s lists still apply to it.
 
 ### Incremental reviews
 
@@ -478,29 +478,29 @@ and the embedder's variables are on [Models](models.md#from-the-environment):
 
 | Variable                       | Key                                                            |
 | ------------------------------ | -------------------------------------------------------------- |
-| `KRITIKA_REVIEW_MODEL`         | `review.model`                                                 |
-| `KRITIKA_REVIEW_FALLBACK`      | `review.fallback`                                              |
-| `KRITIKA_REVIEW_EFFORT`        | `review.effort`, a level or empty ([effort](models.md#effort)) |
-| `KRITIKA_REVIEW_APPROVE`       | `review.approve`, `true` or `false`                            |
-| `KRITIKA_REVIEW_FIXES`         | `review.fixes`, `true` or `false`                              |
-| `KRITIKA_REVIEW_INCREMENTAL`   | `review.incremental`, a whole number of files                  |
-| `KRITIKA_REVIEW_DIAGRAM`       | `review.diagram`, `true` or `false`                            |
-| `KRITIKA_REVIEW_COST`          | `review.cost`, `true` or `false`                               |
-| `KRITIKA_CONFIDENCE_MODEL`     | `confidence.model`                                             |
-| `KRITIKA_CONFIDENCE_FALLBACK`  | `confidence.fallback`                                          |
-| `KRITIKA_CONFIDENCE_EFFORT`    | `confidence.effort`, a level or empty                          |
-| `KRITIKA_CONFIDENCE_THRESHOLD` | `confidence.threshold`, a whole number from 0 to 5             |
-| `KRITIKA_CONFIDENCE_GATE`      | `confidence.gate`, `true` or `false`                           |
-| `KRITIKA_CONFIDENCE_RISK`      | `confidence.risk`, `low`, `medium`, `high` or `critical`       |
-| `KRITIKA_TRIGGER_SETTLE`       | `trigger.settle`, a duration such as `30s`                     |
-| `KRITIKA_TRIGGER_LIMIT`        | `trigger.limit`, a whole number of reviews                     |
+| `KRITIQUE_REVIEW_MODEL`         | `review.model`                                                 |
+| `KRITIQUE_REVIEW_FALLBACK`      | `review.fallback`                                              |
+| `KRITIQUE_REVIEW_EFFORT`        | `review.effort`, a level or empty ([effort](models.md#effort)) |
+| `KRITIQUE_REVIEW_APPROVE`       | `review.approve`, `true` or `false`                            |
+| `KRITIQUE_REVIEW_FIXES`         | `review.fixes`, `true` or `false`                              |
+| `KRITIQUE_REVIEW_INCREMENTAL`   | `review.incremental`, a whole number of files                  |
+| `KRITIQUE_REVIEW_DIAGRAM`       | `review.diagram`, `true` or `false`                            |
+| `KRITIQUE_REVIEW_COST`          | `review.cost`, `true` or `false`                               |
+| `KRITIQUE_CONFIDENCE_MODEL`     | `confidence.model`                                             |
+| `KRITIQUE_CONFIDENCE_FALLBACK`  | `confidence.fallback`                                          |
+| `KRITIQUE_CONFIDENCE_EFFORT`    | `confidence.effort`, a level or empty                          |
+| `KRITIQUE_CONFIDENCE_THRESHOLD` | `confidence.threshold`, a whole number from 0 to 5             |
+| `KRITIQUE_CONFIDENCE_GATE`      | `confidence.gate`, `true` or `false`                           |
+| `KRITIQUE_CONFIDENCE_RISK`      | `confidence.risk`, `low`, `medium`, `high` or `critical`       |
+| `KRITIQUE_TRIGGER_SETTLE`       | `trigger.settle`, a duration such as `30s`                     |
+| `KRITIQUE_TRIGGER_LIMIT`        | `trigger.limit`, a whole number of reviews                     |
 
 The Configuration page lists what the file and the environment set under
 "Instance settings", with where each comes from.
 
 ### Which repositories run
 
-kritika registers every repository each App reaches, once the
+kritique registers every repository each App reaches, once the
 configuration is applied and again on every poll, and "Resync from GitHub"
 on the Repositories page does the same at once. Each also disables the
 repositories the App no longer reaches, such as one deleted, renamed or
@@ -521,7 +521,7 @@ An `owner/name` entry may not set `enabled`: the dashboard owns a
 repository's on or off, and the configuration only says where one starts.
 A repository that is off, that the App no longer reaches, or whose account
 no App serves is neither reviewed, polled nor indexed. Its index is
-dropped once it has been off for `KRITIKA_INDEX_GRACE`, counted from the
+dropped once it has been off for `KRITIQUE_INDEX_GRACE`, counted from the
 leader's hourly sweep that first finds it off; one that runs again before
 then keeps its index.
 
@@ -557,7 +557,7 @@ served.
 
 ## `egress`
 
-`egress` is what runner pods may reach through kritika's gateway beyond
+`egress` is what runner pods may reach through kritique's gateway beyond
 `github.com` and `api.github.com`, which an app allows: `allow` and `deny`
 list hosts, IP addresses and CIDRs, and `credentials` names hosts the
 gateway adds a token to. [Security](security.md#the-egress-gateway)
@@ -571,33 +571,33 @@ egress:
     api.github.com: { env: GITHUB_TOKEN }
 ```
 
-## How kritika runs
+## How kritique runs
 
 These come from the environment rather than the file, each a camelCased
-key of the chart's `config` (`KRITIKA_POLL_INTERVAL` is `pollInterval`)
+key of the chart's `config` (`KRITIQUE_POLL_INTERVAL` is `pollInterval`)
 except where noted; a restart changes them. The chart sets the rest of
 the process's variables, its addresses, database URLs and roles and the
 runner image, from its other values.
 
 | Variable                           | What                                                                                                                                                                                                                             |
 | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `KRITIKA_POLL_INTERVAL`            | how often the leader lists each app's open pull requests, its backstop for missed webhooks; `0s` turns it off; 10m unless set                                                                                                    |
-| `KRITIKA_POLL_LOOKBACK`            | how far back a first or long-idle poll looks; 24h unless set                                                                                                                                                                     |
-| `KRITIKA_ONBOARD_WINDOW`           | how many onboarding index jobs the leader keeps queued or running at once; 4 unless set                                                                                                                                          |
-| `KRITIKA_INDEX_GRACE`              | how long the index of a repository that stopped running is kept; 720h unless set                                                                                                                                                 |
-| `KRITIKA_TRANSCRIPT_RETENTION`     | how long a review's full model transcript is kept, at least 24h; 720h unless set                                                                                                                                                 |
-| `KRITIKA_DIFF_RETENTION`           | how long a review keeps the diff it was made from, the context it read and the repository files it named, at least 24h; 720h unless set                                                                                          |
-| `KRITIKA_REVIEW_WORKERS`           | review jobs one replica runs at once; 2 unless set                                                                                                                                                                               |
-| `KRITIKA_INDEX_WORKERS`            | index jobs one replica runs at once; 1 unless set                                                                                                                                                                                |
-| `KRITIKA_LEADER_RETRY_INTERVAL`    | how often a replica retries the leader lock, and the holder checks it still has it; 15s unless set                                                                                                                               |
-| `KRITIKA_GATEWAY_TOKEN_TTL`        | how long a run's gateway token outlives its Job's deadline, in case the replica that minted it dies first; 1h unless set                                                                                                         |
-| `KRITIKA_LOG_LEVEL`                | `debug`, `info`, `warn` or `error`; `info` unless set                                                                                                                                                                            |
-| `KRITIKA_LOG_FORMAT`               | `json` or `text`; `json` unless set                                                                                                                                                                                              |
-| `KRITIKA_RUNNER_DEADLINE`          | a runner Job's deadline, at most 2h; 15m unless set                                                                                                                                                                              |
-| `KRITIKA_RUNNER_RUNTIME_CLASS`     | the RuntimeClass of runner Jobs, e.g. `gvisor`; the cluster default unless set                                                                                                                                                   |
-| `KRITIKA_RUNNER_IMAGE_PULL_POLICY` | the runner container's imagePullPolicy, `Always`, `IfNotPresent` or `Never`; the chart's `runner.image.pullPolicy` renders it                                                                                                    |
-| `KRITIKA_RUNNER_RESOURCES`         | a runner pod's resources, as JSON; the chart's `runner.resources` renders it                                                                                                                                                     |
-| `KRITIKA_RUNNER_TOOLS`             | command-line tools a runner pod mounts from an image for the agent's run tool, as JSON: each a `name`, a digest-pinned `image`, the `path` of its binaries and the `commands` it provides; the chart's `runner.tools` renders it |
+| `KRITIQUE_POLL_INTERVAL`            | how often the leader lists each app's open pull requests, its backstop for missed webhooks; `0s` turns it off; 10m unless set                                                                                                    |
+| `KRITIQUE_POLL_LOOKBACK`            | how far back a first or long-idle poll looks; 24h unless set                                                                                                                                                                     |
+| `KRITIQUE_ONBOARD_WINDOW`           | how many onboarding index jobs the leader keeps queued or running at once; 4 unless set                                                                                                                                          |
+| `KRITIQUE_INDEX_GRACE`              | how long the index of a repository that stopped running is kept; 720h unless set                                                                                                                                                 |
+| `KRITIQUE_TRANSCRIPT_RETENTION`     | how long a review's full model transcript is kept, at least 24h; 720h unless set                                                                                                                                                 |
+| `KRITIQUE_DIFF_RETENTION`           | how long a review keeps the diff it was made from, the context it read and the repository files it named, at least 24h; 720h unless set                                                                                          |
+| `KRITIQUE_REVIEW_WORKERS`           | review jobs one replica runs at once; 2 unless set                                                                                                                                                                               |
+| `KRITIQUE_INDEX_WORKERS`            | index jobs one replica runs at once; 1 unless set                                                                                                                                                                                |
+| `KRITIQUE_LEADER_RETRY_INTERVAL`    | how often a replica retries the leader lock, and the holder checks it still has it; 15s unless set                                                                                                                               |
+| `KRITIQUE_GATEWAY_TOKEN_TTL`        | how long a run's gateway token outlives its Job's deadline, in case the replica that minted it dies first; 1h unless set                                                                                                         |
+| `KRITIQUE_LOG_LEVEL`                | `debug`, `info`, `warn` or `error`; `info` unless set                                                                                                                                                                            |
+| `KRITIQUE_LOG_FORMAT`               | `json` or `text`; `json` unless set                                                                                                                                                                                              |
+| `KRITIQUE_RUNNER_DEADLINE`          | a runner Job's deadline, at most 2h; 15m unless set                                                                                                                                                                              |
+| `KRITIQUE_RUNNER_RUNTIME_CLASS`     | the RuntimeClass of runner Jobs, e.g. `gvisor`; the cluster default unless set                                                                                                                                                   |
+| `KRITIQUE_RUNNER_IMAGE_PULL_POLICY` | the runner container's imagePullPolicy, `Always`, `IfNotPresent` or `Never`; the chart's `runner.image.pullPolicy` renders it                                                                                                    |
+| `KRITIQUE_RUNNER_RESOURCES`         | a runner pod's resources, as JSON; the chart's `runner.resources` renders it                                                                                                                                                     |
+| `KRITIQUE_RUNNER_TOOLS`             | command-line tools a runner pod mounts from an image for the agent's run tool, as JSON: each a `name`, a digest-pinned `image`, the `path` of its binaries and the `commands` it provides; the chart's `runner.tools` renders it |
 
 A transcript may contain repository content the agent read, and every
 member of its account can read it. A review past the diff retention keeps

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // threadForge answers the comment listings from fixed comments and counts
@@ -38,12 +38,12 @@ func (f *threadForge) ListConversation(context.Context, string, string, int) ([]
 
 func TestFollowUpThread(t *testing.T) {
 	at := func(s int64) time.Time { return time.Unix(s, 0) }
-	root := forge.Comment{ID: 1, Body: "@kritika is this safe?", CreatedAt: at(1), Inline: true}
-	reply := forge.Comment{ID: 2, Body: "@kritika why?", CreatedAt: at(2), Inline: true, InReplyTo: 1}
+	root := forge.Comment{ID: 1, Body: "@kritique is this safe?", CreatedAt: at(1), Inline: true}
+	reply := forge.Comment{ID: 2, Body: "@kritique why?", CreatedAt: at(2), Inline: true, InReplyTo: 1}
 	other := forge.Comment{ID: 3, Body: "another thread", CreatedAt: at(3), Inline: true}
 	later := forge.Comment{ID: 4, Body: "a later reply", CreatedAt: at(4), Inline: true, InReplyTo: 1}
 	first := forge.Comment{ID: 10, Body: "first", CreatedAt: at(5)}
-	asking := forge.Comment{ID: 11, Body: "@kritika summarize", CreatedAt: at(6)}
+	asking := forge.Comment{ID: 11, Body: "@kritique summarize", CreatedAt: at(6)}
 	tests := []struct {
 		name       string
 		comment    forge.Comment
@@ -79,24 +79,24 @@ func TestRequestsReview(t *testing.T) {
 		body string
 		want bool
 	}{
-		{"@kritika review", true},
-		{"Looks fine to me. @Kritika Review please", true},
-		{"@kritika review?", true},
-		{"@kritika  review\nthe auth change", true},
-		{"@kritika reviewed this already?", false},
-		{"@kritika why is b here? a review would help", false},
-		{"@kritikabot review", false},
-		{"someone@kritika review", false},
-		{"review @kritika", false},
+		{"@kritique review", true},
+		{"Looks fine to me. @Kritique Review please", true},
+		{"@kritique review?", true},
+		{"@kritique  review\nthe auth change", true},
+		{"@kritique reviewed this already?", false},
+		{"@kritique why is b here? a review would help", false},
+		{"@kritiquebot review", false},
+		{"someone@kritique review", false},
+		{"review @kritique", false},
 	} {
-		if got := requestsReview(tt.body, "kritika"); got != tt.want {
+		if got := requestsReview(tt.body, "kritique"); got != tt.want {
 			t.Errorf("requestsReview(%q) = %v, want %v", tt.body, got, tt.want)
 		}
 	}
 }
 
 func TestMarkedReply(t *testing.T) {
-	const login = "kritika[bot]"
+	const login = "kritique[bot]"
 	reply := func(id int64, author string, commentID int64) forge.Comment {
 		return forge.Comment{ID: id, Author: author, Body: "Here is why.\n\n" + review.FollowUpMarker(commentID)}
 	}
@@ -127,19 +127,19 @@ func TestDisqualified(t *testing.T) {
 		permErr    error
 		want       string
 	}{
-		{name: "a bot author", comment: forge.Comment{Author: "renovate[bot]", AuthorIsBot: true, Body: "@kritika explain"}, want: "author is a bot"},
-		{name: "the bot's own login, whatever its case", comment: forge.Comment{Author: "Kritika[Bot]", Body: "@kritika explain"}, want: "author is a bot"},
-		{name: "no mention of the bot", comment: forge.Comment{Author: "alice", Body: "looks good"}, want: "does not mention @kritika"},
-		{name: "a permission lookup that fails", comment: forge.Comment{Author: "alice", Body: "@kritika explain"},
+		{name: "a bot author", comment: forge.Comment{Author: "renovate[bot]", AuthorIsBot: true, Body: "@kritique explain"}, want: "author is a bot"},
+		{name: "the bot's own login, whatever its case", comment: forge.Comment{Author: "Kritique[Bot]", Body: "@kritique explain"}, want: "author is a bot"},
+		{name: "no mention of the bot", comment: forge.Comment{Author: "alice", Body: "looks good"}, want: "does not mention @kritique"},
+		{name: "a permission lookup that fails", comment: forge.Comment{Author: "alice", Body: "@kritique explain"},
 			permErr: errors.New("boom"), want: "permission unknown"},
-		{name: "read access", comment: forge.Comment{Author: "alice", Body: "@kritika explain"},
+		{name: "read access", comment: forge.Comment{Author: "alice", Body: "@kritique explain"},
 			permission: forge.PermissionRead, want: "author has read access, write is required"},
-		{name: "write access", comment: forge.Comment{Author: "alice", Body: "@kritika explain"}, permission: forge.PermissionWrite},
+		{name: "write access", comment: forge.Comment{Author: "alice", Body: "@kritique explain"}, permission: forge.PermissionWrite},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &threadForge{permission: tt.permission, permErr: tt.permErr}
-			f := &followUp{client: client, owner: "o", repo: "r", comment: tt.comment, botLogin: "kritika[bot]", logger: slog.New(slog.DiscardHandler)}
+			f := &followUp{client: client, owner: "o", repo: "r", comment: tt.comment, botLogin: "kritique[bot]", logger: slog.New(slog.DiscardHandler)}
 			if got := f.disqualified(t.Context()); got != tt.want {
 				t.Errorf("disqualified = %q, want %q", got, tt.want)
 			}

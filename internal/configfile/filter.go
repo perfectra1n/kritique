@@ -8,8 +8,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/chunk"
-	"github.com/home-operations/kritika/internal/prfilter"
+	"github.com/perfectra1n/kritique/internal/chunk"
+	"github.com/perfectra1n/kritique/internal/prfilter"
 )
 
 // Filter is one condition on a pull request in a list that includes or

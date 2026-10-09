@@ -9,13 +9,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/store"
-	"github.com/home-operations/kritika/internal/store/storetest"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
 )
 
 // TestThreadWorker: resolving one of the bot's finding threads dismisses
@@ -64,7 +64,7 @@ func TestThreadWorker(t *testing.T) {
 	lf := &localForge{
 		permissions: map[string]forge.Permission{"onedr0p": forge.PermissionAdmin, "outsider": forge.PermissionRead},
 		threads: map[int64]forge.Comment{
-			root:  {ID: root, Author: "kritika[bot]", Body: review.FindingMarker(fingerprint) + "\n**Unchecked error**", Inline: true},
+			root:  {ID: root, Author: "kritique[bot]", Body: review.FindingMarker(fingerprint) + "\n**Unchecked error**", Inline: true},
 			other: {ID: other, Author: "onedr0p", Body: "nit: rename this", Inline: true},
 		},
 	}

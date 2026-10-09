@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/executor"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 func TestErrText(t *testing.T) {
@@ -69,15 +69,15 @@ func TestMentioned(t *testing.T) {
 		body string
 		want bool
 	}{
-		{"@kritika please", true},
-		{"hey @Kritika, why?", true},
-		{"email me@kritika.io", false},
-		{"@kritikabot no", false},
+		{"@kritique please", true},
+		{"hey @Kritique, why?", true},
+		{"email me@kritique.io", false},
+		{"@kritiquebot no", false},
 		{"no mention", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.body, func(t *testing.T) {
-			if got := mentioned(tt.body, "kritika"); got != tt.want {
+			if got := mentioned(tt.body, "kritique"); got != tt.want {
 				t.Errorf("mentioned(%q) = %v, want %v", tt.body, got, tt.want)
 			}
 		})

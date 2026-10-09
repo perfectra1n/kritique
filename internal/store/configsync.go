@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/home-operations/kritika/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // IsConfigContentError reports whether an ApplyConfig error was caused by

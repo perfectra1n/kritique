@@ -36,24 +36,24 @@ import (
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivertype"
 
-	"github.com/home-operations/kritika/internal/adapter"
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
-	"github.com/home-operations/kritika/internal/executor"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/gateway"
-	"github.com/home-operations/kritika/internal/gitfetch"
-	"github.com/home-operations/kritika/internal/gittest"
-	"github.com/home-operations/kritika/internal/ingest"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/jobtimeout"
-	"github.com/home-operations/kritika/internal/metrics"
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/runner"
-	"github.com/home-operations/kritika/internal/store"
-	"github.com/home-operations/kritika/internal/store/storetest"
-	"github.com/home-operations/kritika/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/adapter"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/gateway"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/gittest"
+	"github.com/perfectra1n/kritique/internal/ingest"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/metrics"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 const configYAML = `
@@ -191,7 +191,7 @@ func (l *localForge) Issue(_ context.Context, _, _ string, number int) (forge.Is
 	return forge.Issue{}, fmt.Errorf("issue %d: %w", number, fs.ErrNotExist)
 }
 func (l *localForge) GitToken(context.Context, string) (string, error) { return "", nil }
-func (l *localForge) BotLogin(context.Context) (string, error)         { return "kritika[bot]", nil }
+func (l *localForge) BotLogin(context.Context) (string, error)         { return "kritique[bot]", nil }
 
 func (l *localForge) CommitSubject(context.Context, string, string, string) (string, error) {
 	return "feat(x): the head commit", nil
@@ -260,7 +260,7 @@ func (l *localForge) CreateComment(_ context.Context, _, _ string, _ int, body s
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.addComment("kritika[bot]", body), nil
+	return l.addComment("kritique[bot]", body), nil
 }
 
 // commentBase puts fake comment ids where GitHub's are: beyond int32.
@@ -624,7 +624,7 @@ func testRepo(t *testing.T) (dir, base, head string) {
 	// head (e.g. EnqueueReindex's BranchTip-resolved commit) still satisfies
 	// upload-pack's allowReachableSHA1InWant check instead of failing "not
 	// our ref".
-	if _, err := r.CreateTag("kritika-head", plumbing.NewHash(head), nil); err != nil {
+	if _, err := r.CreateTag("kritique-head", plumbing.NewHash(head), nil); err != nil {
 		t.Fatal(err)
 	}
 	return dir, base, head
@@ -637,7 +637,7 @@ func checkWriteBack(t *testing.T, lf *localForge, fc *fakeCompleter) {
 	comments, inline, forgeStatus := lf.comments, lf.inline, lf.status
 	lf.mu.Unlock()
 	sticky := comments[commentBase+1]
-	if len(comments) != 1 || !strings.HasPrefix(sticky, "<!-- kritika:pr-1 -->\n") ||
+	if len(comments) != 1 || !strings.HasPrefix(sticky, "<!-- kritique:pr-1 -->\n") ||
 		!strings.Contains(sticky, "- **[important · correctness]** [`main.go:1`](local://onedr0p/home-ops/") ||
 		!strings.Contains(sticky, "/main.go#L1) [first line](local://onedr0p/home-ops/pull/1#r1001)") ||
 		!strings.Contains(sticky, "**2 findings** · 1 blocking · 1 important\n") || strings.Contains(sticky, "What's good") ||
@@ -646,7 +646,7 @@ func checkWriteBack(t *testing.T, lf *localForge, fc *fakeCompleter) {
 		t.Fatalf("comments = %v", comments)
 	}
 	if len(inline) != 1 || inline[0].Line != 1 || !strings.Contains(inline[0].Body, "**[important · correctness]** **first line**") ||
-		!strings.Contains(inline[0].Body, "do this") || forgeStatus != "success: kritika: 2 finding(s)" {
+		!strings.Contains(inline[0].Body, "do this") || forgeStatus != "success: kritique: 2 finding(s)" {
 		t.Fatalf("inline = %+v status = %q", inline, forgeStatus)
 	}
 	fc.mu.Lock()
@@ -1108,11 +1108,11 @@ func checkFollowUps(
 ) {
 	t.Helper()
 	mention, waitFollowUp, lastComment := followUpHelpers(ctx, t, st, svc, lf, req, accountID)
-	id := mention("onedr0p", "@kritika why is b here?")
+	id := mention("onedr0p", "@kritique why is b here?")
 	if status, reason := waitFollowUp(id); status != "answered" {
 		t.Fatalf("status = %s (%s), want answered", status, reason)
 	}
-	if _, body := lastComment(); !strings.Contains(body, "Because b is new.") || !strings.Contains(body, "kritika follow-up with reviewer") {
+	if _, body := lastComment(); !strings.Contains(body, "Because b is new.") || !strings.Contains(body, "kritique follow-up with reviewer") {
 		t.Fatalf("reply = %q", body)
 	}
 	checkFollowUpTranscript(ctx, t, st, accountID, id, fc)
@@ -1131,7 +1131,7 @@ func checkFollowUps(
 	if !strings.Contains(system, "\n\n## Repository instructions\n\n") || !strings.HasSuffix(system, "\n\nKeep functions small.") {
 		t.Fatalf("follow-up system prompt lacks AGENTS.md:\n%s", system)
 	}
-	for _, want := range []string{"Thread, oldest first", "<!-- kritika:pr-1 -->", "--- onedr0p", "[answer this]", "diff --git a/main.go", "Findings kritika posted", "main.go:1 [important] first line: look here", "<description>\nAdds b.\n</description>"} {
+	for _, want := range []string{"Thread, oldest first", "<!-- kritique:pr-1 -->", "--- onedr0p", "[answer this]", "diff --git a/main.go", "Findings kritique posted", "main.go:1 [important] first line: look here", "<description>\nAdds b.\n</description>"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("follow-up prompt missing %q:\n%s", want, prompt)
 		}
@@ -1152,7 +1152,7 @@ func checkFollowUps(
 		return slices.Contains(lf.reacted, id) && lf.reactions[id] == forge.ReactionDone
 	})
 
-	id = mention("outsider", "@kritika and me?")
+	id = mention("outsider", "@kritique and me?")
 	if status, reason := waitFollowUp(id); status != "ignored" || !strings.Contains(reason, "write is required") {
 		t.Fatalf("outsider: status = %s (%s)", status, reason)
 	}
@@ -1178,7 +1178,7 @@ func checkFollowUps(
 	if err != nil {
 		t.Fatal(err)
 	}
-	id = mention("onedr0p", "@kritika again?")
+	id = mention("onedr0p", "@kritique again?")
 	if status, _ := waitFollowUp(id); status != "limited" {
 		t.Fatalf("status = %s, want limited", status)
 	}
@@ -1186,7 +1186,7 @@ func checkFollowUps(
 	if !strings.Contains(body, "limit of follow-ups") {
 		t.Fatalf("limit notice not posted, last comment = %q", body)
 	}
-	id = mention("onedr0p", "@kritika and again?")
+	id = mention("onedr0p", "@kritique and again?")
 	status, _ := waitFollowUp(id)
 	after, _ := lastComment()
 	// The mention itself is one comment; no notice follows it.
@@ -1230,7 +1230,7 @@ func checkFollowUpRun(ctx context.Context, t *testing.T, st *store.Store, accoun
 	}
 }
 
-// checkReviewRequest: "@kritika review" queues a review of the head for
+// checkReviewRequest: "@kritique review" queues a review of the head for
 // someone with write access, and replies; anyone else is ignored as for a
 // question. It runs last, as the review it queues changes pull request 1's
 // last review, and first clears the thread's follow-ups, so the hourly
@@ -1275,7 +1275,7 @@ func checkReviewRequest(
 	base := lf.base
 	lf.base = head
 	lf.mu.Unlock()
-	id := mention("onedr0p", "@kritika review")
+	id := mention("onedr0p", "@kritique review")
 	if status, reason := waitFollowUp(id); status != "answered" || reason != "nothing to review: the head is already in main" {
 		t.Fatalf("review request on a merged pull request with nothing to diff: status = %s (%s)", status, reason)
 	}
@@ -1295,11 +1295,11 @@ func checkReviewRequest(
 		t.Fatal(err)
 	}
 
-	id = mention("outsider", "@kritika review")
+	id = mention("outsider", "@kritique review")
 	if status, reason := waitFollowUp(id); status != "ignored" || !strings.Contains(reason, "write is required") {
 		t.Fatalf("outsider's review request: status = %s (%s)", status, reason)
 	}
-	id = mention("onedr0p", "Can you take another look? @kritika review")
+	id = mention("onedr0p", "Can you take another look? @kritique review")
 	if status, reason := waitFollowUp(id); status != "answered" || reason != "review requested" {
 		t.Fatalf("review request: status = %s (%s)", status, reason)
 	}
@@ -1315,10 +1315,10 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 	ctx := t.Context()
 	logger := slog.New(slog.DiscardHandler)
 	appStore := storetest.Open(t)
-	if _, err := appStore.EnsureIndexSchema(ctx, "kritika_app", "fake-embed", 8); err != nil {
+	if _, err := appStore.EnsureIndexSchema(ctx, "kritique_app", "fake-embed", 8); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
-	runnerStore, err := store.Open(ctx, store.Options{AppURL: storetest.Env(t, "KRITIKA_TEST_RUNNER_URL"), Logger: logger})
+	runnerStore, err := store.Open(ctx, store.Options{AppURL: storetest.Env(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: logger})
 	if err != nil {
 		t.Fatalf("Open runner: %v", err)
 	}
@@ -1328,7 +1328,7 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 	// Long enough that masking it out of the transcripts leaves the prompts
 	// they are checked against intact.
 	t.Setenv("TEST_SECRET", "test-provider-key")
-	t.Setenv("KRITIKA_RUNNER_DEADLINE", "60s")
+	t.Setenv("KRITIQUE_RUNNER_DEADLINE", "60s")
 	file := configfiletest.Load(t, configYAML)
 	if err := appStore.ApplyConfig(ctx, file); err != nil {
 		t.Fatal(err)
@@ -1483,7 +1483,7 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 		checkSnoozeWhileSlotsHeld(ctx, t, appStore, dir, base, lf, dispatchPR, account.ID(), "test/reviewer")
 	})
 
-	t.Run("the merge-base .kritika.yaml skips, instructs and templates", func(t *testing.T) {
+	t.Run("the merge-base .kritique.yaml skips, instructs and templates", func(t *testing.T) {
 		checkRepoConfig(ctx, t, appStore, insertOnly, lf, fc, dir, base, dispatchPR, waitReview, account.ID())
 	})
 
@@ -1519,7 +1519,7 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 		checkActions(ctx, t, appStore, insertOnly, exec, dispatch, waitReview, dir, base, head, account.ID(), repoID, lf)
 	})
 
-	t.Run("a maintainer's @kritika review queues a review", func(t *testing.T) {
+	t.Run("a maintainer's @kritique review queues a review", func(t *testing.T) {
 		checkReviewRequest(ctx, t, appStore, svc, lf, ingest.Request{File: file, Account: account}, account.ID())
 	})
 }
@@ -1565,7 +1565,7 @@ func checkBotPatchIDSkip(
 	lf.mu.Lock()
 	forgeStatus := lf.status
 	lf.mu.Unlock()
-	if forgeStatus != "success: kritika: skipped (patch unchanged since the last review)" {
+	if forgeStatus != "success: kritique: skipped (patch unchanged since the last review)" {
 		t.Fatalf("forge status = %q", forgeStatus)
 	}
 	// The forge's diff told it before any runner was made for the head.
@@ -1682,7 +1682,7 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 	}
 }
 
-// checkRepoConfig commits a .kritika.yaml with ignore globs, rules, one of
+// checkRepoConfig commits a .kritique.yaml with ignore globs, rules, one of
 // them a file, and a summary template onto a new merge base, then reviews
 // pull requests against it.
 func checkRepoConfig(
@@ -1714,30 +1714,30 @@ func checkRepoConfig(
 		}
 		return h.String()
 	}
-	cfgBase := commit("configure kritika", map[string]string{
-		".kritika.yaml": `trigger:
+	cfgBase := commit("configure kritique", map[string]string{
+		".kritique.yaml": `trigger:
   exclude: [{ name: skip-label, expr: 'pr.labels.exists(l, l.name == "skip-review")' }]
-ignore: ["docs/**", ".kritika.yaml"]
+ignore: ["docs/**", ".kritique.yaml"]
 rules:
-  - { id: todos, file: .kritika/rules.md }
+  - { id: todos, file: .kritique/rules.md }
   - { id: no-panics, rule: Return an error rather than panic. }
   - { id: sql-placeholders, rule: Use query placeholders., paths: ["**/*.sql"] }
   - { id: into-main, rule: Keep main releasable., when: [{ expr: 'pr.baseRef == "main"' }] }
   - { id: renovate, rule: Say what the update breaks., when: [{ expr: 'pr.headRef.startsWith("renovate/")' }] }
 comments:
-  summary: ".kritika/summary.md.tmpl"
+  summary: ".kritique/summary.md.tmpl"
 confidence: { model: test/reviewer, fallback: other/judge, effort: low, threshold: 4, gate: true }
 review:
   approve: true
   effort: xhigh
 `,
-		".kritika/rules.md":        "Flag every TODO left in code.\n",
-		".kritika/summary.md.tmpl": "Custom summary for #{{ .Number }}: {{ .Result.Summary.Take }}\n",
-		"AGENTS.md":                "Prefer table-driven tests.\n",
-		"web/AGENTS.md":            "Never inline styles.\n",
+		".kritique/rules.md":        "Flag every TODO left in code.\n",
+		".kritique/summary.md.tmpl": "Custom summary for #{{ .Number }}: {{ .Result.Summary.Take }}\n",
+		"AGENTS.md":                 "Prefer table-driven tests.\n",
+		"web/AGENTS.md":             "Never inline styles.\n",
 	})
 	docsHead := commit("docs", map[string]string{"docs/guide.md": "# Guide\n"})
-	loosened := commit("drop the ignore globs", map[string]string{".kritika.yaml": "rules: []\n"})
+	loosened := commit("drop the ignore globs", map[string]string{".kritique.yaml": "rules: []\n"})
 	lf.setBase(cfgBase)
 
 	fc.mu.Lock()
@@ -1760,7 +1760,7 @@ review:
 		lf.mu.Lock()
 		forgeStatus := lf.status
 		lf.mu.Unlock()
-		if forgeStatus != "success: kritika: skipped (only ignored paths changed)" || skipReason(head) != "only_skipped_paths" {
+		if forgeStatus != "success: kritique: skipped (only ignored paths changed)" || skipReason(head) != "only_skipped_paths" {
 			t.Fatalf("status = %q reason = %q", forgeStatus, skipReason(head))
 		}
 	}
@@ -1793,7 +1793,7 @@ review:
 	// Only the rules whose paths the change matches and whose conditions the
 	// pull request meets, the file rule under its own heading.
 	if !strings.Contains(system, "\n\n- no-panics: Return an error rather than panic.\n- into-main: Keep main releasable.\n\n"+
-		"### todos (.kritika/rules.md)\n\nFlag every TODO left in code.\n\n## Repository instructions") ||
+		"### todos (.kritique/rules.md)\n\nFlag every TODO left in code.\n\n## Repository instructions") ||
 		strings.Contains(system, "sql-placeholders") || strings.Contains(system, "- renovate:") {
 		t.Fatalf("system prompt does not carry the rules:\n%s", system)
 	}
@@ -1811,12 +1811,12 @@ review:
 	lf.mu.Lock()
 	var sticky string
 	for _, body := range lf.comments {
-		if strings.HasPrefix(body, "<!-- kritika:pr-3 -->\n") {
+		if strings.HasPrefix(body, "<!-- kritique:pr-3 -->\n") {
 			sticky = body
 		}
 	}
 	lf.mu.Unlock()
-	if !strings.HasPrefix(sticky, "<!-- kritika:pr-3 -->\nCustom summary for #3: Changes main.go.") {
+	if !strings.HasPrefix(sticky, "<!-- kritique:pr-3 -->\nCustom summary for #3: Changes main.go.") {
 		t.Fatalf("sticky comment for PR 3 = %q", sticky)
 	}
 	checkWithdrawn(t, lf)
@@ -1843,7 +1843,7 @@ review:
 	lf.mu.Lock()
 	forgeStatus := lf.status
 	lf.mu.Unlock()
-	if forgeStatus != "success: kritika: skipped (filtered: skip-label)" {
+	if forgeStatus != "success: kritique: skipped (filtered: skip-label)" {
 		t.Fatalf("status = %q", forgeStatus)
 	}
 	checkLabelRepeat(ctx, t, appStore, insertOnly, accountID, labelledHead)
@@ -1928,7 +1928,7 @@ func checkStatuses(ctx context.Context, t *testing.T, appStore *store.Store, acc
 }
 
 // checkConfidence asserts what a review does where the merge-base
-// .kritika.yaml asks for a confidence score its findings keep the pull
+// .kritique.yaml asks for a confidence score its findings keep the pull
 // request under: the score is held to the ceiling of the blocking one,
 // though it is outside the diff, recorded with its call and its cost once,
 // whatever attempts the call took, and fails the commit status.
@@ -1937,7 +1937,7 @@ func checkConfidence(ctx context.Context, t *testing.T, appStore *store.Store, l
 	fc.mu.Lock()
 	scorer, asked := fc.systems[len(fc.systems)-1], fc.users[len(fc.users)-1]
 	// The review's step, through the gateway, and the confidence call each
-	// carry the .kritika.yaml's effort for their model.
+	// carry the .kritique.yaml's effort for their model.
 	efforts := fc.efforts[len(fc.efforts)-2:]
 	fc.mu.Unlock()
 	if scorer != review.ConfidenceSystem || !slices.Equal(efforts, []model.Effort{model.EffortXHigh, model.EffortLow}) {
@@ -1976,7 +1976,7 @@ func checkConfidence(ctx context.Context, t *testing.T, appStore *store.Store, l
 	lf.mu.Lock()
 	status := lf.status
 	lf.mu.Unlock()
-	if status != "failure: kritika: confidence 2/5, below 4, 2 finding(s)" {
+	if status != "failure: kritique: confidence 2/5, below 4, 2 finding(s)" {
 		t.Fatalf("status = %q", status)
 	}
 }
@@ -2008,7 +2008,7 @@ func checkConfidenceCounted(ctx context.Context, t *testing.T, appStore *store.S
 	}
 	got := map[string]int{}
 	for _, f := range families {
-		if f.GetName() != "kritika_confidence_scores_total" {
+		if f.GetName() != "kritique_confidence_scores_total" {
 			continue
 		}
 		for _, m := range f.GetMetric() {
@@ -2045,7 +2045,7 @@ func checkEarlierRisk(t *testing.T, fc *fakeCompleter, waitReview func(string) (
 }
 
 // checkFallbackScored asserts that the review of head, whose confidence
-// model failed every attempt, was scored by the merge-base .kritika.yaml's
+// model failed every attempt, was scored by the merge-base .kritique.yaml's
 // confidence.fallback at the scorer's effort, and that the one call is
 // recorded and charged under the model that answered.
 func checkFallbackScored(ctx context.Context, t *testing.T, appStore *store.Store, fc *fakeCompleter, accountID, head string) {
@@ -2096,7 +2096,7 @@ func checkFallbackFailed(
 }
 
 // checkWithdrawn asserts what a review with an important finding does
-// where the merge-base .kritika.yaml opted in to approvals: no approval,
+// where the merge-base .kritique.yaml opted in to approvals: no approval,
 // and any standing one withdrawn.
 func checkWithdrawn(t *testing.T, lf *localForge) {
 	t.Helper()
@@ -2266,7 +2266,7 @@ func checkBackOnDiff(
 // as the owner: no role a service runs as may change one.
 func ageConversation(ctx context.Context, t *testing.T, reviewID string) {
 	t.Helper()
-	owner, err := pgxpool.New(ctx, storetest.Env(t, "KRITIKA_TEST_OWNER_URL"))
+	owner, err := pgxpool.New(ctx, storetest.Env(t, "KRITIQUE_TEST_OWNER_URL"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2292,7 +2292,7 @@ func checkReworded(
 	lf.mu.Lock()
 	var sticky string
 	for _, body := range lf.comments {
-		if strings.HasPrefix(body, "<!-- kritika:pr-5 -->\n") {
+		if strings.HasPrefix(body, "<!-- kritique:pr-5 -->\n") {
 			sticky = body
 		}
 	}
@@ -2333,15 +2333,15 @@ func checkSummaryDiagram(ctx context.Context, t *testing.T, appStore *store.Stor
 	}
 }
 
-// commitDiagramConfig commits a .kritika.yaml that asks for the summary's
+// commitDiagramConfig commits a .kritique.yaml that asks for the summary's
 // diagram onto wt's head and returns the commit, a merge base to review
 // against.
 func commitDiagramConfig(t *testing.T, dir string, wt *git.Worktree) string {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, ".kritika.yaml"), []byte("review: { diagram: true }\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".kritique.yaml"), []byte("review: { diagram: true }\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := wt.Add(".kritika.yaml"); err != nil {
+	if _, err := wt.Add(".kritique.yaml"); err != nil {
 		t.Fatal(err)
 	}
 	h, err := wt.Commit("draw diagrams", &git.CommitOptions{Author: &object.Signature{Name: "t", Email: "t@x", When: time.Now()}})
@@ -2403,7 +2403,7 @@ func checkIncrementalRecord(ctx context.Context, t *testing.T, appStore *store.S
 	lf.mu.Lock()
 	var sticky string
 	for _, body := range lf.comments {
-		if strings.HasPrefix(body, "<!-- kritika:pr-5 -->\n") {
+		if strings.HasPrefix(body, "<!-- kritique:pr-5 -->\n") {
 			sticky = body
 		}
 	}
@@ -2492,7 +2492,7 @@ func checkSupervision(
 		lf.mu.Lock()
 		forgeStatus := lf.status
 		lf.mu.Unlock()
-		if forgeStatus != "pending: kritika: review running" {
+		if forgeStatus != "pending: kritique: review running" {
 			t.Fatalf("forge status while the runner works = %q", forgeStatus)
 		}
 		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
@@ -2511,7 +2511,7 @@ func checkSupervision(
 		lf.mu.Lock()
 		forgeStatus = lf.status
 		lf.mu.Unlock()
-		if forgeStatus != "error: kritika: review failed" {
+		if forgeStatus != "error: kritique: review failed" {
 			t.Fatalf("forge status = %q", forgeStatus)
 		}
 	})
@@ -2755,8 +2755,8 @@ func checkRequestCancelRunning(
 	lf.mu.Lock()
 	status := lf.status
 	lf.mu.Unlock()
-	if status != "error: kritika: review canceled" {
-		t.Fatalf("commit status = %q, want %q", status, "error: kritika: review canceled")
+	if status != "error: kritique: review canceled" {
+		t.Fatalf("commit status = %q, want %q", status, "error: kritique: review canceled")
 	}
 
 	var requestedAt sql.NullTime
@@ -3062,7 +3062,7 @@ func (g *gateExecutor) Run(ctx context.Context, spec executor.Spec) executor.Res
 	g.mu.Unlock()
 	if spec.Job.Kind == runner.KindIndex && beforeIndex != nil {
 		if err := beforeIndex(); err != nil {
-			return executor.Result{JobName: "kritika-run-failed", Err: err}
+			return executor.Result{JobName: "kritique-run-failed", Err: err}
 		}
 	}
 	if spec.Job.Kind != runner.KindReview {
@@ -3080,7 +3080,7 @@ func (g *gateExecutor) Run(ctx context.Context, spec executor.Spec) executor.Res
 	case <-ctx.Done():
 	}
 	<-ctx.Done()
-	return executor.Result{JobName: "kritika-run-blocked", Err: context.Cause(ctx)}
+	return executor.Result{JobName: "kritique-run-blocked", Err: context.Cause(ctx)}
 }
 
 // jobDeadline stands in for River's job timeout, which cancels a job's ctx
@@ -3148,8 +3148,8 @@ func checkJobEnded(
 		if n := countReviewsByStatus(ctx, t, appStore, accountID, head, "running"); n != 0 {
 			t.Fatalf("running reviews for %s = %d, want 0", head, n)
 		}
-		if got := lf.lastStatus(); got != "error: kritika: review timed out" {
-			t.Fatalf("commit status = %q, want error: kritika: review timed out", got)
+		if got := lf.lastStatus(); got != "error: kritique: review timed out" {
+			t.Fatalf("commit status = %q, want error: kritique: review timed out", got)
 		}
 	})
 
@@ -3265,7 +3265,7 @@ func TestRetriedJobEndsItsEarlierReview(t *testing.T) {
 	st := storetest.Open(t)
 	t.Setenv("TEST_PEM", "pem")
 	t.Setenv("TEST_SECRET", "test-provider-key")
-	t.Setenv("KRITIKA_RUNNER_DEADLINE", "60s")
+	t.Setenv("KRITIQUE_RUNNER_DEADLINE", "60s")
 	file := configfiletest.Load(t, configYAML)
 	if err := st.ApplyConfig(ctx, file); err != nil {
 		t.Fatal(err)

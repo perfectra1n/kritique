@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // fileWithDefaults is minimal's app with instance defaults: a provider,
@@ -71,13 +71,13 @@ func TestFileInstanceDefaults(t *testing.T) {
 // the file's, and refuses a variable naming no key.
 func TestInstanceDefaultsEnv(t *testing.T) {
 	setInstanceEnv(t)
-	t.Setenv("KRITIKA_PROVIDERS_API_KEY", "sk-env")
-	t.Setenv("KRITIKA_REVIEW_MODEL", "openrouter/env-model")
+	t.Setenv("KRITIQUE_PROVIDERS_API_KEY", "sk-env")
+	t.Setenv("KRITIQUE_REVIEW_MODEL", "openrouter/env-model")
 	// How many review jobs a replica runs shares the prefix and is no
 	// setting of the file.
-	t.Setenv("KRITIKA_REVIEW_WORKERS", "4")
-	t.Setenv("KRITIKA_EMBEDDING_MODEL", "openrouter/e-env")
-	t.Setenv("KRITIKA_EMBEDDING_DIMS", "32")
+	t.Setenv("KRITIQUE_REVIEW_WORKERS", "4")
+	t.Setenv("KRITIQUE_EMBEDDING_MODEL", "openrouter/e-env")
+	t.Setenv("KRITIQUE_EMBEDDING_DIMS", "32")
 	f, err := Parse([]byte(fileWithDefaults))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -103,16 +103,16 @@ func TestInstanceDefaultsEnv(t *testing.T) {
 	}
 
 	for _, tt := range []struct{ name, key, value, want string }{
-		{"an unknown provider key", "KRITIKA_PROVIDERS_MODEL", "x", "KRITIKA_PROVIDERS_MODEL names no provider setting"},
-		{"retries that are not a number", "KRITIKA_PROVIDERS_RETRIES", "some", "KRITIKA_PROVIDERS_RETRIES must be a whole number"},
-		{"retries past the bound", "KRITIKA_PROVIDERS_RETRIES", "6", "providers.openrouter.retries must be between 0 and 5"},
-		{"an unknown trigger key", "KRITIKA_TRIGGER_FILTER", "true", "KRITIKA_TRIGGER_FILTER names no setting"},
-		{"a trigger key the environment does not set", "KRITIKA_TRIGGER_FORKS", "true", "KRITIKA_TRIGGER_FORKS names no setting"},
-		{"a settle that is not a duration", "KRITIKA_TRIGGER_SETTLE", "soon", "KRITIKA_TRIGGER_SETTLE"},
-		{"an unknown embedding key", "KRITIKA_EMBEDDING_URL", "x", "KRITIKA_EMBEDDING_URL names no embedding setting"},
-		{"dims that are not a number", "KRITIKA_EMBEDDING_DIMS", "many", "KRITIKA_EMBEDDING_DIMS must be a whole number"},
-		{"a key from a file", "KRITIKA_PROVIDERS_API_KEY_FILE", "/nope", "KRITIKA_PROVIDERS_API_KEY_FILE names no provider setting"},
-		{"a name that is no type, without one", "KRITIKA_PROVIDERS_NAME", "router", "providers.router.type must be"},
+		{"an unknown provider key", "KRITIQUE_PROVIDERS_MODEL", "x", "KRITIQUE_PROVIDERS_MODEL names no provider setting"},
+		{"retries that are not a number", "KRITIQUE_PROVIDERS_RETRIES", "some", "KRITIQUE_PROVIDERS_RETRIES must be a whole number"},
+		{"retries past the bound", "KRITIQUE_PROVIDERS_RETRIES", "6", "providers.openrouter.retries must be between 0 and 5"},
+		{"an unknown trigger key", "KRITIQUE_TRIGGER_FILTER", "true", "KRITIQUE_TRIGGER_FILTER names no setting"},
+		{"a trigger key the environment does not set", "KRITIQUE_TRIGGER_FORKS", "true", "KRITIQUE_TRIGGER_FORKS names no setting"},
+		{"a settle that is not a duration", "KRITIQUE_TRIGGER_SETTLE", "soon", "KRITIQUE_TRIGGER_SETTLE"},
+		{"an unknown embedding key", "KRITIQUE_EMBEDDING_URL", "x", "KRITIQUE_EMBEDDING_URL names no embedding setting"},
+		{"dims that are not a number", "KRITIQUE_EMBEDDING_DIMS", "many", "KRITIQUE_EMBEDDING_DIMS must be a whole number"},
+		{"a key from a file", "KRITIQUE_PROVIDERS_API_KEY_FILE", "/nope", "KRITIQUE_PROVIDERS_API_KEY_FILE names no provider setting"},
+		{"a name that is no type, without one", "KRITIQUE_PROVIDERS_NAME", "router", "providers.router.type must be"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(tt.key, tt.value)
@@ -139,8 +139,8 @@ func TestProviderRetries(t *testing.T) {
 		!strings.Contains(err.Error(), "providers.openrouter.retries must be between 0 and 5") {
 		t.Fatalf("Parse with negative retries = %v", err)
 	}
-	t.Setenv("KRITIKA_PROVIDERS_RETRIES", "3")
-	t.Setenv("KRITIKA_PROVIDERS_API_KEY", "sk-env")
+	t.Setenv("KRITIQUE_PROVIDERS_RETRIES", "3")
+	t.Setenv("KRITIQUE_PROVIDERS_API_KEY", "sk-env")
 	f, err = Parse([]byte(fileWithDefaults))
 	if err != nil {
 		t.Fatalf("Parse with the environment's retries: %v", err)
@@ -166,17 +166,17 @@ func TestFileDefaultModelNeedsAProvider(t *testing.T) {
 // either.
 func TestFileReviewDefaults(t *testing.T) {
 	setInstanceEnv(t)
-	t.Setenv("KRITIKA_TRIGGER_SETTLE", "45s")
-	t.Setenv("KRITIKA_REVIEW_APPROVE", "true")
-	t.Setenv("KRITIKA_REVIEW_FIXES", "true")
-	t.Setenv("KRITIKA_REVIEW_COST", "true")
-	t.Setenv("KRITIKA_REVIEW_EFFORT", "low")
-	t.Setenv("KRITIKA_REVIEW_INCREMENTAL", "7")
+	t.Setenv("KRITIQUE_TRIGGER_SETTLE", "45s")
+	t.Setenv("KRITIQUE_REVIEW_APPROVE", "true")
+	t.Setenv("KRITIQUE_REVIEW_FIXES", "true")
+	t.Setenv("KRITIQUE_REVIEW_COST", "true")
+	t.Setenv("KRITIQUE_REVIEW_EFFORT", "low")
+	t.Setenv("KRITIQUE_REVIEW_INCREMENTAL", "7")
 	models := "review: { model: openrouter/big, fallback: openrouter/small"
 	withDefaults := func(reviewKeys, rootKeys string) []byte {
 		return []byte(strings.Replace(fileWithDefaults, models+" }\n", models+reviewKeys+" }\n"+rootKeys, 1))
 	}
-	t.Setenv("KRITIKA_TRIGGER_LIMIT", "3")
+	t.Setenv("KRITIQUE_TRIGGER_LIMIT", "3")
 	f, err := Parse(withDefaults(", diagram: true, effort: xhigh", ""))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -213,21 +213,21 @@ func TestFileReviewDefaults(t *testing.T) {
 	if _, err := Parse(withDefaults("", "mode: agentic\n")); err == nil || !strings.Contains(err.Error(), "mode") {
 		t.Fatalf("mode = %v, want it refused as an unknown key", err)
 	}
-	t.Setenv("KRITIKA_REVIEW_MODE", "agentic")
-	if _, err := Parse(withDefaults("", "")); err == nil || !strings.Contains(err.Error(), "KRITIKA_REVIEW_MODE names no setting") {
-		t.Fatalf("KRITIKA_REVIEW_MODE = %v, want it refused", err)
+	t.Setenv("KRITIQUE_REVIEW_MODE", "agentic")
+	if _, err := Parse(withDefaults("", "")); err == nil || !strings.Contains(err.Error(), "KRITIQUE_REVIEW_MODE names no setting") {
+		t.Fatalf("KRITIQUE_REVIEW_MODE = %v, want it refused", err)
 	}
-	if err := os.Unsetenv("KRITIKA_REVIEW_MODE"); err != nil {
+	if err := os.Unsetenv("KRITIQUE_REVIEW_MODE"); err != nil {
 		t.Fatal(err)
 	}
 	for _, tt := range []struct{ env, value, want string }{
-		{"KRITIKA_REVIEW_APPROVE", "yes please", "KRITIKA_REVIEW_APPROVE must be true or false"},
-		{"KRITIKA_REVIEW_FIXES", "1.5", "KRITIKA_REVIEW_FIXES must be true or false"},
-		{"KRITIKA_REVIEW_DIAGRAM", "sure", "KRITIKA_REVIEW_DIAGRAM must be true or false"},
-		{"KRITIKA_REVIEW_COST", "sure", "KRITIKA_REVIEW_COST must be true or false"},
-		{"KRITIKA_REVIEW_EFFORT", "turbo", `review.effort must be none, minimal, low, medium, high, xhigh or max, got "turbo"`},
-		{"KRITIKA_REVIEW_INCREMENTAL", "many", "KRITIKA_REVIEW_INCREMENTAL must be a whole number"},
-		{"KRITIKA_TRIGGER_LIMIT", "-1", "trigger.limit must not be negative"},
+		{"KRITIQUE_REVIEW_APPROVE", "yes please", "KRITIQUE_REVIEW_APPROVE must be true or false"},
+		{"KRITIQUE_REVIEW_FIXES", "1.5", "KRITIQUE_REVIEW_FIXES must be true or false"},
+		{"KRITIQUE_REVIEW_DIAGRAM", "sure", "KRITIQUE_REVIEW_DIAGRAM must be true or false"},
+		{"KRITIQUE_REVIEW_COST", "sure", "KRITIQUE_REVIEW_COST must be true or false"},
+		{"KRITIQUE_REVIEW_EFFORT", "turbo", `review.effort must be none, minimal, low, medium, high, xhigh or max, got "turbo"`},
+		{"KRITIQUE_REVIEW_INCREMENTAL", "many", "KRITIQUE_REVIEW_INCREMENTAL must be a whole number"},
+		{"KRITIQUE_TRIGGER_LIMIT", "-1", "trigger.limit must not be negative"},
 	} {
 		t.Setenv(tt.env, tt.value)
 		if _, err := Parse(withDefaults("", "")); err == nil || !strings.Contains(err.Error(), tt.want) {
@@ -266,12 +266,12 @@ func TestConfidenceSettings(t *testing.T) {
 		{name: "an effort that is no level", doc: "confidence: { effort: turbo }\n",
 			want: `configfile: confidence.effort must be none, minimal, low, medium, high, xhigh or max, got "turbo"`},
 		{name: "an effort in the environment that is no level", env: "EFFORT=turbo", want: "confidence.effort must be none, minimal, low, medium, high, xhigh or max"},
-		{name: "a threshold in the environment that is no number", env: "THRESHOLD=high", want: "KRITIKA_CONFIDENCE_THRESHOLD must be a whole number"},
-		{name: "a gate in the environment that is no boolean", env: "GATE=maybe", want: "KRITIKA_CONFIDENCE_GATE must be true or false"},
+		{name: "a threshold in the environment that is no number", env: "THRESHOLD=high", want: "KRITIQUE_CONFIDENCE_THRESHOLD must be a whole number"},
+		{name: "a gate in the environment that is no boolean", env: "GATE=maybe", want: "KRITIQUE_CONFIDENCE_GATE must be true or false"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if name, value, ok := strings.Cut(tt.env, "="); ok {
-				t.Setenv("KRITIKA_CONFIDENCE_"+name, value)
+				t.Setenv("KRITIQUE_CONFIDENCE_"+name, value)
 			}
 			if _, err := Parse([]byte(fileWithDefaults + tt.doc)); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want it to mention %q", err, tt.want)
@@ -283,9 +283,9 @@ repositories:
   acme/x: { confidence: { threshold: 3, gate: false, risk: high, fallback: "" } }
   acme/y: { confidence: { model: "", effort: "", instructions: "" } }
 `
-	t.Setenv("KRITIKA_CONFIDENCE_FALLBACK", "openrouter/judge-small")
-	t.Setenv("KRITIKA_CONFIDENCE_THRESHOLD", "4")
-	t.Setenv("KRITIKA_CONFIDENCE_GATE", "true")
+	t.Setenv("KRITIQUE_CONFIDENCE_FALLBACK", "openrouter/judge-small")
+	t.Setenv("KRITIQUE_CONFIDENCE_THRESHOLD", "4")
+	t.Setenv("KRITIQUE_CONFIDENCE_GATE", "true")
 	if f, err = Parse([]byte(doc)); err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

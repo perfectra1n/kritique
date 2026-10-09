@@ -382,13 +382,13 @@ test('repositories say which are forks or archived', async ({ page }) => {
   await expect(page.getByRole('row', { name: /alpha\/one/ }).locator('.badge')).toHaveCount(0);
 });
 
-test('repository settings say where each comes from and what .kritika.yaml chose', async ({ page }) => {
+test('repository settings say where each comes from and what .kritique.yaml chose', async ({ page }) => {
   await page.goto(`/${T}/repos/alpha/one`);
   const settings = page.locator('#repo-settings').locator('../..');
   const rc = g.repoDetail.repoConfig!;
   // The golden file chose another review model; the admin's is shown beside it.
   await expect(settings.getByText(rc.settings.models.review, { exact: true })).toBeVisible();
-  await expect(settings).toContainText(`(.kritika.yaml; the admin's is ${g.repoDetail.settings.models.review})`);
+  await expect(settings).toContainText(`(.kritique.yaml; the admin's is ${g.repoDetail.settings.models.review})`);
   await expect(settings).toContainText(`Review effort ${rc.settings.models.effort} (default)`);
   await expect(settings).toContainText(`Confidence effort ${rc.settings.confidence.effort} (default)`);
   await expect(settings).toContainText(`Confidence fallback ${g.repoDetail.settings.confidence.fallback} (default)`);
@@ -702,7 +702,7 @@ test.describe('findings', () => {
 test.describe('rules', () => {
   test('lists each rule reviews check, where it is set and which repositories read it', async ({ page }) => {
     const file: Rule = { ...g.rule, kind: 'context', id: '', text: '', path: 'db/schema.sql', description: 'the schema', source: 'repository' };
-    const fileRule: Rule = { ...g.rule, id: 'house-style', text: '', path: '.kritika/review.md', source: 'repository' };
+    const fileRule: Rule = { ...g.rule, id: 'house-style', text: '', path: '.kritique/review.md', source: 'repository' };
     const renovate: Rule = { ...g.rule, id: 'renovate', text: 'Say what the update breaks.', paths: [], when: [{ name: '', expr: 'pr.headRef.startsWith("renovate/")' }, { name: 'deps', expr: 'pr.headRef.startsWith("deps/")' }] };
     await g.mockApi(page, [[new RegExp(`/api/v1/accounts/${g.SLUG}/rules$`), [file, g.rule, fileRule, renovate]], ...g.defaultApi()]);
     await page.goto(`/${T}/rules`);
@@ -729,7 +729,7 @@ test.describe('rules', () => {
       `#/a/${g.SLUG}/findings?repo=alpha%2Fone&rule=${r.id}`,
     );
     await expect(rows.last().locator('.rule-path')).toHaveText(file.path);
-    await expect(rows.last()).toContainText('.kritika.yaml');
+    await expect(rows.last()).toContainText('.kritique.yaml');
     await expect(rows.last().locator('.rule-cited')).toHaveCount(0);
     await expect(page.locator('.sections .section-tab.active')).toHaveText('Rules');
 
@@ -844,7 +844,7 @@ test.describe('review', () => {
 
     for (const [tab, text] of [
       ['Timeline', g.reviewDetail.runnerRun!.podName],
-      ['Raw', '.kritika.yaml'],
+      ['Raw', '.kritique.yaml'],
       ['Usage', 'Total'],
     ] as const) {
       await page.locator('.tabs').getByRole('link', { name: tab, exact: true }).click();
@@ -1265,7 +1265,7 @@ test.describe('your settings', () => {
     await expect(themes.getByRole('radio', { name: 'Light' })).toBeChecked();
 
     // Another browser, whose own preference is light: the user's dark wins.
-    await page.evaluate(() => localStorage.setItem('kritika-theme', 'light'));
+    await page.evaluate(() => localStorage.setItem('kritique-theme', 'light'));
     await g.mockApi(page, [[/\/api\/v1\/me$/, { ...g.me, settings: { ...g.NO_SETTINGS, theme: 'dark' } }], ...g.defaultApi()]);
     await page.reload();
     await expect(page.locator('html')).toHaveClass(/dark/);
@@ -1324,11 +1324,11 @@ test('queue, usage, follow-ups and admin console pages render their fixtures', a
   // The golden follow-up was asked in a thread, and answered there.
   const fu = g.followup;
   await expect(page.locator('.followup').getByRole('link', { name: 'The question on GitHub' })).toHaveAttribute('href', `${fu.pullUrl}#discussion_r${fu.commentId}`);
-  await expect(page.locator('.followup').getByRole('link', { name: "kritika's reply" })).toHaveAttribute('href', `${fu.pullUrl}#discussion_r${fu.replyCommentId}`);
+  await expect(page.locator('.followup').getByRole('link', { name: "kritique's reply" })).toHaveAttribute('href', `${fu.pullUrl}#discussion_r${fu.replyCommentId}`);
   await g.mockApi(page, [[/\/followups$/, g.pageOf([{ ...fu, inline: false, status: 'ignored', reason: 'not a maintainer', replyCommentId: null }])], ...g.defaultApi()]);
   await page.reload();
   await expect(page.locator('.followup').getByRole('link', { name: 'The question on GitHub' })).toHaveAttribute('href', `${fu.pullUrl}#issuecomment-${fu.commentId}`);
-  await expect(page.locator('.followup').getByRole('link', { name: "kritika's reply" })).toHaveCount(0);
+  await expect(page.locator('.followup').getByRole('link', { name: "kritique's reply" })).toHaveCount(0);
   await expect(page.locator('.followup-reason')).toHaveText('not a maintainer');
 
   await page.goto('/#/admin');
@@ -1366,20 +1366,20 @@ test('a stream that (re)opens refetches the page, event or not', async ({ page }
 test('the user menu shows the version the server reports', async ({ page }) => {
   await page.goto(`/${T}`);
   await page.locator('.user-button').click();
-  await expect(page.locator('.user-panel .user-version')).toHaveText(`kritika ${g.meta.version}`);
+  await expect(page.locator('.user-panel .user-version')).toHaveText(`kritique ${g.meta.version}`);
 });
 
 test('each page names itself in the browser tab', async ({ page }) => {
   const r = g.reviewDetail.review;
   for (const [h, title] of [
-    ['#/', 'All accounts · kritika'],
-    [T, `Analytics · ${g.SLUG} · kritika`],
-    [`${T}/repos/alpha/one`, 'alpha/one · kritika'],
-    [`${T}/pulls?outcome=failed`, `Pull requests · ${g.SLUG} · kritika`],
-    [`${T}/pulls/alpha/one/7`, `${g.pullDetail.pull.title} · alpha/one#7 · kritika`],
-    [`${T}/reviews/rev-1/diff`, `${r.status} · ${r.pull.repository}#${r.pull.number} review · kritika`],
-    [`${T}/queue`, `Queue · ${g.SLUG} · kritika`],
-    ['#/admin', 'Configuration · kritika'],
+    ['#/', 'All accounts · kritique'],
+    [T, `Analytics · ${g.SLUG} · kritique`],
+    [`${T}/repos/alpha/one`, 'alpha/one · kritique'],
+    [`${T}/pulls?outcome=failed`, `Pull requests · ${g.SLUG} · kritique`],
+    [`${T}/pulls/alpha/one/7`, `${g.pullDetail.pull.title} · alpha/one#7 · kritique`],
+    [`${T}/reviews/rev-1/diff`, `${r.status} · ${r.pull.repository}#${r.pull.number} review · kritique`],
+    [`${T}/queue`, `Queue · ${g.SLUG} · kritique`],
+    ['#/admin', 'Configuration · kritique'],
   ]) {
     await page.goto(`/${h}`);
     await expect(page).toHaveTitle(title);
@@ -1446,7 +1446,7 @@ test('dark theme renders every page without console errors', async ({ page }) =>
     if (m.type() === 'error') errors.push(m.text());
   });
   page.on('pageerror', (e) => errors.push(e.message));
-  await page.addInitScript(() => localStorage.setItem('kritika-theme', 'dark'));
+  await page.addInitScript(() => localStorage.setItem('kritique-theme', 'dark'));
   for (const h of [T, `${T}/repos/alpha/one`, `${T}/pulls`, `${T}/reviews/rev-1/diff`, `${T}/reviews/rev-1/conversation`, `${T}/reviews/rev-1/timeline`, `${T}/usage`]) {
     await page.goto(`/${h}`);
     await expect(page.locator('.state-msg[aria-live]')).toHaveCount(0);

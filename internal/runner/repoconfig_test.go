@@ -11,8 +11,8 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/storage/memory"
 
-	"github.com/home-operations/kritika/internal/gittest"
-	"github.com/home-operations/kritika/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/gittest"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
 )
 
 func tree(t *testing.T, files map[string]string) *object.Tree {

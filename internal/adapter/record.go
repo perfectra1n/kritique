@@ -13,11 +13,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/metrics"
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/store"
-	"github.com/home-operations/kritika/internal/transcript"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/metrics"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
 // recordTimeout bounds recording one model call. Recording is best effort:

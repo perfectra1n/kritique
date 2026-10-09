@@ -14,11 +14,11 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
-	"github.com/home-operations/kritika/internal/store"
-	"github.com/home-operations/kritika/internal/store/storetest"
-	"github.com/home-operations/kritika/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // The store suite's TestMain resets the schema; this suite runs after it in
@@ -460,7 +460,7 @@ func TestDispatchStaleEvent(t *testing.T) {
 }
 
 // A new head is enqueued at once even where the repository settles: the
-// worker waits the settle time out, since .kritika.yaml may set it.
+// worker waits the settle time out, since .kritique.yaml may set it.
 // TestDispatchSkipsArchivedAndForks: nothing runs for an archived
 // repository, or a fork its own entry does not turn on, whatever the
 // account's settings say.
@@ -794,7 +794,7 @@ func TestDispatchRepository(t *testing.T) {
 
 // TestDispatchRepositoryMoved: a repository renamed or transferred is
 // recorded under its new name and the row of its old name is disabled,
-// under the old owner's account when kritika serves it, but a rename that
+// under the old owner's account when kritique serves it, but a rename that
 // changes only the case keeps its row; a repository deleted is disabled.
 func TestDispatchRepositoryMoved(t *testing.T) {
 	svc, st, f := setupService(t)
@@ -846,7 +846,7 @@ func TestDispatchRepositoryMoved(t *testing.T) {
 	}
 	dispatch("transferred", "home-operations/adopted", "stranger/adopted")
 	if !enabled("home-operations/adopted") {
-		t.Fatal("a transfer from an account kritika does not serve should record the new row")
+		t.Fatal("a transfer from an account kritique does not serve should record the new row")
 	}
 	dispatch("deleted", "home-operations/moved", "")
 	if enabled("home-operations/moved") || !enabled("home-operations/adopted") {
@@ -944,7 +944,7 @@ func TestRecordUnsigned(t *testing.T) {
 }
 
 // TestDispatchRecordsEdits: an edit, a label change or a draft conversion
-// updates what kritika holds of the pull request, past the filter, and
+// updates what kritique holds of the pull request, past the filter, and
 // queues no review beside the one its head has coming.
 func TestDispatchRecordsEdits(t *testing.T) {
 	svc, st, f := setupService(t)

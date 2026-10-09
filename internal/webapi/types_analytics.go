@@ -3,8 +3,8 @@ package webapi
 import (
 	"time"
 
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // The shapes of the analytics page, which routes_analytics.go serves.

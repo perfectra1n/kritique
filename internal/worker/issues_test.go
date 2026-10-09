@@ -9,8 +9,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // issueForge answers Issue from a fixed set and fails the numbers it is

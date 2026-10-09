@@ -7,11 +7,11 @@ configs = ["lefthook.common.toml"]
 # their inputs change, and stage them. CI's generate-check is the backstop.
 [pre-commit.commands.helm-docs]
 glob = [
-  "charts/kritika/Chart.yaml",
-  "charts/kritika/values.yaml",
-  "charts/kritika/README.md.gotmpl",
+  "charts/kritique/Chart.yaml",
+  "charts/kritique/values.yaml",
+  "charts/kritique/README.md.gotmpl",
 ]
-run = "mise run generate && git add charts/kritika/README.md charts/kritika/values.schema.json"
+run = "mise run generate && git add charts/kritique/README.md charts/kritique/values.schema.json"
 
 # The generated chart README and schema and the authored MkDocs site under
 # docs/ are .prettierignore'd; exclude them from the shared formatters too.
@@ -19,10 +19,10 @@ run = "mise run generate && git add charts/kritika/README.md charts/kritika/valu
 # JSON is ignored hands oxfmt an empty target set, and it exits non-zero
 # ("Expected at least one target file"), failing the whole hook.
 [pre-commit.commands.format-markdown]
-exclude = ["charts/kritika/README.md", "docs/**"]
+exclude = ["charts/kritique/README.md", "docs/**"]
 
 [pre-commit.commands.format-json]
-exclude = ["charts/kritika/values.schema.json"]
+exclude = ["charts/kritique/values.schema.json"]
 
 # build/tools is a mise config root of its own, outside the shared format-mise
 # and mise-lock globs. Its fmt and lock run as a piped group: mise fmt rewrites

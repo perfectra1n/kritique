@@ -527,10 +527,10 @@ func TestOpenAIEffort(t *testing.T) {
 	})
 }
 
-func TestAdaptersIdentifyKritika(t *testing.T) {
+func TestAdaptersIdentifyKritique(t *testing.T) {
 	Version = "1.2.3"
 	t.Cleanup(func() { Version = "dev" })
-	const want = "kritika/1.2.3"
+	const want = "kritique/1.2.3"
 	t.Run("openai", func(t *testing.T) {
 		srv, got := fakeProvider(t, http.StatusOK, chatCompletion(`{"role":"assistant","content":"ok"}`, "stop", plainUsage, ""))
 		if _, err := newTestOpenAI(t, srv, false, nil).Step(t.Context(), StepRequest{Model: "m"}); err != nil {

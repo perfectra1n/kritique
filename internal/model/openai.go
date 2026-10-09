@@ -18,17 +18,17 @@ import (
 
 // Attribution headers OpenRouter shows in its dashboard; harmless elsewhere.
 var attribution = map[string]string{
-	"HTTP-Referer": "https://github.com/home-operations/kritika",
-	"X-Title":      "kritika",
+	"HTTP-Referer": "https://github.com/perfectra1n/kritique",
+	"X-Title":      "kritique",
 }
 
-// Version is the kritika version the adapters identify themselves with to
+// Version is the kritique version the adapters identify themselves with to
 // a provider; main sets it once at startup. Model gateways that distinguish
 // coding agents from generic SDK traffic ask for a client's own user agent
 // rather than the SDK's.
 var Version = "dev"
 
-func userAgent() string { return "kritika/" + Version }
+func userAgent() string { return "kritique/" + Version }
 
 // OpenAIConfig configures an OpenAI chat-completions adapter.
 type OpenAIConfig struct {
@@ -42,7 +42,7 @@ type OpenAIConfig struct {
 	// ReportsModel.
 	OpenRouter bool
 	// ReportsModel trusts the response's model field to name the model
-	// that answered, as kritika's model gateway sets it.
+	// that answered, as kritique's model gateway sets it.
 	ReportsModel bool
 	// OpenCode names the step's conversation in the header OpenCode Go
 	// and Zen route and cache prompts by; without it they refuse the
@@ -69,7 +69,7 @@ const sessionHeader = "x-opencode-session"
 
 // PartHeader carries, from a runner to the gateway, the part of a split
 // review a step is for.
-const PartHeader = "X-Kritika-Part"
+const PartHeader = "X-Kritique-Part"
 
 // OpenAI is a Stepper over the chat completions API of OpenAI or any server
 // compatible with it.

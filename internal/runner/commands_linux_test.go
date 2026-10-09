@@ -13,13 +13,13 @@ import (
 
 	"github.com/go-git/go-git/v6"
 
-	"github.com/home-operations/kritika/internal/agent"
+	"github.com/perfectra1n/kritique/internal/agent"
 )
 
 // environHelper names the role the test binary plays when TestHideEnviron
 // runs it again: "keep" or "hide" start a reader and report what it saw,
 // "read" is the reader.
-const environHelper = "KRITIKA_TEST_ENVIRON"
+const environHelper = "KRITIQUE_TEST_ENVIRON"
 
 // TestHideEnviron checks the property the run tool relies on: once the
 // runner is non-dumpable, a child with the runner's uid cannot read the
@@ -95,7 +95,7 @@ func TestCommandTool(t *testing.T) {
 		if !strings.Contains(def.Description, "leaves out ignored paths") || !strings.Contains(def.Description, "after 5s") {
 			t.Fatalf("description = %q", def.Description)
 		}
-		scratch, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "kritika-run-*"))
+		scratch, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "kritique-run-*"))
 		if err != nil || len(scratch) != 1 {
 			t.Fatalf("scratch = %v, %v", scratch, err)
 		}
@@ -137,7 +137,7 @@ func TestCommandTool(t *testing.T) {
 		if run == nil || fetch == nil {
 			t.Fatalf("run tool %v, fetch_repo %v", run != nil, fetch != nil)
 		}
-		scratch, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "kritika-run-*"))
+		scratch, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "kritique-run-*"))
 		if err != nil || len(scratch) != 1 {
 			t.Fatalf("scratch = %v, %v", scratch, err)
 		}
@@ -180,7 +180,7 @@ func TestCommandToolCurlrc(t *testing.T) {
 	if run == nil || fetch == nil {
 		t.Fatalf("run tool %v, fetch_repo %v", run != nil, fetch != nil)
 	}
-	scratch, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "kritika-run-*"))
+	scratch, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "kritique-run-*"))
 	if err != nil || len(scratch) != 1 {
 		t.Fatalf("scratch = %v, %v", scratch, err)
 	}

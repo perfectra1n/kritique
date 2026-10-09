@@ -6,7 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/forge"
+	"github.com/perfectra1n/kritique/internal/forge"
 )
 
 // marks are the bot's reactions on what it works on, a pull request under

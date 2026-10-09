@@ -10,9 +10,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/rolemap"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/rolemap"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Role is what a session lets its user do.

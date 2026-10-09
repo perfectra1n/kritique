@@ -21,27 +21,27 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"github.com/home-operations/kritika/internal/auth"
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/store"
-	"github.com/home-operations/kritika/internal/store/storetest"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
 )
 
 const actionsConfig = `
 auth:
   oidc:
     issuer: https://idp.example
-    clientId: kritika
-    clientSecret: { env: KRITIKA_TEST_TOKEN }
-    roleMappingExpr: '"kritika-admin" in roles ? "admin" : ""'
+    clientId: kritique
+    clientSecret: { env: KRITIQUE_TEST_TOKEN }
+    roleMappingExpr: '"kritique-admin" in roles ? "admin" : ""'
 apps:
   aj-bot:
     accounts: [aj]
     clientId: Iv1.test
-    privateKey: { env: KRITIKA_TEST_TOKEN }
-    webhookSecret: { env: KRITIKA_TEST_TOKEN }
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
 repositories:
   aj/one: {}
 `
@@ -67,18 +67,18 @@ func newActionsEnv(t *testing.T) *actionsEnv {
 	ctx := t.Context()
 	logger := slog.New(slog.DiscardHandler)
 	st := storetest.Open(t)
-	owner, err := pgxpool.New(ctx, storetest.Env(t, "KRITIKA_TEST_OWNER_URL"))
+	owner, err := pgxpool.New(ctx, storetest.Env(t, "KRITIQUE_TEST_OWNER_URL"))
 	if err != nil {
 		t.Fatalf("pgxpool.New: %v", err)
 	}
 	t.Cleanup(owner.Close)
-	t.Setenv("KRITIKA_TEST_TOKEN", "tok")
+	t.Setenv("KRITIQUE_TEST_TOKEN", "tok")
 	file := configfiletest.Load(t, actionsConfig)
 	if err := st.ApplyConfig(ctx, file); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
 	cur := configfile.NewCurrent(file)
-	webURL, _ := url.Parse("https://kritika.example")
+	webURL, _ := url.Parse("https://kritique.example")
 	h, err := auth.New(auth.Config{Store: st, Current: cur, WebURL: webURL, Logger: logger})
 	if err != nil {
 		t.Fatalf("auth.New: %v", err)
@@ -125,7 +125,7 @@ func (e *actionsEnv) signIn(name, subject string, g store.SessionGrant) {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	e.cookie = &http.Cookie{Name: auth.SessionCookieName(&url.URL{Scheme: "https", Host: "kritika.example"}), Value: token}
+	e.cookie = &http.Cookie{Name: auth.SessionCookieName(&url.URL{Scheme: "https", Host: "kritique.example"}), Value: token}
 }
 
 func (e *actionsEnv) do(path string) (int, []byte) {
@@ -140,8 +140,8 @@ func (e *actionsEnv) send(method, path, body string) (int, []byte) {
 		e.t.Fatal(err)
 	}
 	req.AddCookie(e.cookie)
-	req.Header.Set("Origin", "https://kritika.example")
-	req.Header.Set("X-Kritika", "1")
+	req.Header.Set("Origin", "https://kritique.example")
+	req.Header.Set("X-Kritique", "1")
 	resp, err := e.http.Client().Do(req)
 	if err != nil {
 		e.t.Fatal(err)

@@ -14,13 +14,13 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/home-operations/kritika/internal/agent"
-	"github.com/home-operations/kritika/internal/contextpack"
-	"github.com/home-operations/kritika/internal/gitfetch"
-	"github.com/home-operations/kritika/internal/jobtimeout"
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/contextpack"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // splitReview is the parts a review is split into, the paths of each, nil

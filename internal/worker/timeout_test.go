@@ -7,10 +7,10 @@ import (
 
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
 )
 
 const timeoutConfigYAML = `
@@ -91,7 +91,7 @@ func TestJobTimeouts(t *testing.T) {
 
 	// A runner deadline at configfile's max: the index job lands exactly on
 	// MaxJobTimeout.
-	t.Setenv("KRITIKA_RUNNER_DEADLINE", jobtimeout.MaxRunnerDeadline.String())
+	t.Setenv("KRITIQUE_RUNNER_DEADLINE", jobtimeout.MaxRunnerDeadline.String())
 	current = configfile.NewCurrent(configfiletest.Load(t, timeoutConfigYAML))
 	review, index = &Review{Current: current}, &Index{Current: current}
 	if got, want := review.Timeout(&river.Job[jobs.ReviewArgs]{Args: jobs.ReviewArgs{AccountID: acme.ID(), RepositoryID: acmeRepo("acme/whole")}}),

@@ -12,7 +12,7 @@ import (
 
 	"github.com/go-git/go-git/v6/plumbing/object"
 
-	"github.com/home-operations/kritika/internal/chunk"
+	"github.com/perfectra1n/kritique/internal/chunk"
 )
 
 // binarySniffBytes is how many bytes at the start of a file are checked for

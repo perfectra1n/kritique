@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/forge"
+	"github.com/perfectra1n/kritique/internal/forge"
 )
 
 // fakeMarks records what marks react and unreact were asked.

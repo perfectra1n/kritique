@@ -77,7 +77,7 @@
   }
 </script>
 
-<svelte:head><title>Spend · {slug} · kritika</title></svelte:head>
+<svelte:head><title>Spend · {slug} · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">

@@ -1,6 +1,6 @@
 package webapi
 
-import "github.com/home-operations/kritika/internal/configfile"
+import "github.com/perfectra1n/kritique/internal/configfile"
 
 // The shapes of the rules in force, which routes_rules.go serves.
 
@@ -17,7 +17,7 @@ const (
 
 // RuleSource is where a rule is set: a layer of the configuration, as
 // configfile.Source names it, RuleFromEntry, an account's entry for the
-// repository, or RuleFromRepository, the repository's own .kritika.yaml.
+// repository, or RuleFromRepository, the repository's own .kritique.yaml.
 type RuleSource string
 
 // Rule sources beyond the configuration's layers.

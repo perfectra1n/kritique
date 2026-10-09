@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/contextpack"
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/contextpack"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // Input is everything the prompt is built from.

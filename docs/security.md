@@ -1,7 +1,7 @@
 # Security
 
 A review feeds untrusted content, a pull request's code and description
-and whatever its commands fetch, to a model that can run tools. kritika
+and whatever its commands fetch, to a model that can run tools. kritique
 does that in a runner pod that holds little and reaches little, and keeps
 what a pull request could use to weaken its own review out of its reach.
 
@@ -9,7 +9,7 @@ what a pull request could use to weaken its own review out of its reach.
 
 | Do                                                     | Why                                                                                                                                                                                           |
 | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Install kritika into a namespace of its own            | runner Jobs run in the release namespace, and kritika's Role can create, patch and delete every Secret there, though it can never get or list one                                             |
+| Install kritique into a namespace of its own            | runner Jobs run in the release namespace, and kritique's Role can create, patch and delete every Secret there, though it can never get or list one                                             |
 | Turn on the chart's `networkPolicy.enabled`            | a runner pod can then reach nothing but DNS, Postgres and the [egress gateway](#the-egress-gateway)                                                                                           |
 | Set `config.runnerRuntimeClass` to a sandboxed runtime | a kernel vulnerability reachable from the pod is contained by the sandbox rather than the node ([runner sandbox](#runner-sandbox))                                                            |
 | Set `runner.resources`                                 | a runaway run is killed in its own cgroup rather than pressing on its node                                                                                                                    |
@@ -17,7 +17,7 @@ what a pull request could use to weaken its own review out of its reach.
 
 ## What a runner holds
 
-kritika serve creates a runner Job for each review, follow-up and index
+kritique serve creates a runner Job for each review, follow-up and index
 run, and hands it a Secret of its own:
 
 | Credential                        | What it can do                                                                                                               |
@@ -32,21 +32,21 @@ root and no capabilities, as a service account with no permissions.
 
 ## What a pull request cannot change
 
-- A repository's [`.kritika.yaml`](repository-config.md), its rule files,
+- A repository's [`.kritique.yaml`](repository-config.md), its rule files,
   its skills and its agent files are read from the merge base, never the
   pull request's own tree, so a pull request cannot rewrite them to steer
   its own review.
-- `.kritika.yaml` can narrow the admin's settings and add rules, but
+- `.kritique.yaml` can narrow the admin's settings and add rules, but
   [some keys](configuration.md#what-only-the-admin-sets) are the admin's
   alone: the agent's bounds and commands, `confidence.instructions`, so a
   pull request cannot talk its own risk down, and `review.cost`.
-- A trigger condition in `.kritika.yaml` under a name the admin's lists
+- A trigger condition in `.kritique.yaml` under a name the admin's lists
   use, or a rule under an admin's rule id, is dropped.
 - A skill grants no tool or command, whatever its frontmatter says.
 
 ## The egress gateway
 
-The kritika serve pods serve a forward proxy on `service.gatewayPort`, and
+The kritique serve pods serve a forward proxy on `service.gatewayPort`, and
 runner Jobs are handed it as `HTTPS_PROXY` and `HTTP_PROXY`. With
 `networkPolicy.enabled`, a runner's git fetch and every command it runs go
 through the gateway, which allows a destination by name and by the address
@@ -79,7 +79,7 @@ configFile:
 env:
   GITHUB_TOKEN:
     valueFrom:
-      secretKeyRef: { name: kritika-github-token, key: token }
+      secretKeyRef: { name: kritique-github-token, key: token }
 ```
 
 A host is checked by name, then resolved once, and the gateway connects to
@@ -108,10 +108,10 @@ The refusal a runner's command sees says why:
 The same port is a runner's model endpoint, and every review runs through
 it, so it has no switch:
 
-- kritika serve mints a token for each run and hands it to the pod in
+- kritique serve mints a token for each run and hands it to the pod in
   place of a provider key.
 - The gateway answers each step through the account's provider with the
-  key only kritika serve holds, refuses a step once the run's token budget
+  key only kritique serve holds, refuses a step once the run's token budget
   or the account's `tokensPerMonth` is spent, and records the step's
   usage. Provider endpoints are therefore not in a runner's allowlist.
 - The runner also asks it once for the review's similar code: the gateway
@@ -181,7 +181,7 @@ branch or commit, such as the upstream of a dependency on any host, and
 writes its files beside the checkout for `read_file` to read and `rg` and
 `fd` to search, with the diff from an earlier ref when asked, or lists the
 repository's tags, so the agent can find a version's tag rather than guess
-its name. kritika makes the fetch itself, with go-git: the model names a
+its name. kritique makes the fetch itself, with go-git: the model names a
 repository and a ref, never git arguments.
 
 - **Anonymous HTTPS:** an `https://` clone URL, fetched without a
@@ -256,7 +256,7 @@ runner:
 
 - A transcript may contain repository content the agent read, and every
   member of its account can read it
-  ([retention](configuration.md#how-kritika-runs)).
+  ([retention](configuration.md#how-kritique-runs)).
 - A review agent's conversation is also kept, unmasked since a provider's
   prompt cache matches only the exact text, for the pull request's next
   re-review: no dashboard view shows it, one that holds the run's own

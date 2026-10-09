@@ -1,6 +1,6 @@
 <script lang="ts">
-  // Whether GitHub's webhooks reach kritika for a connection: receiving,
-  // arriving unsigned, which kritika refuses, or none, so that it only
+  // Whether GitHub's webhooks reach kritique for a connection: receiving,
+  // arriving unsigned, which kritique refuses, or none, so that it only
   // polls. With polled, when it last polled is said while they do not arrive.
   import { unsignedWebhooks } from '../setup';
   import type { Connection } from '../types';
@@ -12,11 +12,11 @@
 </script>
 
 {#if unsigned}
-  <Pill tone="danger" label="unsigned" title="GitHub sends the App's webhooks with no signature, so kritika refuses them and only polls: set the App's webhook secret" />
+  <Pill tone="danger" label="unsigned" title="GitHub sends the App's webhooks with no signature, so kritique refuses them and only polls: set the App's webhook secret" />
 {:else if of.lastWebhookAt}
   <Pill tone="ok" label="receiving" />
 {:else}
-  <Pill tone="warn" label="polling only" title="No webhook has reached the App, so kritika only polls for new pull requests and cannot answer mentions" />
+  <Pill tone="warn" label="polling only" title="No webhook has reached the App, so kritique only polls for new pull requests and cannot answer mentions" />
 {/if}
 <span class="small muted">
   {#if polled && (unsigned || !of.lastWebhookAt)}

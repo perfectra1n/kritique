@@ -19,10 +19,10 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"go.yaml.in/yaml/v4"
 
-	"github.com/home-operations/kritika/internal/jobtimeout"
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/prfilter"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/prfilter"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // nameRe bounds connection and provider names to what is safe in a URL
@@ -332,7 +332,7 @@ func (i *Connection) resolve(where string, s *secrets) error {
 	return nil
 }
 
-// validate checks every invariant the rest of kritika relies on, over f and
+// validate checks every invariant the rest of kritique relies on, over f and
 // the account entries.
 func (f *File) validate(accounts []Account) error {
 	if err := f.validateProviders(); err != nil {
@@ -356,7 +356,7 @@ func (f *File) validate(accounts []Account) error {
 func validateTools(tools []Tool) error {
 	names, commands := map[string]bool{}, map[string]string{}
 	for i, t := range tools {
-		where := fmt.Sprintf("KRITIKA_RUNNER_TOOLS[%d]", i)
+		where := fmt.Sprintf("KRITIQUE_RUNNER_TOOLS[%d]", i)
 		if !toolNameRe.MatchString(t.Name) {
 			return fmt.Errorf("configfile: %s.name %q must be lowercase alphanumerics and hyphens, 1 to 58 characters", where, t.Name)
 		}

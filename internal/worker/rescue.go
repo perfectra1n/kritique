@@ -10,11 +10,11 @@ import (
 
 	"github.com/riverqueue/river/rivertype"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/metrics"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/metrics"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Rescue pace: how often the leader looks, and how many jobs and runs one
@@ -158,9 +158,9 @@ func (r *Rescuer) reportEnded(ctx context.Context, job store.AbandonedJob) error
 	if err != nil {
 		return err
 	}
-	desc := "kritika: review failed"
+	desc := "kritique: review failed"
 	if job.CancelRequested {
-		desc = "kritika: review canceled"
+		desc = "kritique: review canceled"
 	}
 	owner, repo, _ := strings.Cut(head.Repository, "/")
 	return client.SetStatus(ctx, owner, repo, head.HeadSHA, forge.StatusError, desc)

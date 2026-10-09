@@ -10,13 +10,13 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/adapter"
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/adapter"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // confidenceTimeout bounds scoring a review, the wait for a slot on the
@@ -236,7 +236,7 @@ func skipVerdict(carried *review.Confidence, gate bool, reason string) (forge.St
 }
 
 // carryApproval applies the verdict an unchanged patch carries to
-// kritika's approval, where the repository has it approve: the skip
+// kritique's approval, where the repository has it approve: the skip
 // reviewed nothing, but the threshold or the risk ceiling may have moved
 // since the score was given, and an approval must not outlive them. The
 // head is the one the skip was just decided for.

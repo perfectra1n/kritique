@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 func adminSettings() configfile.Settings {
@@ -53,19 +53,19 @@ func TestMerge(t *testing.T) {
 		{
 			name: "the file narrows, appends file rules and replaces presentation",
 			doc: "enabled: false\ntrigger: { exclude: [{ expr: pr.draft }] }\nignore: [gen/**, vendor/**]\n" +
-				"rules: [{ id: repo-style, file: .kritika/rules.md }, { id: sql, file: .kritika/sql.md, paths: ['**/*.sql'] }]\n" +
-				"comments:\n  finding: .kritika/inline.tmpl\n",
+				"rules: [{ id: repo-style, file: .kritique/rules.md }, { id: sql, file: .kritique/sql.md, paths: ['**/*.sql'] }]\n" +
+				"comments:\n  finding: .kritique/inline.tmpl\n",
 			want: func(s *configfile.Settings) {
 				s.Enabled, s.Ignore = false, []string{"vendor/**", "gen/**"}
-				s.Review.Rules = append(s.Review.Rules, configfile.Rule{ID: "repo-style", File: ".kritika/rules.md"},
-					configfile.Rule{ID: "sql", File: ".kritika/sql.md", Paths: []string{"**/*.sql"}})
-				s.Review.Templates.Inline = ".kritika/inline.tmpl"
+				s.Review.Rules = append(s.Review.Rules, configfile.Rule{ID: "repo-style", File: ".kritique/rules.md"},
+					configfile.Rule{ID: "sql", File: ".kritique/sql.md", Paths: []string{"**/*.sql"}})
+				s.Review.Templates.Inline = ".kritique/inline.tmpl"
 			},
 			exclude: []string{"pr.draft"},
 		},
 		{
 			name: "an admin's file rule stays as the admin wrote it", doc: "rules: [{ id: house-style, file: docs/rules.md, paths: ['**/*.sql'] }]\n",
-			dropped: []string{".kritika.yaml: rules house-style was dropped: an admin's rule has that id"},
+			dropped: []string{".kritique.yaml: rules house-style was dropped: an admin's rule has that id"},
 		},
 		{
 			name: "context files follow the admin's", doc: "context: [{ path: db/schema.sql, description: the schema, paths: ['**/*.sql'] }]\n",
@@ -80,7 +80,7 @@ func TestMerge(t *testing.T) {
 			want: func(s *configfile.Settings) {
 				s.Review.Rules = append(s.Review.Rules, configfile.Rule{ID: "no-tokens", Rule: "Never log a token.", Paths: []string{"**/*.go"}})
 			},
-			dropped: []string{".kritika.yaml: rules wrap-errors was dropped: an admin's rule has that id"},
+			dropped: []string{".kritique.yaml: rules wrap-errors was dropped: an admin's rule has that id"},
 		},
 		{name: "a rule without an id", doc: "rules: [{ rule: Never log a token. }]\n", wantErr: `rules[0].id "" must be`},
 		{
@@ -95,9 +95,9 @@ func TestMerge(t *testing.T) {
 		{name: "a rule whose condition fails the smoke test", doc: "rules: [{ id: a, rule: x, when: [{ expr: 'pr.labels[5].name == \"x\"' }] }]\n", wantErr: "rules[0].when[0]: smoke test"},
 		{name: "enabled true cannot widen", doc: "enabled: true\n"},
 		{
-			name: "presentation replaces the admin's", doc: "comments: { inline: false, summary: .kritika/summary.tmpl }\n",
+			name: "presentation replaces the admin's", doc: "comments: { inline: false, summary: .kritique/summary.tmpl }\n",
 			want: func(s *configfile.Settings) {
-				s.Review.InlineComments, s.Review.Templates.Summary = false, ".kritika/summary.tmpl"
+				s.Review.InlineComments, s.Review.Templates.Summary = false, ".kritique/summary.tmpl"
 			},
 		},
 		{
@@ -110,7 +110,7 @@ func TestMerge(t *testing.T) {
 		},
 		{
 			name: "review.fixes may only turn on", doc: "review: { fixes: false }\n",
-			dropped: []string{".kritika.yaml: review.fixes false was dropped; allowed: true, since an admin requires a suggested fix"},
+			dropped: []string{".kritique.yaml: review.fixes false was dropped; allowed: true, since an admin requires a suggested fix"},
 		},
 		{
 			name: "a model of a provider the account may use",
@@ -122,8 +122,8 @@ func TestMerge(t *testing.T) {
 		{
 			name: "a model of another provider, or no model, is dropped", doc: "review: { model: q/big, fallback: p }\n",
 			dropped: []string{
-				`.kritika.yaml: review.model "q/big" was dropped; allowed: a model of own, p`,
-				`.kritika.yaml: review.fallback "p" was dropped; allowed: a model of own, p`,
+				`.kritique.yaml: review.model "q/big" was dropped; allowed: a model of own, p`,
+				`.kritique.yaml: review.fallback "p" was dropped; allowed: a model of own, p`,
 			},
 		},
 		{
@@ -138,7 +138,7 @@ func TestMerge(t *testing.T) {
 		},
 		{
 			name: "an effort that is no level is dropped", doc: "review: { effort: turbo }\n",
-			dropped: []string{`.kritika.yaml: review.effort "turbo" was dropped; allowed: none, minimal, low, medium, high, xhigh or max`},
+			dropped: []string{`.kritique.yaml: review.effort "turbo" was dropped; allowed: none, minimal, low, medium, high, xhigh or max`},
 		},
 		{
 			name: "confidence replaces the admin's", doc: "confidence: { model: own/judge, fallback: p/judge, threshold: 0, gate: true }\n",
@@ -150,9 +150,9 @@ func TestMerge(t *testing.T) {
 			name: "a confidence model or fallback of another provider and a threshold off the scale are dropped",
 			doc:  "confidence: { model: q/judge, fallback: q/small, threshold: 6 }\n",
 			dropped: []string{
-				`.kritika.yaml: confidence.threshold 6 was dropped; allowed: 0 to 5`,
-				`.kritika.yaml: confidence.model "q/judge" was dropped; allowed: a model of own, p`,
-				`.kritika.yaml: confidence.fallback "q/small" was dropped; allowed: a model of own, p`,
+				`.kritique.yaml: confidence.threshold 6 was dropped; allowed: 0 to 5`,
+				`.kritique.yaml: confidence.model "q/judge" was dropped; allowed: a model of own, p`,
+				`.kritique.yaml: confidence.fallback "q/small" was dropped; allowed: a model of own, p`,
 			},
 		},
 		{
@@ -162,27 +162,27 @@ func TestMerge(t *testing.T) {
 		{
 			name: "a confidence.risk above the admin's, or no level, is dropped", doc: "confidence: { risk: critical }\n",
 			dropped: []string{
-				`.kritika.yaml: confidence.risk "critical" was dropped; allowed: medium or lower`,
+				`.kritique.yaml: confidence.risk "critical" was dropped; allowed: medium or lower`,
 			},
 		},
 		{name: "the risk instructions are the admin's alone", doc: "confidence: { instructions: all low }\n", wantErr: "field instructions not found"},
 		{
 			name: "an inclusion under an admin's name is dropped", include: []string{"mine", "pr.open"},
 			doc:     "trigger: { include: [{ name: wanted, expr: 'true' }, { name: mine, expr: 'true' }, { expr: pr.open }] }\n",
-			dropped: []string{`.kritika.yaml: trigger.include wanted was dropped: an admin's condition has that name`},
+			dropped: []string{`.kritique.yaml: trigger.include wanted was dropped: an admin's condition has that name`},
 		},
 		{
 			name: "an exclusion under an admin's name is dropped", exclude: []string{"mine", "pr.fork"},
 			doc:     "trigger: { exclude: [{ name: drafts, expr: 'false' }, { name: mine, expr: 'false' }, { expr: pr.fork }] }\n",
-			dropped: []string{`.kritika.yaml: trigger.exclude drafts was dropped: an admin's condition has that name`},
+			dropped: []string{`.kritique.yaml: trigger.exclude drafts was dropped: an admin's condition has that name`},
 		},
 		{
 			name: "a name of the admin's other list is dropped too", include: []string{"mine"}, exclude: []string{"mine"},
 			doc: "trigger: { include: [{ name: drafts, expr: 'true' }, { name: mine, expr: 'true' }], " +
 				"exclude: [{ name: mine, expr: 'false' }, { name: wanted, expr: 'false' }] }\n",
 			dropped: []string{
-				`.kritika.yaml: trigger.include drafts was dropped: an admin's condition has that name`,
-				`.kritika.yaml: trigger.exclude wanted was dropped: an admin's condition has that name`,
+				`.kritique.yaml: trigger.include drafts was dropped: an admin's condition has that name`,
+				`.kritique.yaml: trigger.exclude wanted was dropped: an admin's condition has that name`,
 			},
 		},
 		{
@@ -302,7 +302,7 @@ func TestMergedCheck(t *testing.T) {
 		})
 	}
 	for r, want := range map[SkipReason]string{
-		SkipDisabled: "disabled in .kritika.yaml", SkipFiltered: "filtered", SkipOnlyPaths: "only ignored paths changed",
+		SkipDisabled: "disabled in .kritique.yaml", SkipFiltered: "filtered", SkipOnlyPaths: "only ignored paths changed",
 	} {
 		if !r.Valid() || r.Description() != want {
 			t.Fatalf("%q.Description() = %q, want %q", r, r.Description(), want)

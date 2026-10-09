@@ -26,7 +26,7 @@ func TestGHSource(t *testing.T) {
 		// Nothing to name: no repository, or a call that reads no page.
 		{[]string{"release", "view", "v2"}, ""},
 		{[]string{"pr", "view", "12", "-R", "a"}, ""},
-		{[]string{"search", "repos", "kritika"}, ""},
+		{[]string{"search", "repos", "kritique"}, ""},
 		{[]string{"--version"}, ""},
 	} {
 		if got := ghSource(tt.args); got != tt.want {

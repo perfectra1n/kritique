@@ -11,7 +11,7 @@
   const title = $derived(Object.hasOwn(SECTIONS, current) ? SECTIONS[current] : 'Settings');
 </script>
 
-<svelte:head><title>{title} · {slug} · kritika</title></svelte:head>
+<svelte:head><title>{title} · {slug} · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">

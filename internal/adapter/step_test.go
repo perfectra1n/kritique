@@ -9,7 +9,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 
-	"github.com/home-operations/kritika/internal/model"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 // stepperFunc answers each step from the next error in errs, then the

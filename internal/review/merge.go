@@ -8,12 +8,12 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // mergeSystem is the instructions of the call that writes a split review's
 // summary from its parts'.
-const mergeSystem = `You are kritika, a code reviewer for pull requests, writing the summary of a review that was split into
+const mergeSystem = `You are kritique, a code reviewer for pull requests, writing the summary of a review that was split into
 parts, each part's files read by a reviewer of its own. You see the pull request's title and description, each
 part's files and the summary its reviewer wrote, and the findings the parts reported. Write one summary of the
 whole change, as a single reviewer who had read every part would.

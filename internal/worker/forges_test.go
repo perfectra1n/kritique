@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
 )
 
 // appConnection is a connection of an App with clientID, its private
@@ -39,10 +39,10 @@ func TestAppsRefuseAnotherForge(t *testing.T) {
 	apps := &Apps{}
 	other := &configfile.Connection{Name: "x", Forge: "gitlab"}
 	if _, err := apps.Build(t.Context(), other, "acme/widgets"); err == nil {
-		t.Fatal("Build built a client for a forge kritika does not support")
+		t.Fatal("Build built a client for a forge kritique does not support")
 	}
 	if _, err := apps.Reach(t.Context(), other); err == nil {
-		t.Fatal("Reach listed a forge kritika does not support")
+		t.Fatal("Reach listed a forge kritique does not support")
 	}
 }
 

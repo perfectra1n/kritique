@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 var readDescriptionSchema = json.RawMessage(`{

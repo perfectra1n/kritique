@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/model"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 // TestRunKeepsItsConversation: a submitted Run hands back its exchange as

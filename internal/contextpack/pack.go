@@ -16,8 +16,8 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 
-	"github.com/home-operations/kritika/internal/chunk"
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/chunk"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // Stages, in the order the prompt spends its budget on them.

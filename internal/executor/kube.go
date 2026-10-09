@@ -21,7 +21,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"github.com/home-operations/kritika/internal/runner"
+	"github.com/perfectra1n/kritique/internal/runner"
 )
 
 // runnerRole names a runner pod's container, and its component and role
@@ -36,7 +36,7 @@ const noProxy = "localhost,127.0.0.1"
 type Kube struct {
 	Client    kubernetes.Interface
 	Namespace string
-	// Image is the kritika image the Job runs, normally the release's -tools
+	// Image is the kritique image the Job runs, normally the release's -tools
 	// image.
 	Image string
 	// ImagePullPolicy, when set, is the runner container's imagePullPolicy.
@@ -44,7 +44,7 @@ type Kube struct {
 	// ServiceAccount is the permissionless runner service account.
 	ServiceAccount string
 	// DatabaseSecret and DatabaseSecretKey reference the Secret holding the
-	// runner role's DSN, injected as KRITIKA_DATABASE_URL.
+	// runner role's DSN, injected as KRITIQUE_DATABASE_URL.
 	DatabaseSecret, DatabaseSecretKey string
 	// GatewayURL is the egress gateway the pod is handed as its HTTPS_PROXY
 	// and HTTP_PROXY: with the runner network policy allowing nothing else,
@@ -361,7 +361,7 @@ const (
 // The run's job document is mounted read-only from its Secret at
 // specDir/specFile.
 const (
-	specDir  = "/var/run/kritika"
+	specDir  = "/var/run/kritique"
 	specFile = "spec.json"
 )
 
@@ -369,11 +369,11 @@ const (
 // image's rather than extending it, so the tool directories go in front of
 // imagePath, the PATH both runner images set.
 const (
-	toolsDir  = "/opt/kritika/tools"
+	toolsDir  = "/opt/kritique/tools"
 	imagePath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
-func jobName(runID string) string { return "kritika-run-" + runID[:8] }
+func jobName(runID string) string { return "kritique-run-" + runID[:8] }
 
 // gatewayHost is the host of a gateway URL config has already checked.
 func gatewayHost(raw string) string {
@@ -389,10 +389,10 @@ func gatewayHost(raw string) string {
 // slash, which an owner/repo name does.
 func runnerLabels(spec Spec) map[string]string {
 	l := map[string]string{
-		"app.kubernetes.io/name": "kritika", "app.kubernetes.io/component": runnerRole, "kritika.home-operations.com/role": runnerRole,
+		"app.kubernetes.io/name": "kritique", "app.kubernetes.io/component": runnerRole, "kritique.perfectra1n.github.io/role": runnerRole,
 	}
 	for key, v := range spec.Labels {
-		l["kritika.home-operations.com/"+key] = strings.ReplaceAll(v, "/", "_")
+		l["kritique.perfectra1n.github.io/"+key] = strings.ReplaceAll(v, "/", "_")
 	}
 	return l
 }
@@ -426,7 +426,7 @@ func (k *Kube) job(spec Spec) (*batchv1.Job, error) {
 	labels := runnerLabels(spec)
 	annotations := map[string]string{}
 	for key, v := range spec.Annotations {
-		annotations["kritika.home-operations.com/"+key] = v
+		annotations["kritique.perfectra1n.github.io/"+key] = v
 	}
 	var backoff int32
 	secretRef := func(key string, optional bool) *corev1.EnvVarSource {
@@ -434,11 +434,11 @@ func (k *Kube) job(spec Spec) (*batchv1.Job, error) {
 			Name: name, Key: key, Optional: new(optional)}}
 	}
 	env := []corev1.EnvVar{
-		{Name: "KRITIKA_RUN_SPEC_FILE", Value: specDir + "/" + specFile},
-		{Name: "KRITIKA_GIT_TOKEN", ValueFrom: secretRef(secretKeyGitToken, false)},
-		{Name: "KRITIKA_GATEWAY_TOKEN", ValueFrom: secretRef(secretKeyGatewayToken, true)},
-		{Name: "KRITIKA_LOG_FORMAT", Value: "json"},
-		{Name: "KRITIKA_DATABASE_URL", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+		{Name: "KRITIQUE_RUN_SPEC_FILE", Value: specDir + "/" + specFile},
+		{Name: "KRITIQUE_GIT_TOKEN", ValueFrom: secretRef(secretKeyGitToken, false)},
+		{Name: "KRITIQUE_GATEWAY_TOKEN", ValueFrom: secretRef(secretKeyGatewayToken, true)},
+		{Name: "KRITIQUE_LOG_FORMAT", Value: "json"},
+		{Name: "KRITIQUE_DATABASE_URL", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 			Name: k.DatabaseSecret, Key: k.DatabaseSecretKey}}},
 	}
 	if k.GatewayURL != "" {

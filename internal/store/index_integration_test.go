@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 const onboardAccounts = `
@@ -17,23 +17,23 @@ apps:
   alpha-bot:
     accounts: [alpha]
     clientId: Iv1.test
-    privateKey: { env: KRITIKA_TEST_TOKEN }
-    webhookSecret: { env: KRITIKA_TEST_TOKEN }
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
   beta-bot:
     accounts: [beta]
     clientId: Iv1.test
-    privateKey: { env: KRITIKA_TEST_TOKEN }
-    webhookSecret: { env: KRITIKA_TEST_TOKEN }
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
   east-bot:
     accounts: [east]
     clientId: Iv1.test
-    privateKey: { env: KRITIKA_TEST_TOKEN }
-    webhookSecret: { env: KRITIKA_TEST_TOKEN }
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
   west-bot:
     accounts: [west]
     clientId: Iv1.test
-    privateKey: { env: KRITIKA_TEST_TOKEN }
-    webhookSecret: { env: KRITIKA_TEST_TOKEN }
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
 repositories:
   alpha/one: {}
   alpha/two: {}

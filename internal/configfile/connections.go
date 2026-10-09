@@ -50,15 +50,15 @@ func validateConnections(conns []Connection) error {
 
 // connectionEnvPrefix starts every environment variable that declares the
 // environment's app.
-const connectionEnvPrefix = "KRITIKA_APPS_"
+const connectionEnvPrefix = "KRITIQUE_APPS_"
 
-// DefaultEnvConnection names the environment's app when KRITIKA_APPS_NAME
+// DefaultEnvConnection names the environment's app when KRITIQUE_APPS_NAME
 // is unset.
 const DefaultEnvConnection = "github"
 
 // overlayConnectionEnv declares the one app the environment may: it
 // replaces the file's app of its name whole, or joins them. It returns the
-// app's name, "" when no KRITIKA_APPS_* variable is set; a secret's variable
+// app's name, "" when no KRITIQUE_APPS_* variable is set; a secret's variable
 // carries the value itself. A variable that names no key is an error, so a
 // typo is refused rather than ignored.
 func overlayConnectionEnv(apps map[string]Connection, environ []string) (string, error) {

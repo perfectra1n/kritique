@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // Source bounds: how many URLs one run records, and how long each may be.

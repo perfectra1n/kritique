@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // TestReadAnalytics checks the window totals, a series with every bucket

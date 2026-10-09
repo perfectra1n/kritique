@@ -4,10 +4,10 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 func TestVerdict(t *testing.T) {
@@ -79,7 +79,7 @@ func TestSkipVerdict(t *testing.T) {
 }
 
 // TestCarryApproval: an unchanged patch's carried score is held to the
-// threshold and the risk ceiling asked for now, and decides kritika's
+// threshold and the risk ceiling asked for now, and decides kritique's
 // approval only where the repository has it approve.
 func TestCarryApproval(t *testing.T) {
 	settings := func(approve bool, threshold int) configfile.Settings {
@@ -100,9 +100,9 @@ func TestCarryApproval(t *testing.T) {
 		{name: "nothing carried", settings: settings(true, 4)},
 		{name: "approvals off", settings: settings(false, 4), carried: carried(4)},
 		{name: "a score that still passes approves the new head", settings: settings(true, 4), carried: carried(4),
-			approved: "o/r#7@abcdef1234: kritika: confidence 4/5 with low risk at abcdef1."},
+			approved: "o/r#7@abcdef1234: kritique: confidence 4/5 with low risk at abcdef1."},
 		{name: "a threshold raised since withdraws", settings: settings(true, 5), carried: carried(5),
-			dismissed: "o/r#7: kritika: confidence 4/5 is below the threshold of 5 at abcdef1."},
+			dismissed: "o/r#7: kritique: confidence 4/5 is below the threshold of 5 at abcdef1."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

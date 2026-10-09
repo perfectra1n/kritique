@@ -57,7 +57,7 @@ func thread(id string, resolved bool, comments ...string) string {
 
 func TestGraphQLErrorKeepsLittleOfTheBody(t *testing.T) {
 	f, c := newFakeAPI(t)
-	c.login = "kritika[bot]"
+	c.login = "kritique[bot]"
 	f.mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = fmt.Fprint(w, "<html>"+strings.Repeat("x", 100<<10)+"</html>")
@@ -79,39 +79,39 @@ func TestResolveThread(t *testing.T) {
 	}{
 		{
 			name:  "the bot's open thread is resolved",
-			pages: []string{"[" + thread("T1", false, "kritika#11") + "," + thread("T2", false, "kritika#21", "kritika#22") + "]"},
+			pages: []string{"[" + thread("T1", false, "kritique#11") + "," + thread("T2", false, "kritique#21", "kritique#22") + "]"},
 			id:    21, want: true, wantResolved: []string{"T2"},
 		},
 		{
 			name:  "a thread someone else wrote in is left open",
-			pages: []string{"[" + thread("T1", false, "kritika#11", "devin#12") + "]"},
+			pages: []string{"[" + thread("T1", false, "kritique#11", "devin#12") + "]"},
 			id:    11,
 		},
 		{
 			name:  "a thread someone else wrote in is resolved when asked",
-			pages: []string{"[" + thread("T1", false, "kritika#11", "devin#12") + "]"},
+			pages: []string{"[" + thread("T1", false, "kritique#11", "devin#12") + "]"},
 			id:    11, anyAuthor: true, want: true, wantResolved: []string{"T1"},
 		},
 		{
 			name:  "a thread already resolved is left alone",
-			pages: []string{"[" + thread("T1", true, "kritika#11") + "]"},
+			pages: []string{"[" + thread("T1", true, "kritique#11") + "]"},
 			id:    11,
 		},
 		{
 			name:  "a comment in no thread resolves nothing",
-			pages: []string{"[" + thread("T1", false, "kritika#11") + "]"},
+			pages: []string{"[" + thread("T1", false, "kritique#11") + "]"},
 			id:    99,
 		},
 		{
 			name:  "a thread on a later page is found",
-			pages: []string{"[" + thread("T1", false, "kritika#11") + "]", "[" + thread("T2", false, "kritika[bot]#21") + "]"},
+			pages: []string{"[" + thread("T1", false, "kritique#11") + "]", "[" + thread("T2", false, "kritique[bot]#21") + "]"},
 			id:    21, want: true, wantResolved: []string{"T2"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f, c := newFakeAPI(t)
-			c.login = "kritika[bot]"
+			c.login = "kritique[bot]"
 			api := &threadsAPI{pages: tt.pages}
 			api.serve(f)
 			got, err := c.ResolveThread(t.Context(), "o", "r", 7, tt.id, !tt.anyAuthor)
@@ -165,7 +165,7 @@ func TestResolveThreadWithoutContentsWrite(t *testing.T) {
 					_, _ = fmt.Fprint(w, `{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}`)
 					return
 				}
-				_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[%s]}}}}}`, thread("T1", false, "kritika#11"))
+				_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[%s]}}}}}`, thread("T1", false, "kritique#11"))
 			})
 			srv := httptest.NewServer(mux)
 			defer srv.Close()
@@ -177,7 +177,7 @@ func TestResolveThreadWithoutContentsWrite(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			c.login = "kritika[bot]"
+			c.login = "kritique[bot]"
 			got, err := c.ResolveThread(t.Context(), "o", "r", 7, 11, true)
 			if err != nil {
 				t.Fatal(err)
@@ -194,7 +194,7 @@ func TestResolveThreadWithoutContentsWrite(t *testing.T) {
 
 func TestResolveThreadErrors(t *testing.T) {
 	f, c := newFakeAPI(t)
-	c.login = "kritika[bot]"
+	c.login = "kritique[bot]"
 	f.mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": "Could not resolve to a PullRequest"}}})

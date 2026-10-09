@@ -1,6 +1,6 @@
 # Models
 
-kritika calls models through the providers the configuration file
+kritique calls models through the providers the configuration file
 declares, each with its own key. A model is named `<provider>/<model>`, on
 a provider the file declares:
 
@@ -13,7 +13,7 @@ a provider the file declares:
 | `embedding.model`  | builds each repository's similar-code index ([the embedder](#the-embedder))                     |
 
 The review models can differ by repository, in the admin's `repositories`
-entries or a repository's own [`.kritika.yaml`](repository-config.md#models),
+entries or a repository's own [`.kritique.yaml`](repository-config.md#models),
 which may name only a provider the instance or the repository's account
 declares. `review.effort` and `confidence.effort` set how hard each model
 reasons ([effort](#effort)).
@@ -41,7 +41,7 @@ embedding:
 | `retries` | how many more times a failed model step is tried, from 0 to 5; 0 unless set ([retries](#retries)) |
 
 The provider key never enters a runner pod: the agent reaches its model
-through kritika's gateway ([the model endpoint](security.md#the-model-endpoint)).
+through kritique's gateway ([the model endpoint](security.md#the-model-endpoint)).
 
 ### An account's own keys
 
@@ -59,7 +59,7 @@ repositories:
 ```
 
 A model named `<key name>/<model>` in the account's `owner/*` or
-`owner/name` entries, or in one of its repositories' `.kritika.yaml`, runs
+`owner/name` entries, or in one of its repositories' `.kritique.yaml`, runs
 on that key and the account pays for it. A key's name may not be one the
 instance's providers use.
 
@@ -69,13 +69,13 @@ One provider and the embedder can come from the environment instead:
 
 | Variable                     | Key                                                             |
 | ---------------------------- | --------------------------------------------------------------- |
-| `KRITIKA_PROVIDERS_NAME`     | the provider's name, `openrouter` unless set                    |
-| `KRITIKA_PROVIDERS_TYPE`     | `type`, which defaults to the name when that is a provider type |
-| `KRITIKA_PROVIDERS_BASE_URL` | `baseUrl`                                                       |
-| `KRITIKA_PROVIDERS_API_KEY`  | `apiKey`                                                        |
-| `KRITIKA_PROVIDERS_RETRIES`  | `retries`                                                       |
-| `KRITIKA_EMBEDDING_MODEL`    | `embedding.model`                                               |
-| `KRITIKA_EMBEDDING_DIMS`     | `embedding.dims`                                                |
+| `KRITIQUE_PROVIDERS_NAME`     | the provider's name, `openrouter` unless set                    |
+| `KRITIQUE_PROVIDERS_TYPE`     | `type`, which defaults to the name when that is a provider type |
+| `KRITIQUE_PROVIDERS_BASE_URL` | `baseUrl`                                                       |
+| `KRITIQUE_PROVIDERS_API_KEY`  | `apiKey`                                                        |
+| `KRITIQUE_PROVIDERS_RETRIES`  | `retries`                                                       |
+| `KRITIQUE_EMBEDDING_MODEL`    | `embedding.model`                                               |
+| `KRITIQUE_EMBEDDING_DIMS`     | `embedding.dims`                                                |
 
 The environment declares at most one provider, which replaces the file's
 of the same name whole or is added to the file's. The embedding variables
@@ -91,7 +91,7 @@ way another attempt may get past: a 5xx, a 429, a 402 that carries a
 `Retry-After` (OpenRouter's answer while the account's in-flight requests
 would exceed its balance), a timeout or a cut connection.
 
-- kritika waits up to a second, then up to twice as long each time, to at
+- kritique waits up to a second, then up to twice as long each time, to at
   most 30 seconds, and waits out a longer `Retry-After` the provider
   sends, up to a minute.
 - It never retries a refusal of the request itself, such as a prompt over
@@ -139,7 +139,7 @@ confidence model's provider it goes to the provider with the call, on
 another provider it gets the call once the confidence model's attempts
 are spent, which get at most half of the time the score has left, and the
 call is recorded, charged and counted under the model that answered. It
-is set wherever `confidence.model` is, a repository's `.kritika.yaml`
+is set wherever `confidence.model` is, a repository's `.kritique.yaml`
 included, under the same provider rules, and `confidence.effort` applies
 to it too.
 
@@ -166,7 +166,7 @@ confidence:
 | Where                 | What it sets                                                                                                                            |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | nothing               | the provider's default, for both                                                                                                        |
-| a scope               | its level, like any [repository setting](configuration.md#repository-settings-and-repositories); a `.kritika.yaml` replaces the admin's |
+| a scope               | its level, like any [repository setting](configuration.md#repository-settings-and-repositories); a `.kritique.yaml` replaces the admin's |
 | a scope, `effort: ""` | the provider's default again, where a broader scope set a level                                                                         |
 
 Each provider type gets the level in its own form:
@@ -177,7 +177,7 @@ Each provider type gets the level in its own form:
 | `openai`, `opencode` | `reasoning_effort`     | a model that takes no reasoning effort refuses the request; leave its effort unset                  |
 | `anthropic`          | `output_config.effort` | the Messages API runs from `low` to `max`, so `none` and `minimal` go out as `low`; unset as above  |
 
-The environment sets both (`KRITIKA_REVIEW_EFFORT`, `KRITIKA_CONFIDENCE_EFFORT`,
+The environment sets both (`KRITIQUE_REVIEW_EFFORT`, `KRITIQUE_CONFIDENCE_EFFORT`,
 [environment variables](configuration.md#environment-variables)), as do
 the chart's `reviewEffort` and `confidenceEffort`. The dashboard's
 repository page shows each repository's effective levels beside its
@@ -204,7 +204,7 @@ floor of about 0.7 keeps the matches that mean something.
 Without an embedder, indexing is off and reviews run without similar code.
 The index holds one model and dimension: a configuration that changes
 either drops every repository's index, and the leader builds each again, a
-few at a time, as `KRITIKA_ONBOARD_WINDOW` paces them. Removing the
+few at a time, as `KRITIQUE_ONBOARD_WINDOW` paces them. Removing the
 embedder keeps the index, and adding back the same model and dimension
 uses it again.
 
@@ -235,7 +235,7 @@ embedding:
 - The model must support tool calls: a review works through tools and
   submits its findings as a call to `submit_review`, which its last step
   tells it to make, and a follow-up's reply is a tool call too.
-- The kritika pods call the server; a review's runner reaches it only
+- The kritique pods call the server; a review's runner reaches it only
   through their gateway. With the chart's `networkPolicy.enabled`,
   add the server's port to `networkPolicy.egressPorts`, which allows only
   443 unless set.

@@ -10,9 +10,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/executor"
-	"github.com/home-operations/kritika/internal/runner"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Causes supervision cancels a run with.

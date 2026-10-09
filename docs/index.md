@@ -1,17 +1,17 @@
-# kritika
+# kritique
 
 **Repository-aware AI pull request review for GitHub.**
 
 /// warning | Not production ready
 
-kritika is early and under active development: configuration and the APIs
+kritique is early and under active development: configuration and the APIs
 can still change from one release to the next, so read the
-[changelog](https://github.com/home-operations/kritika/blob/main/CHANGELOG.md)
+[changelog](https://github.com/perfectra1n/kritique/blob/main/CHANGELOG.md)
 before upgrading. Schema changes arrive as migrations the leader applies.
 
 ///
 
-kritika indexes a repository, reviews each pull request against that context,
+kritique indexes a repository, reviews each pull request against that context,
 posts one sticky summary comment plus inline findings and a commit status, and
 answers follow-ups when the bot is @-mentioned. A pull request from a fork is
 reviewed like any other unless the configuration excludes it. One deployment serves any
@@ -20,9 +20,9 @@ its own Kubernetes Job pod that holds no provider key or App key.
 
 ```mermaid
 flowchart LR
-    GH["GitHub<br/>(webhook or poll)"] --> S[kritika serve]
+    GH["GitHub<br/>(webhook or poll)"] --> S[kritique serve]
     S --> J["runner Job:<br/>fetch, context, agent"]
-    J -- "model calls and<br/>similar code" --> G[gateway in kritika serve]
+    J -- "model calls and<br/>similar code" --> G[gateway in kritique serve]
     J --> S
     S --> C["sticky comment, inline<br/>findings, commit status"]
 ```
@@ -65,9 +65,9 @@ flowchart LR
   the code.
 - **Providers and limits.** OpenRouter, OpenAI, Anthropic and OpenCode adapters, with
   per-account concurrency, daily review and monthly token caps. The provider
-  key never enters a runner pod: the agent reaches its model through kritika's
+  key never enters a runner pod: the agent reaches its model through kritique's
   gateway.
-- **Repository overrides.** A `.kritika.yaml`, read from the merge-base, can
+- **Repository overrides.** A `.kritique.yaml`, read from the merge-base, can
   narrow the admin's settings and bring its own rules, context files and
   comment templates.
 - **Skills.** A review is offered the [Agent Skills](https://agentskills.io)
@@ -76,7 +76,7 @@ flowchart LR
   from the merge-base and grant no tool or command.
 - **Configuration in git.** One YAML file holds the whole configuration, read
   at startup, and a change rolls the pods; secrets stay in Secrets, which reach
-  kritika as environment variables.
+  kritique as environment variables.
 - **Dashboard.** Sign-in, live review state, full model transcripts, the
   running configuration, repository on/off and an audit log.
 
@@ -93,14 +93,14 @@ flowchart LR
 - **[Models](models.md)**: providers and their keys, retries, fallback, the
   embedder, local models and OpenCode.
 - **[Repository settings](repository-config.md)**: what a repository's
-  `.kritika.yaml` can change.
+  `.kritique.yaml` can change.
 - **[Helm chart values](chart-values.md)**: the chart's values, grouped.
 - **[Reviews](reviews.md)**: when a review runs, what it posts, and the
   commands that steer it.
 - **[Confidence and approvals](confidence.md)**: the confidence score, the
-  commit status it can gate, risk, and when kritika approves.
+  commit status it can gate, risk, and when kritique approves.
 - **[Dashboard](dashboard.md)**: the setup checklist, the Configuration page,
   repository on/off and actions.
-- **[Metrics](metrics.md)**: what kritika exports to Prometheus.
+- **[Metrics](metrics.md)**: what kritique exports to Prometheus.
 - **[Development](development.md)**: building, testing, evaluation and the
   cluster loop.

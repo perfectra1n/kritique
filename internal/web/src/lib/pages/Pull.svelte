@@ -63,7 +63,7 @@
   }
 </script>
 
-<svelte:head><title>{res.data ? `${res.data.pull.title} · ` : ''}{fullName}#{number} · kritika</title></svelte:head>
+<svelte:head><title>{res.data ? `${res.data.pull.title} · ` : ''}{fullName}#{number} · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">

@@ -9,7 +9,7 @@ import (
 )
 
 // leaderKey is the advisory lock every leader-eligible replica competes for.
-const leaderKey = "kritika-leader"
+const leaderKey = "kritique-leader"
 
 // lockTimeout bounds one lock attempt, acquiring the connection and trying
 // the lock, and each ping of the held connection. Both are a round trip on

@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // AnalyticsGroup is the width of one bucket of an analytics series.
@@ -43,7 +43,7 @@ type AnalyticsTotals struct {
 	ReactionsDown int
 	CostUSD       float64
 	// MedianReviewMs is nil when no review completed, and MedianMergeMs,
-	// from opened to merged, when no pull request kritika knows merged.
+	// from opened to merged, when no pull request kritique knows merged.
 	MedianReviewMs *int64
 	MedianMergeMs  *int64
 }

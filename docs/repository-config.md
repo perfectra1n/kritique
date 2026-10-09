@@ -1,9 +1,9 @@
-# `.kritika.yaml` reference
+# `.kritique.yaml` reference
 
-A repository may commit an optional `.kritika.yaml` at its root to tune how
-kritika reviews it. It is read from the merge-base commit, never the pull
+A repository may commit an optional `.kritique.yaml` at its root to tune how
+kritique reviews it. It is read from the merge-base commit, never the pull
 request's own tree, so a pull request cannot use its own copy to weaken the
-review applied to it. kritika reads it before the review starts, and applies
+review applied to it. kritique reads it before the review starts, and applies
 it to follow-ups (from the pull request's merge base) and to indexing (from
 the commit indexed) too.
 
@@ -11,12 +11,12 @@ The file holds nothing secret: no field takes a credential, a URL, a host
 or a secret reference, and a model it names is a `<provider>/<model>` of a
 provider an admin configured.
 
-[`kritika.schema.json`](kritika.schema.json) is its JSON Schema. An editor
+[`kritique.schema.json`](kritique.schema.json) is its JSON Schema. An editor
 using the YAML language server validates the file as it is written when
 its first line names the schema:
 
 ```yaml
-# yaml-language-server: $schema=https://kritika.home-operations.com/kritika.schema.json
+# yaml-language-server: $schema=https://kritique.perfectra1n.github.io/kritique.schema.json
 ```
 
 ## What it may set
@@ -39,7 +39,7 @@ rules:
       rule: 'Wrap errors with fmt.Errorf("<package>: %w", err).',
       paths: ["**/*.go"],
     }
-  - { id: house-style, file: .kritika/review.md }
+  - { id: house-style, file: .kritique/review.md }
   - id: renovate
     rule: Say what the update breaks, from the release notes in the body.
     when: [{ expr: pr.headRef.startsWith("renovate/") }]
@@ -94,7 +94,7 @@ that is no level is dropped.
 
 ### Approvals
 
-`review.approve: true` has kritika approve a pull request its review
+`review.approve: true` has kritique approve a pull request its review
 allows: one with nothing blocking or important, or, with a confidence
 score, one whose score and risk allow it. It replaces the admin's in
 either direction, so a repository can turn it on where the instance
@@ -110,11 +110,11 @@ tokens on every review, and it replaces the admin's in either direction.
 
 - The model leaves it out when the change has no such flow, as for a
   version bump or a documentation change.
-- kritika keeps only a flowchart, graph or sequence diagram under 4 KiB.
+- kritique keeps only a flowchart, graph or sequence diagram under 4 KiB.
 - A re-review of the commits since the last review is shown that review's
   diagram, to return as it is, redrawn where the new commits alter the
   flow, or empty once the flow is gone; when it answers with no diagram at
-  all, kritika keeps the last one.
+  all, kritique keeps the last one.
 
 ### Confidence
 
@@ -152,7 +152,7 @@ See [the recipes](#include-and-exclude-recipes).
 
 `ignore` adds path globs to the admin's own ignore list, for reviews and
 indexing alike. A pull request whose every changed path is ignored, by
-these, the admin's globs or kritika's defaults (vendored trees, lockfiles,
+these, the admin's globs or kritique's defaults (vendored trees, lockfiles,
 generated and minified code, source maps and logs), is skipped.
 
 ### Rules
@@ -249,7 +249,7 @@ base, within the [limits](#limits). They follow the rules in the prompt.
 
 `comments.summary` and `comments.finding` are paths to Go
 [text/template](https://pkg.go.dev/text/template) templates that replace
-kritika's built-in summary and inline comment templates; an empty path
+kritique's built-in summary and inline comment templates; an empty path
 restores the built-in one where the admin set a template.
 
 - **Helpers:** the [sprout](https://github.com/go-sprout/sprout) helpers
@@ -325,7 +325,7 @@ rule's `when` conditions, is a [CEL](https://cel.dev) expression over
 | ---------------------------------------- | ------------------------------------------------- |
 | `opened`, `reopened`, `ready_for_review` | the pull request opened, reopened or became ready |
 | `synchronize`                            | a push                                            |
-| `poll`                                   | a push kritika found without its webhook          |
+| `poll`                                   | a push kritique found without its webhook          |
 | `labeled`, `unlabeled`                   | a label added or removed                          |
 | `manual`                                 | a re-run from the dashboard, or `@<bot> review`   |
 
@@ -356,21 +356,21 @@ Some conditions, each under `trigger`:
 | Never review automatically a pull request touching `db/migrations/**` | `exclude: [{ name: migrations, paths: ["db/migrations/**"] }]`                            |
 
 The last holds only for automatic reviews in the admin's configuration: a
-review someone asks for still runs. In `.kritika.yaml` the exclusion holds
+review someone asks for still runs. In `.kritique.yaml` the exclusion holds
 for that one too.
 
 A named exclusion shows in the skipped review's commit status:
-`kritika: skipped (filtered: skip-label)`.
+`kritique: skipped (filtered: skip-label)`.
 
 ## Limits
 
 A file that fails to parse is ignored as a whole, and noted rather than
-failing the review. Past any other limit, kritika leaves out, or cuts,
+failing the review. Past any other limit, kritique leaves out, or cuts,
 what does not fit, and notes it in the summary:
 
 | What                                             | Limit                                     |
 | ------------------------------------------------ | ----------------------------------------- |
-| `.kritika.yaml`, and each file it references     | 256 KiB                                   |
+| `.kritique.yaml`, and each file it references     | 256 KiB                                   |
 | all of them together                             | 1 MiB                                     |
 | the rules in the prompt                          | 16 KiB of rule text, 32 KiB of rule files |
 | skills                                           | 50 read                                   |

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/contextpack"
+	"github.com/perfectra1n/kritique/internal/contextpack"
 )
 
 const deltaDiff = `diff --git a/main.go b/main.go

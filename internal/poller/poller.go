@@ -1,11 +1,11 @@
 // Package poller backstops missed webhooks: on the leader, every interval
 // and per account, it lists the open pull requests, hands those updated
 // since the last poll to the ingest dispatcher as if a webhook had
-// delivered them, and closes the ones kritika holds open that the forge no
+// delivered them, and closes the ones kritique holds open that the forge no
 // longer lists. Review jobs are unique on the head SHA, so a head the
 // webhook already enqueued is skipped as a duplicate, never reviewed twice.
 // An account's first poll records the pull requests last updated before
-// kritika knew the account as a baseline instead of reviewing them: no
+// kritique knew the account as a baseline instead of reviewing them: no
 // webhook for them was missed, and on a large install reviewing them all
 // would be one burst of model calls nobody asked for.
 package poller
@@ -23,12 +23,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/ingest"
-	"github.com/home-operations/kritika/internal/metrics"
-	"github.com/home-operations/kritika/internal/store"
-	"github.com/home-operations/kritika/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/ingest"
+	"github.com/perfectra1n/kritique/internal/metrics"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // Poller lists open pull requests on a schedule.
@@ -90,7 +90,7 @@ func (p *Poller) Run(ctx context.Context) {
 // SyncRepositories registers the repositories each running connection's
 // App reaches on the accounts it serves, as a webhook from each would, so
 // they are known, polled and indexed without one: an App installed before
-// kritika started sends no installation event. The forge-reported
+// kritique started sends no installation event. The forge-reported
 // repositories an account's listing no longer has are disabled, in case
 // the webhook that said so was missed. A connection whose listing fails,
 // or takes longer than reachTimeout, is logged and left for the next poll,
@@ -219,7 +219,7 @@ func (p *Poller) Poll(ctx context.Context, file *configfile.File, account *confi
 			}
 		}
 		// Every open pull request is listed, not only those updated since
-		// the last poll: the ones kritika holds open and the forge no
+		// the last poll: the ones kritique holds open and the forge no
 		// longer lists have closed.
 		prs, err := client.ListOpenPullRequests(ctx, owner, name, time.Time{})
 		if err != nil {
@@ -268,7 +268,7 @@ func (p *Poller) Poll(ctx context.Context, file *configfile.File, account *confi
 const maxCloseChecks = 50
 
 // closeMissed records as closed the pull requests of repository r that
-// kritika holds open and listed, the forge's open ones, does not have: a
+// kritique holds open and listed, the forge's open ones, does not have: a
 // closed event that was never delivered would otherwise leave one open for
 // good. Each is asked for by number, so one opened since the listing is
 // left as it is, and one the forge no longer knows is left for a person,
@@ -350,7 +350,7 @@ const reactionWindow = 7 * 24 * time.Hour
 // open pull requests does not spend its API quota on them every poll.
 const reactionPulls = 30
 
-// pollReactions reads the 👍 and 👎 on the inline comments kritika posted
+// pollReactions reads the 👍 and 👎 on the inline comments kritique posted
 // on the account's recently reviewed pull requests, in the repositories
 // that run, into their findings. GitHub sends no webhook for a reaction.
 func (p *Poller) pollReactions(ctx context.Context, account *configfile.Account, in *configfile.Connection, runs map[string]bool) error {

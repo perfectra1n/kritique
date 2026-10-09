@@ -12,7 +12,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 
-	"github.com/home-operations/kritika/internal/gittest"
+	"github.com/perfectra1n/kritique/internal/gittest"
 )
 
 // repo builds a local repository with a base commit and two head commits:

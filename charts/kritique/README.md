@@ -1,0 +1,343 @@
+# kritique
+
+![Version](https://img.shields.io/static/v1?label=Version&message=0.0.51&color=informational&style=flat-square) <!-- x-release-please-version -->
+![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![AppVersion](https://img.shields.io/static/v1?label=AppVersion&message=0.0.51&color=informational&style=flat-square) <!-- x-release-please-version -->
+
+Self-hosted AI pull request reviewer for GitHub, backed by Postgres and per-review Kubernetes Jobs
+
+**Homepage:** <https://github.com/perfectra1n/kritique>
+
+## Usage
+
+kritique ships as an OCI Helm chart. It needs a Postgres with
+[VectorChord](https://github.com/tensorchord/VectorChord) and pgvector, three
+roles, its public URL, a way to sign in, and its configuration file:
+
+```sh
+helm install kritique oci://ghcr.io/perfectra1n/charts/kritique \
+  --set database.app.existingSecret=kritique-postgres-app \
+  --set database.owner.existingSecret=kritique-postgres-credentials \
+  --set database.runner.existingSecret=kritique-postgres-runner \
+  --values my-values.yaml
+```
+
+where `my-values.yaml` sets:
+
+```yaml
+config:
+  webUrl: https://kritique.example.com
+  authAdminPassword:
+    valueFrom:
+      secretKeyRef: { name: kritique-admin, key: password }
+  providersApiKey:
+    valueFrom:
+      secretKeyRef: { name: kritique-openrouter, key: api-key }
+  reviewModel: openrouter/vendor/large-model
+configFile:
+  apps:
+    github:
+      accounts: [org-1]
+      clientId: Iv1.example
+      privateKey: { env: GITHUB_APP_PRIVATE_KEY }
+      webhookSecret: { env: GITHUB_APP_WEBHOOK_SECRET }
+# A Secret with the keys GITHUB_APP_PRIVATE_KEY and GITHUB_APP_WEBHOOK_SECRET.
+envFrom:
+  - secretRef:
+      name: kritique-bot
+ingress:
+  enabled: true
+  hosts: [{ host: kritique.example.com, paths: [{ path: / }] }]
+  tls: [{ hosts: [kritique.example.com], secretName: kritique-tls }]
+```
+
+`config` is every `KRITIQUE_*` variable the chart does not derive from its
+other values, keyed by its name without the prefix in camelCase
+(`pollInterval` is `KRITIQUE_POLL_INTERVAL`): `webUrl`, the one public URL,
+with the dashboard at it and the webhook listener under it at `/hooks`;
+logging, the workers, polling, retention and runner Jobs' deadline and
+RuntimeClass; and the variables that stand in for the configuration file's
+sections, sign-in, one app, one provider, the review, confidence and
+trigger settings and the embedder (see
+[the configuration reference](https://github.com/perfectra1n/kritique/blob/main/docs/configuration.md)).
+A key left empty sets nothing and kritique's default applies; a secret
+takes a `valueFrom` map, like the admin password above, which is the way
+into a fresh instance. The chart's Ingress or HTTPRoute must route
+`webUrl`'s host.
+
+`configFile` is what is reviewed and how: sign-in (`auth`), the GitHub
+`apps`, model `providers`, the `embedding`, `egress`, the settings every
+repository gets (`review`, `confidence`, `trigger`, `comments`, `agent`),
+`repositories` entries keyed `owner/*` or `owner/name`, and `accounts`,
+with the `config` variables winning over it.
+
+- kritique reads it at startup: the pods carry its checksum, so a change
+  rolls them, and a pod whose file doesn't load never becomes ready while
+  the ones before it keep serving.
+- Secrets never go in it: it names environment variables, which `env` and
+  `envFrom` set from existing Secrets, the way any Kubernetes container's
+  environment is set.
+- The chart refuses a `KRITIQUE_*` variable under `env`, naming its
+  `config` key, and a `config` key for a variable it derives from its
+  other values, such as the addresses or the database.
+
+The
+[setup guide](https://github.com/perfectra1n/kritique/blob/main/docs/setup.md)
+covers creating the GitHub App, and the dashboard's setup checklist shows
+what a fresh instance still lacks.
+
+### Database
+
+The chart requires three Postgres roles, and kritique checks them at
+start:
+
+| Role        | Values                                                   | What it does                                             | kritique refuses one that                        |
+| ----------- | -------------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------- |
+| owner       | `database.owner.existingSecret`                          | runs migrations and applies configuration on the leader  | is a superuser                                  |
+| application | `database.app.existingSecret`, `database.app.role`       | serves everything else, under row-level security         | owns a table, is a superuser or has `BYPASSRLS` |
+| runner      | `database.runner.existingSecret`, `database.runner.role` | is handed to runner Jobs, and can only write its own run |                                                 |
+
+The `vchord` (VectorChord) and `vector` (pgvector, whose types it builds on)
+extensions must exist before the first start, and `vchord` must be in
+`shared_preload_libraries`.
+
+The owner and application connections must reach Postgres directly, or
+through a pooler in session mode. The leader is whichever replica holds a
+session advisory lock on its owner connection, and the dashboard's live
+updates and the job queue's notifications `LISTEN` on the application
+connection. A transaction-mode pooler, such as PgBouncer or a CloudNativePG
+`Pooler` with `poolMode: transaction`, hands a session to other clients
+between transactions, which breaks both. `kritique_leader` is 1 on the replica
+that holds the lock.
+
+[Postgres with CloudNativePG](https://kritique.perfectra1n.github.io/database/)
+sets this up end to end: a two-instance cluster with VectorChord mounted as
+an image volume extension, the extensions through a `Database` resource, the
+application and runner roles as `DatabaseRole` resources, the Secrets with
+their `uri` key for `database.*.existingSecret`, failover and backups.
+
+### Security
+
+Runner Jobs parse untrusted content and run what the model asks, so the
+chart confines them:
+
+- With `networkPolicy.enabled`, a runner pod reaches nothing but DNS,
+  Postgres and the egress gateway kritique serve runs on
+  `service.gatewayPort`, which allows what the configuration file's
+  `egress` lists and is the runner's only way to its model.
+- A runner holds no provider key or App key: only a GitHub token for its
+  run, a gateway token and the runner role's database URI.
+- `runner.tools` adds programs a review's `agent.commands` may run, from
+  their own images; `config.runnerRuntimeClass` puts runner Jobs under a
+  sandboxed runtime such as gVisor; `runner.resources` keeps a runaway run
+  in its own cgroup.
+
+[Security](https://kritique.perfectra1n.github.io/security/) covers the
+gateway, runner tools and the sandbox in full.
+
+### Topology
+
+The chart runs one Deployment of `kritique serve`, one replica by default.
+Its rolling update surges a new pod and takes the old one down only once the
+new one is ready, so a rollout, such as the one a changed `configFile`
+starts, keeps one serving on its own: a pod is ready only once its database
+answers and it serves webhooks. Every replica serves webhooks and
+the dashboard and works jobs, and one holds the leader lock at a time, so
+`replicas: 2` keeps one serving while a pod or node is lost; the chart then
+adds a PodDisruptionBudget so a drain takes one at a time. Until a lost
+replica is back, webhooks are refused; the next poll picks up the pull
+requests they missed, though not the mentions, which only a webhook
+delivers. Runner pods are the Jobs `kritique serve` creates, one per review,
+follow-up and index run, running `kritique run`. A replica that stops drains its jobs
+first; one that dies outright leaves them to the leader, which hands them
+back to the queue within a few minutes and deletes the runner Jobs they
+left, and a remaining replica works them.
+
+## Maintainers
+
+| Name | Email | Url |
+| ---- | ------ | --- |
+| home-operations | <contact@home-operations.com> |  |
+
+## Source Code
+
+* <https://github.com/perfectra1n/kritique>
+
+## Requirements
+
+Kubernetes: `>=1.25.0-0`
+
+## Values
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| affinity | object | `{}` | Affinity rules for pod scheduling. |
+| config.appsAccounts | string | `""` | The users and organizations the app serves, comma-separated; set it to declare the app here. |
+| config.appsClientId | string | `""` | The GitHub App's client id, inline or from a Secret. |
+| config.appsName | string | `""` | The app's name, which is its webhook path, `/hooks/<name>`; `github` unless set. |
+| config.appsPrivateKey | string | `""` | The GitHub App's private key (PEM), from a Secret. |
+| config.appsWebhookSecret | string | `""` | The GitHub App's webhook secret, from a Secret. |
+| config.authAdminPassword | string | `""` | The local admin's password, from a Secret. The local admin exists only while one is set: the way into a fresh instance, and a way in when every provider is down. |
+| config.authAdminUser | string | `""` | The local admin's username; `admin` unless set. |
+| config.authGithubClientId | string | `""` | Client id for signing in with GitHub, inline or from a Secret: an OAuth App's, or the GitHub App's own; set it to sign in through GitHub. |
+| config.authGithubClientSecret | string | `""` | Client secret for signing in with GitHub, from a Secret. |
+| config.authGithubRoleMappingExpr | string | `""` | CEL expression mapping a GitHub sign-in to a kritique role, e.g. `login == "user-1" ? "admin" : ""`. |
+| config.authOidcClientId | string | `""` | OIDC client id, inline or from a Secret. |
+| config.authOidcClientSecret | string | `""` | OIDC client secret, from a Secret. |
+| config.authOidcDefaultRole | string | `""` | Role of an OIDC sign-in the mapping gives none; none unless set. |
+| config.authOidcIssuer | string | `""` | OpenID Connect issuer, an https URL; set it to sign in through OIDC. |
+| config.authOidcName | string | `""` | Label of the OIDC provider on the sign-in page; "SSO" unless set. |
+| config.authOidcRoleMappingExpr | string | `""` | CEL expression mapping an OIDC sign-in to a kritique role, `admin`, `member` or "" for none, e.g. `"kritique-admins" in roles ? "admin" : "member"`. |
+| config.authOidcRolesClaim | string | `""` | The ID token claim holding the person's roles or groups, read by `authOidcRoleMappingExpr`. |
+| config.authOidcScopes | string | `""` | OIDC scopes, comma-separated; `openid,email,profile` unless set. |
+| config.authSessionTtl | string | `""` | How long a dashboard session lasts, between 5m and 720h; 12h unless set. |
+| config.confidenceEffort | string | `""` | How hard the confidence model, and the fallback that takes its call, reasons: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; the provider's default unless set. |
+| config.confidenceFallback | string | `""` | The model the scorer's call falls back to when the confidence model fails. |
+| config.confidenceGate | string | `""` | `true` fails the commit status under the threshold, so it can be a required check; off unless set, when the status reports the score and passes. |
+| config.confidenceModel | string | `""` | The model that scores each reviewed pull request from 0 to 5, `<provider>/<model>`; nothing is scored unless set. |
+| config.confidenceRisk | string | `""` | The highest risk a change may be rated and still be approved: `low`, `medium`, `high` or `critical`; `low` unless set. |
+| config.confidenceThreshold | string | `""` | The score a pull request must reach to be approved and, with the gate, for its commit status to pass, 0 to 5; 5 unless set. |
+| config.diffRetention | string | `""` | How long a review keeps the diff it was made from, the context it read and the repository files it named, at least 24h; 720h unless set. |
+| config.embeddingDims | string | `""` | The embedding's dimensions, which the model must produce. |
+| config.embeddingModel | string | `""` | The embedding model, `<provider>/<model>`; set it to index each repository for similar code. |
+| config.gatewayTokenTtl | string | `""` | How long a run's gateway token outlives its Job's deadline, in case the replica that minted it dies before revoking it; 1h unless set. |
+| config.indexGrace | string | `""` | How long the index of a repository that stopped running is kept; 720h unless set. |
+| config.indexWorkers | string | `""` | Index jobs one replica runs at once, rate-limited apart from reviews so onboarding a large account cannot starve them; 1 unless set. |
+| config.leaderRetryInterval | string | `""` | How often a replica retries the leader lock, and the holder checks it still has it; 15s unless set. |
+| config.logFormat | string | `"json"` | Log format: json or text. |
+| config.logLevel | string | `"info"` | Log level: debug, info, warn or error. |
+| config.onboardWindow | string | `""` | Onboarding index jobs the leader keeps queued or running at once; 4 unless set. |
+| config.pollInterval | string | `""` | How often the leader lists each app's open pull requests, its backstop for missed webhooks; `0s` turns it off; 10m unless set. |
+| config.pollLookback | string | `""` | How far back a first or long-idle poll looks; 24h unless set. |
+| config.providersApiKey | string | `""` | The provider's API key, from a Secret; set it to declare the provider here. |
+| config.providersBaseUrl | string | `""` | The provider's base URL, for an OpenAI-compatible endpoint; the type's own unless set. |
+| config.providersName | string | `""` | The provider's name, which models are addressed through as `<name>/<model>`; `openrouter` unless set. |
+| config.providersRetries | string | `""` | How many more times a review's model step, the scorer's call or a split review's summary call is tried when the provider fails it in a way another attempt may not (a 5xx, a 429, a timeout), with backoff; 0 unless set, at most 5. |
+| config.providersType | string | `""` | The provider's type, `openrouter`, `openai`, `anthropic` or `opencode`; the name unless set, when the name is one of those. |
+| config.reviewApprove | string | `""` | `true` has a review that finds nothing blocking or important approve the pull request, or, with a confidence model, one whose score and risk allow it, and dismisses that approval when a later review's do not; off unless set. |
+| config.reviewCost | string | `""` | `true` ends the summary's footer with what the pull request's reviews have cost together; off unless set. |
+| config.reviewDiagram | string | `""` | `true` has the summary draw the flow the change adds or alters as a Mermaid diagram; off unless set. |
+| config.reviewEffort | string | `""` | How hard the review model, and the fallback that takes its step, reasons: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; the provider's default unless set. |
+| config.reviewFallback | string | `""` | The model a review falls back to when the review model fails. |
+| config.reviewFixes | string | `""` | `true` requires a suggested fix on every finding; off unless set. |
+| config.reviewIncremental | string | `""` | How many files may change since the last review before a re-review covers the whole pull request again; 25 unless set. |
+| config.reviewModel | string | `""` | The model every review runs on unless a repository names another, `<provider>/<model>`. |
+| config.reviewWorkers | string | `""` | Review jobs one replica runs at once, each holding a runner pod open; 2 unless set. |
+| config.runnerDeadline | string | `""` | A runner Job's deadline; 15m unless set. |
+| config.runnerRuntimeClass | string | `""` | RuntimeClass runner Jobs run under, e.g. `gvisor` or a Kata class; the cluster default unless set. Advised: a runner parses untrusted repository content and runs what the model asks. |
+| config.transcriptRetention | string | `""` | How long a review's full model transcript is kept, at least 24h; 720h unless set. |
+| config.triggerLimit | string | `""` | How many automatic reviews a pull request gets before kritique pauses them, so a long-lived pull request stops spending on every push; unlimited unless set. |
+| config.triggerSettle | string | `""` | How long a review waits after a push, so a burst of pushes collapses onto the last one before anything is spent, e.g. `30s`; immediate unless set. |
+| config.webUrl | required | `""` | Public URL the dashboard is reached at, e.g. https://kritique.example.com; the webhooks share it under `/hooks/<app name>`. Must be an absolute http(s) URL with no query or fragment. GitHub delivers webhooks to it and sign-in redirects back to it, so the chart's Ingress or HTTPRoute must route this name. |
+| configFile | optional | `{}` | The configuration file, as YAML: what is reviewed and how, from `auth` and `apps` to `repositories` and `accounts`. Passed through verbatim, not tpl'd. See docs/configuration.md. |
+| database.app.existingSecret | required | `""` | Secret holding the application role's connection URI. |
+| database.app.key | string | `"uri"` | Key in that Secret. |
+| database.app.role | string | `"kritique_app"` | Name of the application role, asserted at startup (not superuser, no BYPASSRLS, owns nothing). |
+| database.owner.existingSecret | required | `""` | Secret holding the owner role's connection URI, used only by the leader for migrations and configuration sync. |
+| database.owner.key | string | `"uri"` | Key in that Secret. |
+| database.runner.existingSecret | required | `""` | Secret holding the runner role's connection URI; referenced by runner Jobs, never read by kritique serve. |
+| database.runner.key | string | `"uri"` | Key in that Secret. |
+| database.runner.role | string | `"kritique_runner"` | Name of the runner role, granted only what runner Jobs need. |
+| deploymentAnnotations | object | `{}` | Annotations added to the Deployment (e.g. `reloader.stakater.com/auto: "true"`). Pod-level annotations go in `podAnnotations`. |
+| env | object | `{}` | Environment variables of the kritique serve container, keyed by name: a plain value, or a map with the variable's `valueFrom` (a Secret, a ConfigMap or a field). Rendered through `tpl`. |
+| envFrom | list | `[]` | Secrets and ConfigMaps loaded as environment variables in bulk, each key a variable: the Kubernetes `envFrom` list. A Secret whose keys are the variable names the configuration file references sets them all at once. |
+| existingConfigMap | string | `""` | Existing ConfigMap holding the file under the `config.yaml` key; takes precedence over `configFile`. A change to it takes a restart. |
+| fullnameOverride | string | `""` | Override the full release name. |
+| httpRoute.additionalRules | list | `[]` | Custom rules prepended before the default rule (templated). |
+| httpRoute.annotations | object | `{}` | HTTPRoute annotations. |
+| httpRoute.apiVersion | string | `""` | HTTPRoute apiVersion; empty defaults to gateway.networking.k8s.io/v1. |
+| httpRoute.enabled | bool | `false` | Expose the public Service through a Gateway API HTTPRoute (alternative to ingress). |
+| httpRoute.filters | list | `[]` | Filters applied to the default rule. |
+| httpRoute.hostnames | list | `[]` | Hostnames matched against the Host header; `config.webUrl`'s host (templated). |
+| httpRoute.httpsRedirect | bool | `false` | Redirect HTTP to HTTPS (301) instead of routing to the backend (needs HTTP+HTTPS listeners). |
+| httpRoute.kind | string | `""` | HTTPRoute kind; empty defaults to HTTPRoute. |
+| httpRoute.labels | object | `{}` | HTTPRoute labels. |
+| httpRoute.matches | list | `[{"path":{"type":"PathPrefix","value":"/"}}]` | Match conditions for the default rule. |
+| httpRoute.parentRefs | list | `[]` | Gateways (and listeners) this route attaches to. |
+| image.digest | string | `""` | Pin the image by digest (sha256:…); when set, overrides the tag. The release pipeline fills it with the published image's digest. |
+| image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
+| image.repository | string | `"ghcr.io/perfectra1n/kritique"` | Image repository. |
+| image.tag | string | `""` | Overrides the image tag; defaults to the chart appVersion. |
+| imagePullSecrets | list | `[]` | Image pull secrets for private registries, for the kritique serve pods and, through the runner ServiceAccount, runner Jobs and the tool images they mount. |
+| ingress.annotations | object | `{}` | Ingress annotations. |
+| ingress.className | string | `""` | IngressClass name. |
+| ingress.enabled | bool | `false` | Expose the public Service through an Ingress. |
+| ingress.hosts | list | `[{"host":"kritique.example.com","paths":[{"path":"/","pathType":"Prefix"}]}]` | Ingress hosts and their paths; the host is `config.webUrl`'s. |
+| ingress.tls | list | `[]` | Ingress TLS configuration. |
+| livenessProbe | object | `{"httpGet":{"path":"/healthz","port":"metrics"},"periodSeconds":20}` | Liveness probe, on the metrics port. |
+| monitoring.dashboards.annotations | object | `{}` | Annotations added to the dashboard ConfigMap (templated). |
+| monitoring.dashboards.enabled | bool | `false` | Render the Grafana dashboard ConfigMap (for the kube-prometheus-stack sidecar or grafana-operator): kritique's health, intake, reviews, model spend, runner Jobs and database pools, from the metrics the ServiceMonitor scrapes. |
+| monitoring.dashboards.grafanaOperator.allowCrossNamespaceImport | bool | `true` | Allow a Grafana in any namespace to import this GrafanaDashboard. |
+| monitoring.dashboards.grafanaOperator.enabled | bool | `false` | Render a GrafanaDashboard CR (grafana-operator) referencing the ConfigMap, instead of relying on the sidecar label. |
+| monitoring.dashboards.grafanaOperator.folder | string | `""` | Folder to create the dashboard in (templated); empty uses the Grafana default. |
+| monitoring.dashboards.grafanaOperator.matchLabels | object | `{}` | Label selector matching the target Grafana instance (templated; required when grafanaOperator is enabled). |
+| monitoring.dashboards.grafanaOperator.resyncPeriod | string | `"10m"` | Resync period for the operator to re-check the dashboard. |
+| monitoring.dashboards.labels | object | `{}` | Labels added to the dashboard ConfigMap (templated). |
+| monitoring.dashboards.namespace | string | `""` | Namespace for the dashboard objects; defaults to the release namespace. |
+| monitoring.prometheusRule.additionalRuleAnnotations | object | `{}` | Extra annotations on every alert rule. |
+| monitoring.prometheusRule.additionalRuleLabels | object | `{}` | Extra labels on every alert rule, e.g. a routing label for Alertmanager. The rule's own `severity` wins. |
+| monitoring.prometheusRule.annotations | object | `{}` | PrometheusRule annotations. |
+| monitoring.prometheusRule.configDriftFor | string | `"15m"` | How long a replica's configuration file may differ from the applied one before KritiqueConfigDrift fires; a rollout drifts briefly until the new leader applies its file. |
+| monitoring.prometheusRule.configErrorFor | string | `"5m"` | How long the leader's latest apply of the configuration may stay refused before KritiqueConfigError fires. |
+| monitoring.prometheusRule.enabled | bool | `false` | Create a Prometheus Operator PrometheusRule with kritique's alerts (requires its CRDs): no leader, more than one leader, a configuration the leader could not apply, and a replica whose configuration file drifted from the applied one. |
+| monitoring.prometheusRule.labels | object | `{}` | PrometheusRule labels. |
+| monitoring.prometheusRule.multipleLeadersFor | string | `"2m"` | How long more than one replica may report the lock before KritiqueMultipleLeaders fires. A database failover can show two for one leader retry interval. |
+| monitoring.prometheusRule.noLeaderFor | string | `"5m"` | How long no replica may hold the leader lock before KritiqueNoLeader fires. A standby takes the lock within one leader retry interval of the database answering, and a dead leader's session is dropped by Postgres within about a minute. |
+| monitoring.serviceMonitor.annotations | object | `{}` | ServiceMonitor annotations. |
+| monitoring.serviceMonitor.enabled | bool | `false` | Create a Prometheus Operator ServiceMonitor for the metrics Service (requires its CRDs). |
+| monitoring.serviceMonitor.interval | string | `"30s"` | Scrape interval. |
+| monitoring.serviceMonitor.labels | object | `{}` | ServiceMonitor labels. |
+| monitoring.serviceMonitor.metricRelabelings | list | `[]` | Prometheus metric relabelings. |
+| monitoring.serviceMonitor.relabelings | list | `[]` | Prometheus relabelings. |
+| monitoring.serviceMonitor.scrapeTimeout | string | `"10s"` | Scrape timeout. |
+| nameOverride | string | `""` | Override the chart name used in resource names. |
+| networkPolicy.allowDNS | bool | `true` | Allow DNS egress (UDP/TCP 53); the Cilium flavor allows it to kube-dns alone. |
+| networkPolicy.egressPorts | list | `[443]` | TCP ports the service pods may egress to for forges and model endpoints. Runner pods reach the gateway alone. |
+| networkPolicy.enabled | bool | `false` | Create the NetworkPolicies. |
+| networkPolicy.postgresPort | int | `5432` | Postgres port allowed for egress. |
+| networkPolicy.type | string | `"default"` | Policy flavor for your CNI: "default" (networking.k8s.io/v1 NetworkPolicy), "cilium" (CiliumNetworkPolicy) or "calico" (projectcalico.org/v3 NetworkPolicy). |
+| nodeSelector | object | `{}` | Node selector for pod scheduling. |
+| podAnnotations | object | `{}` | Annotations added to the pods. |
+| podDisruptionBudget.enabled | bool | `true` | Create a PodDisruptionBudget when there is more than one replica. |
+| podDisruptionBudget.maxUnavailable | int | `1` | Maximum pods that may be unavailable, as a count or percentage; takes precedence over `minAvailable` when set. |
+| podDisruptionBudget.minAvailable | string | `""` | Minimum pods that must stay available, as a count or percentage. Used unless `maxUnavailable` is set. |
+| podLabels | object | `{}` | Labels added to the pods. |
+| podSecurityContext | object | `{"runAsGroup":65532,"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod-level securityContext (non-root uid/gid 65532, RuntimeDefault seccomp). |
+| priorityClassName | string | `""` | PriorityClass for the pods. Empty uses the cluster default. |
+| rbac.create | bool | `true` | Create the Role and RoleBinding kritique serve needs: Jobs in the release namespace, their pods and logs, and the Secrets it hands them. Nothing cluster-wide. |
+| readinessProbe | object | `{"httpGet":{"path":"/readyz","port":"metrics"},"periodSeconds":10}` | Readiness probe, on the metrics port. A replica is ready once its configuration file has loaded, the database answers and it serves webhooks and the dashboard, so a rollout takes the previous pod down only once the new one can hold a delivery. |
+| replicas | int | `1` | Replicas of kritique serve. Every replica serves webhooks and the dashboard and works jobs; exactly one holds the leader lock at a time. A rollout keeps one serving on its own; set 2 for one to keep serving while a pod or node is lost. |
+| resources | object | `{"limits":{"memory":"512Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | Resource requests and limits of the kritique serve pods. |
+| runner.image.digest | string | `""` | Pin the runner image by digest (sha256:…); when set, overrides the tag. The release pipeline fills it with the published `-tools` image's digest. |
+| runner.image.pullPolicy | string | `"IfNotPresent"` | Runner image pull policy (KRITIQUE_RUNNER_IMAGE_PULL_POLICY). |
+| runner.image.repository | string | `"ghcr.io/perfectra1n/kritique"` | Runner image repository. |
+| runner.image.tag | string | `""` | Overrides the runner image tag; defaults to the chart appVersion with `-tools` appended. |
+| runner.resources | object | `{}` | Resources for runner pods (KRITIQUE_RUNNER_RESOURCES), copied into the pod spec. |
+| runner.serviceAccount.annotations | object | `{}` | Annotations for the runner ServiceAccount. |
+| runner.serviceAccount.create | bool | `true` | Create the runner ServiceAccount: no permissions, no token mounted, and the chart's `imagePullSecrets` so runner Jobs can pull from a private registry. |
+| runner.serviceAccount.name | string | `""` | Runner ServiceAccount name; generated from the release name if empty. |
+| runner.tools | list | `[]` | Command-line tools a runner pod mounts from an image for the agent's run tool (KRITIQUE_RUNNER_TOOLS), each a `name`, a digest-pinned `image`, the `path` of its binaries and the `commands` it provides. Needs Kubernetes 1.33 or newer, which mounts an image volume with a subPath; the chart refuses to render them on an older cluster. |
+| runner.ttl | string | `"10m"` | How long a finished Job stays for kubectl before Kubernetes removes it (Go duration); the run row keeps everything the Job knew. |
+| securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}` | Container securityContext (no privilege escalation, read-only root filesystem, drops ALL capabilities). |
+| service.gatewayPort | int | `8082` | Port of the gateway the kritique serve pods run, on the pods and its Service: the forward proxy runner Jobs are handed as `HTTPS_PROXY`, allowing only the hosts the configuration names (github.com once an app is configured, `egress.allow` less `egress.deny`), so runner pods need no direct internet egress, and the model and similar-code endpoints a runner calls with a per-run token, so no provider key enters a runner pod. |
+| service.metricsPort | int | `8081` | Metrics and probe port. |
+| service.port | int | `8080` | Public port: the webhooks (`POST /hooks/{app}`) and the dashboard. |
+| service.type | string | `"ClusterIP"` | Service type of the public Service. |
+| serviceAccount.annotations | object | `{}` | Annotations for the ServiceAccount. |
+| serviceAccount.automount | bool | `true` | Automount the API token, which kritique serve needs to create runner Jobs. |
+| serviceAccount.create | bool | `true` | Create the ServiceAccount kritique serve runs as. |
+| serviceAccount.name | string | `""` | ServiceAccount name; generated from the release name if empty. |
+| startupProbe | object | `{"failureThreshold":30,"httpGet":{"path":"/healthz","port":"metrics"},"periodSeconds":2}` | Startup probe, on the metrics port. The liveness and readiness probes wait until it passes, so a pod still opening its listeners is not reported unready; it allows a minute. |
+| strategy | object | `{"rollingUpdate":{"maxSurge":1,"maxUnavailable":0},"type":"RollingUpdate"}` | Deployment update strategy. A rolling update that surges one pod and takes none down keeps a replica serving while each is replaced. Helm merges maps, so a switch to `Recreate` also sets `rollingUpdate: null`. |
+| terminationGracePeriodSeconds | int | `200` | Grace period for a clean shutdown: kritique serve keeps accepting webhooks, dashboard requests and model steps for 5s while traffic moves off the pod, stops taking jobs and lets running ones finish for up to 100s, then takes up to 90s to hand back the reviews it cut for a retry, and its gateway lets model steps in flight finish for up to 2m. |
+| tests.image.pullPolicy | string | `"IfNotPresent"` | `helm test` image pull policy. |
+| tests.image.repository | string | `"mirror.gcr.io/curlimages/curl"` | `helm test` connection-pod image; a gcr-mirrored curl, so the test never pulls from Docker Hub. |
+| tests.image.tag | string | `"8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777"` | `helm test` image, pinned as `tag@sha256:digest` so Renovate bumps the tag and its digest together. |
+| tolerations | list | `[]` | Tolerations for pod scheduling. |
+| topologySpreadConstraints | list | `[{"labelSelector":{"matchLabels":{"app.kubernetes.io/instance":"{{ .Release.Name }}","app.kubernetes.io/name":"{{ include \"kritique.name\" . }}"}},"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"ScheduleAnyway"}]` | Spread the kritique serve pods across nodes, so with `replicas: 2` a node loss takes one of them: a soft constraint, so a one-node cluster still schedules them. Rendered through `tpl`; empty leaves scheduling to Kubernetes. |
+| volumeMounts | list | `[]` | Additional volume mounts on the kritique serve container. |
+| volumes | list | `[]` | Additional volumes on the Deployment. |
+
+---
+
+_This README is generated by [helm-docs](https://github.com/norwoodj/helm-docs) from `Chart.yaml` and `values.yaml`. Edit those (or `README.md.gotmpl`) and run `mise run generate`._

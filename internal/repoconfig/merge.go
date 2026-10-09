@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/model"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 // Merged is the admin's settings with the merge-base FileName applied.

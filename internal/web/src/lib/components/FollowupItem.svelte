@@ -40,7 +40,7 @@
       <a class="external" href={asked} target="_blank" rel="noopener noreferrer">The question on GitHub <Icon path={mdiOpenInNew} size={11} /></a>
     {/if}
     {#if answered}
-      <a class="external" href={answered} target="_blank" rel="noopener noreferrer">kritika's reply <Icon path={mdiOpenInNew} size={11} /></a>
+      <a class="external" href={answered} target="_blank" rel="noopener noreferrer">kritique's reply <Icon path={mdiOpenInNew} size={11} /></a>
     {/if}
   </p>
   {#if open}

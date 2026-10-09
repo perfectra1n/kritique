@@ -7,7 +7,7 @@ import (
 	"encoding/pem"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 )
 
 func TestAppCacheSharesAnAppPerConnection(t *testing.T) {

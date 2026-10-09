@@ -38,7 +38,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${REVISION}" \
-    -o kritika ./cmd/kritika
+    -o kritique ./cmd/kritique
 
 # ---- Runner tools -----------------------------------------------------------
 # The release builds of the tools the -tools image puts on PATH, installed by
@@ -59,19 +59,19 @@ RUN mise trust && mise install --locked \
     && mkdir /out && mise bin-paths | xargs -I{} cp -rL {}/. /out/
 
 # ---- Runtime with runner tools ----------------------------------------------
-# kritika with the agent's commands on PATH for its run tool, the chart's
+# kritique with the agent's commands on PATH for its run tool, the chart's
 # runner image for runner Jobs. Built with --target tools; published as the
 # -tools tag of each release. Distroless with glibc, libgcc and libstdc++ for
 # the tools' release builds, and no shell or package manager, so those
 # commands are the only other programs a pod can start.
 FROM gcr.io/distroless/cc:nonroot AS tools
 COPY --from=runner-tools /out/ /usr/local/bin/
-COPY --from=builder /workspace/kritika /kritika
-ENTRYPOINT ["/kritika"]
+COPY --from=builder /workspace/kritique /kritique
+ENTRYPOINT ["/kritique"]
 
 # ---- Runtime --------------------------------------------------------------
 # The default target, last so a build without --target produces it.
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
-COPY --from=builder /workspace/kritika /kritika
-ENTRYPOINT ["/kritika"]
+COPY --from=builder /workspace/kritique /kritique
+ENTRYPOINT ["/kritique"]

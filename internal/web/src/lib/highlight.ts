@@ -82,7 +82,7 @@ async function highlighter(lang: string): Promise<HighlighterCore> {
       import('shiki/engine/javascript'),
     ]);
     return createHighlighterCore({
-      themes: [createCssVariablesTheme({ name: 'kritika', variablePrefix: '--code-' })],
+      themes: [createCssVariablesTheme({ name: 'kritique', variablePrefix: '--code-' })],
       langs: [],
       engine: createJavaScriptRegexEngine(),
     });
@@ -103,7 +103,7 @@ async function highlighter(lang: string): Promise<HighlighterCore> {
 export async function highlight(code: string, lang: string | undefined): Promise<Token[][] | undefined> {
   if (!lang || !(lang in LANGUAGES) || code.length > MAX_BYTES) return undefined;
   const h = await highlighter(lang);
-  const { tokens, fg } = h.codeToTokens(code, { lang, theme: 'kritika' });
+  const { tokens, fg } = h.codeToTokens(code, { lang, theme: 'kritique' });
   return tokens.map((line) =>
     line.map((t) => ({
       text: t.content,

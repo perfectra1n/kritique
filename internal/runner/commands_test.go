@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/agent"
+	"github.com/perfectra1n/kritique/internal/agent"
 )
 
 func TestCommandEnv(t *testing.T) {
@@ -17,7 +17,7 @@ func TestCommandEnv(t *testing.T) {
 		t.Setenv(name, "")
 	}
 	t.Setenv("PATH", "/usr/local/bin:/usr/bin")
-	t.Setenv("KRITIKA_GIT_TOKEN", "secret")
+	t.Setenv("KRITIQUE_GIT_TOKEN", "secret")
 
 	env, proxied := commandEnv("/tmp/home")
 	if proxied || !slices.Equal(env, []string{"PATH=/usr/local/bin:/usr/bin", "HOME=/tmp/home"}) {

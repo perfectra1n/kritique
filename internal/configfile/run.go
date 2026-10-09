@@ -11,41 +11,41 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
-	"github.com/home-operations/kritika/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
 )
 
-// Run is how kritika runs rather than how it reviews, set by the environment
+// Run is how kritique runs rather than how it reviews, set by the environment
 // and so by the chart's values, not the configuration file. A restart, not
 // a reload, changes it.
 type Run struct {
 	// PollInterval is how often the leader lists each app's open pull
 	// requests, its backstop for missed webhooks; 0s turns polling off.
-	PollInterval time.Duration `env:"KRITIKA_POLL_INTERVAL" envDefault:"10m"`
+	PollInterval time.Duration `env:"KRITIQUE_POLL_INTERVAL" envDefault:"10m"`
 	// PollLookback bounds how far back a first or long-idle poll looks, so a
 	// long outage does not list every open pull request's history at once.
-	PollLookback time.Duration `env:"KRITIKA_POLL_LOOKBACK" envDefault:"24h"`
+	PollLookback time.Duration `env:"KRITIQUE_POLL_LOOKBACK" envDefault:"24h"`
 	// OnboardWindow is how many onboarding index jobs the leader keeps
 	// queued or running at once; accounts take turns, and the repositories
 	// whose pull requests moved last go first.
-	OnboardWindow int `env:"KRITIKA_ONBOARD_WINDOW" envDefault:"4"`
+	OnboardWindow int `env:"KRITIQUE_ONBOARD_WINDOW" envDefault:"4"`
 	// IndexGrace is how long the index of a repository that stopped running
 	// is kept, so turning it back on within the window reuses the index.
-	IndexGrace time.Duration `env:"KRITIKA_INDEX_GRACE" envDefault:"720h"`
+	IndexGrace time.Duration `env:"KRITIQUE_INDEX_GRACE" envDefault:"720h"`
 	// TranscriptRetention is how long a review's transcript is
 	// kept; at least a day, since members read it after the review.
-	TranscriptRetention time.Duration `env:"KRITIKA_TRANSCRIPT_RETENTION" envDefault:"720h"`
+	TranscriptRetention time.Duration `env:"KRITIQUE_TRANSCRIPT_RETENTION" envDefault:"720h"`
 	// DiffRetention is how long a review keeps the diff it was made from,
 	// the context it read and the repository files it named; at least a
 	// day, since members read them after the review. The review and its
 	// findings stay.
-	DiffRetention time.Duration `env:"KRITIKA_DIFF_RETENTION" envDefault:"720h"`
+	DiffRetention time.Duration `env:"KRITIQUE_DIFF_RETENTION" envDefault:"720h"`
 	// RunnerDeadline bounds a runner Job, and RunnerResources are copied
 	// verbatim into its pod spec, a JSON object of requests and limits.
-	RunnerDeadline  time.Duration `env:"KRITIKA_RUNNER_DEADLINE" envDefault:"15m"`
-	RunnerResources jsonObject    `env:"KRITIKA_RUNNER_RESOURCES"`
+	RunnerDeadline  time.Duration `env:"KRITIQUE_RUNNER_DEADLINE" envDefault:"15m"`
+	RunnerResources jsonObject    `env:"KRITIQUE_RUNNER_RESOURCES"`
 	// Tools are the command-line tools a runner pod may mount from an image
 	// for the agent's run tool, a JSON list.
-	Tools toolList `env:"KRITIKA_RUNNER_TOOLS"`
+	Tools toolList `env:"KRITIQUE_RUNNER_TOOLS"`
 }
 
 // jsonObject is a JSON object from the environment, kept as loose maps
@@ -77,19 +77,19 @@ func loadRun() (Run, error) {
 	}
 	switch {
 	case r.PollInterval < 0 || r.PollLookback < 0:
-		return Run{}, errors.New("configfile: KRITIKA_POLL_INTERVAL and KRITIKA_POLL_LOOKBACK must not be negative")
+		return Run{}, errors.New("configfile: KRITIQUE_POLL_INTERVAL and KRITIQUE_POLL_LOOKBACK must not be negative")
 	case r.OnboardWindow < 1:
-		return Run{}, errors.New("configfile: KRITIKA_ONBOARD_WINDOW must be positive")
+		return Run{}, errors.New("configfile: KRITIQUE_ONBOARD_WINDOW must be positive")
 	case r.IndexGrace < 0:
-		return Run{}, errors.New("configfile: KRITIKA_INDEX_GRACE must not be negative")
+		return Run{}, errors.New("configfile: KRITIQUE_INDEX_GRACE must not be negative")
 	case r.TranscriptRetention < minRetention:
-		return Run{}, fmt.Errorf("configfile: KRITIKA_TRANSCRIPT_RETENTION must be at least %s", minRetention)
+		return Run{}, fmt.Errorf("configfile: KRITIQUE_TRANSCRIPT_RETENTION must be at least %s", minRetention)
 	case r.DiffRetention < minRetention:
-		return Run{}, fmt.Errorf("configfile: KRITIKA_DIFF_RETENTION must be at least %s", minRetention)
+		return Run{}, fmt.Errorf("configfile: KRITIQUE_DIFF_RETENTION must be at least %s", minRetention)
 	case r.RunnerDeadline <= 0:
-		return Run{}, errors.New("configfile: KRITIKA_RUNNER_DEADLINE must be positive")
+		return Run{}, errors.New("configfile: KRITIQUE_RUNNER_DEADLINE must be positive")
 	case r.RunnerDeadline > jobtimeout.MaxRunnerDeadline:
-		return Run{}, fmt.Errorf("configfile: KRITIKA_RUNNER_DEADLINE must not exceed %s, "+
+		return Run{}, fmt.Errorf("configfile: KRITIQUE_RUNNER_DEADLINE must not exceed %s, "+
 			"or River's %s job timeout cap would cut the runner off early", jobtimeout.MaxRunnerDeadline, jobtimeout.MaxJobTimeout)
 	}
 	return r, validateTools(r.Tools)

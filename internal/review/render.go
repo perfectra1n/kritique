@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // MaxRenderBytes bounds a rendered comment, marker included. GitHub rejects
@@ -83,7 +83,7 @@ type RenderData struct {
 	// Confidence is the score a second model gave the pull request, nil
 	// when the repository asks for none or the scorer did not answer.
 	Confidence *Confidence
-	// Approval is what became of kritika's approval of the head, nil
+	// Approval is what became of kritique's approval of the head, nil
 	// where the repository does not have it approve.
 	Approval *Approval
 	// WebURL is the dashboard's origin, without a trailing slash, and
@@ -93,7 +93,7 @@ type RenderData struct {
 	WebURL, PullURL string
 }
 
-// Approval is whether the reviewed head stands approved by kritika, and
+// Approval is whether the reviewed head stands approved by kritique, and
 // the reason, "" where the summary states it already: an approval a
 // confidence score decided says nothing the score's own line does not.
 type Approval struct {
@@ -152,7 +152,7 @@ var (
 	errSandbox  = errors.New("review: template exceeded a sandbox limit")
 )
 
-// RenderSummary renders the sticky comment. kritika's marker always leads,
+// RenderSummary renders the sticky comment. kritique's marker always leads,
 // whatever the template does, so sticky discovery cannot be defeated by a
 // template. When the repository's template fails, the default is used and
 // the returned note, also shown in the comment, says why.
@@ -170,9 +170,9 @@ func RenderSummary(ctx context.Context, t Templates, d RenderData) (body string,
 	}
 	out, err := render(context.WithoutCancel(ctx), defaultSummary, d, limit)
 	if err != nil {
-		// The default renders data kritika bounds itself; failing here is a
+		// The default renders data kritique bounds itself; failing here is a
 		// bug, but the comment must still carry the marker and the take.
-		out = textcut.Prefix(fmt.Sprintf("## Kritika Review\n\n%s\n", d.Result.Summary.Take), limit)
+		out = textcut.Prefix(fmt.Sprintf("## Kritique Review\n\n%s\n", d.Result.Summary.Take), limit)
 	}
 	return marker + out, notes
 }
@@ -206,7 +206,7 @@ func fallbackNote(which string, err error) string {
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		why = "ran out of time"
 	}
-	return fmt.Sprintf("The repository's %s template %s, so kritika's default was used", which, why)
+	return fmt.Sprintf("The repository's %s template %s, so kritique's default was used", which, why)
 }
 
 // render parses and executes src in a sandbox, bounded by ctx and

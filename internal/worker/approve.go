@@ -6,8 +6,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // approve approves the head when the review's verdict allows it (see
@@ -33,7 +33,7 @@ func (p *publishPhase) approve(ctx context.Context, counts review.Counts, curren
 			ok, why = false, "a reviewer has requested changes"
 		}
 	}
-	at := fmt.Sprintf("kritika: %s at %s.", why, review.ShortSHA(p.pr.headSHA))
+	at := fmt.Sprintf("kritique: %s at %s.", why, review.ShortSHA(p.pr.headSHA))
 	switch {
 	case ok && !current:
 		p.logger.Info("pull request not approved: its head moved during the review")
@@ -64,7 +64,7 @@ func (p *publishPhase) approve(ctx context.Context, counts review.Counts, curren
 	}
 }
 
-// approvable reports whether a review's verdict lets kritika approve the
+// approvable reports whether a review's verdict lets kritique approve the
 // pull request, and what the approval rests on or why it is withheld.
 // Where the repository asks for no confidence score that is the findings:
 // nothing blocking and nothing important. Where it asks for one, the score

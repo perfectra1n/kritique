@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
-	"github.com/home-operations/kritika/internal/store"
-	"github.com/home-operations/kritika/internal/store/storetest"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
 )
 
 func randomHex(t *testing.T) string {
@@ -42,23 +42,23 @@ func mustParseURL(t *testing.T, s string) *url.URL {
 const authConfigYAML = `
 auth:
   admin:
-    password: { env: KRITIKA_TEST_ADMIN_PASSWORD }
+    password: { env: KRITIQUE_TEST_ADMIN_PASSWORD }
   oidc:
     issuer: %[1]s
-    clientId: kritika-client
-    clientSecret: { env: KRITIKA_TEST_TOKEN }
+    clientId: kritique-client
+    clientSecret: { env: KRITIQUE_TEST_TOKEN }
     rolesClaim: groups
     roleMappingExpr: '"ops" in roles ? "admin" : ("staff" in roles ? "member" : "")'
   github:
-    clientId: kritika-client
-    clientSecret: { env: KRITIKA_TEST_TOKEN }
+    clientId: kritique-client
+    clientSecret: { env: KRITIQUE_TEST_TOKEN }
     roleMappingExpr: 'login == "opgh" ? "admin" : ("mapped-org" in orgs ? dyn({"github/acme": "member"}) : "")'
 apps:
-  auth-personal-bot: {accounts: [alice-gh], clientId: Iv1.x, privateKey: {env: KRITIKA_TEST_TOKEN}, webhookSecret: {env: KRITIKA_TEST_TOKEN}}
-  auth-acme-bot: {accounts: [acme], clientId: Iv1.x, privateKey: {env: KRITIKA_TEST_TOKEN}, webhookSecret: {env: KRITIKA_TEST_TOKEN}}
-  auth-widgets-bot: {accounts: [Widgets], clientId: Iv1.x, privateKey: {env: KRITIKA_TEST_TOKEN}, webhookSecret: {env: KRITIKA_TEST_TOKEN}}
-  auth-pending-bot: {accounts: [pendco], clientId: Iv1.x, privateKey: {env: KRITIKA_TEST_TOKEN}, webhookSecret: {env: KRITIKA_TEST_TOKEN}}
-  auth-other-bot: {accounts: [nobody], clientId: Iv1.x, privateKey: {env: KRITIKA_TEST_TOKEN}, webhookSecret: {env: KRITIKA_TEST_TOKEN}}
+  auth-personal-bot: {accounts: [alice-gh], clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
+  auth-acme-bot: {accounts: [acme], clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
+  auth-widgets-bot: {accounts: [Widgets], clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
+  auth-pending-bot: {accounts: [pendco], clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
+  auth-other-bot: {accounts: [nobody], clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
 `
 
 type authEnv struct {
@@ -83,8 +83,8 @@ func newAuthEnv(t *testing.T) *authEnv {
 		t: t, st: st, oidc: newFakeOIDC(t), oidc2: newFakeOIDC(t), gh: newFakeGitHub(t),
 		now: time.Now(), accountID: map[string]string{},
 	}
-	t.Setenv("KRITIKA_TEST_TOKEN", fakeClientSecret)
-	t.Setenv("KRITIKA_TEST_ADMIN_PASSWORD", adminTestPassword)
+	t.Setenv("KRITIQUE_TEST_TOKEN", fakeClientSecret)
+	t.Setenv("KRITIQUE_TEST_ADMIN_PASSWORD", adminTestPassword)
 	var err error
 	e.file, err = configfiletest.Parse(t, fmt.Sprintf(authConfigYAML, e.oidc.srv.URL))
 	if err != nil {
@@ -98,7 +98,7 @@ func newAuthEnv(t *testing.T) *authEnv {
 	}
 	e.current = configfile.NewCurrent(e.file)
 	e.h, err = New(Config{
-		Store: st, Current: e.current, WebURL: mustParseURL(t, "https://kritika.example.com/dash/"),
+		Store: st, Current: e.current, WebURL: mustParseURL(t, "https://kritique.example.com/dash/"),
 		HTTPClient: trustingClient(e.gh, e.oidc, e.oidc2), Now: func() time.Time { return e.now },
 		Logger: slog.New(slog.DiscardHandler),
 	})
@@ -243,7 +243,7 @@ func assertFailed(t *testing.T, w *httptest.ResponseRecorder, status int, code s
 	}
 }
 
-// adminTestPassword is the local admin's password, KRITIKA_TEST_ADMIN_PASSWORD.
+// adminTestPassword is the local admin's password, KRITIQUE_TEST_ADMIN_PASSWORD.
 const adminTestPassword = "correct horse battery staple"
 
 func TestOIDCSignIn(t *testing.T) {
@@ -251,7 +251,7 @@ func TestOIDCSignIn(t *testing.T) {
 	alice := &fakeUser{Login: "alice-oidc-" + randomHex(t), Email: "alice@oidc.example", EmailVerified: true, Groups: []string{"staff"}}
 
 	w := e.signIn("oidc", e.oidc, alice, "#/reviews/42")
-	if w.Code != http.StatusFound || w.Header().Get("Location") != "https://kritika.example.com/dash/#/reviews/42" {
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "https://kritique.example.com/dash/#/reviews/42" {
 		t.Fatalf("callback: status %d location %q body %s", w.Code, w.Header().Get("Location"), w.Body.String())
 	}
 	var cookie *http.Cookie
@@ -271,7 +271,7 @@ func TestOIDCSignIn(t *testing.T) {
 
 	t.Run("return_to outside the dashboard falls back to its root", func(t *testing.T) {
 		w := e.signIn("oidc", e.oidc, alice, "https://evil.example/")
-		if w.Header().Get("Location") != "https://kritika.example.com/dash/#/" {
+		if w.Header().Get("Location") != "https://kritique.example.com/dash/#/" {
 			t.Fatalf("location = %q", w.Header().Get("Location"))
 		}
 	})
@@ -383,8 +383,8 @@ func TestGitHubSignInGrants(t *testing.T) {
 func (e *authEnv) localSignIn(user, password string) *httptest.ResponseRecorder {
 	e.t.Helper()
 	r := httptest.NewRequest(http.MethodPost, "/auth/local", strings.NewReader(fmt.Sprintf(`{"user":%q,"password":%q}`, user, password)))
-	r.Header.Set("X-Kritika", "1")
-	r.Header.Set("Origin", "https://kritika.example.com")
+	r.Header.Set("X-Kritique", "1")
+	r.Header.Set("Origin", "https://kritique.example.com")
 	r.RemoteAddr = "192.0.2.1:1234"
 	return e.do(r)
 }
@@ -420,7 +420,7 @@ func TestLocalAdminSignIn(t *testing.T) {
 	}
 
 	t.Run("rotating the password ends the session", func(t *testing.T) {
-		t.Setenv("KRITIKA_TEST_ADMIN_PASSWORD", "rotated")
+		t.Setenv("KRITIQUE_TEST_ADMIN_PASSWORD", "rotated")
 		rotated, err := configfiletest.Parse(t, fmt.Sprintf(authConfigYAML, e.oidc.srv.URL))
 		if err != nil {
 			t.Fatal(err)
@@ -470,8 +470,8 @@ func TestSessionLifecycle(t *testing.T) {
 	t.Run("logout", func(t *testing.T) {
 		other := e.mustSignIn("github", e.gh, user)
 		r := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
-		r.Header.Set("X-Kritika", "1")
-		r.Header.Set("Origin", "https://kritika.example.com")
+		r.Header.Set("X-Kritique", "1")
+		r.Header.Set("Origin", "https://kritique.example.com")
 		r.AddCookie(other)
 		w := e.do(r)
 		if w.Code != http.StatusNoContent {

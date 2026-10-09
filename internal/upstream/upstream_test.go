@@ -23,7 +23,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 
-	"github.com/home-operations/kritika/internal/gittest"
+	"github.com/perfectra1n/kritique/internal/gittest"
 )
 
 // source is the repository the tests fetch, as a bare repository under

@@ -28,24 +28,24 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"github.com/home-operations/kritika/internal/adapter"
-	"github.com/home-operations/kritika/internal/agent"
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
-	"github.com/home-operations/kritika/internal/contextpack"
-	"github.com/home-operations/kritika/internal/executor"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/gateway"
-	"github.com/home-operations/kritika/internal/gitfetch"
-	"github.com/home-operations/kritika/internal/ingest"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/jobtimeout"
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/runner"
-	"github.com/home-operations/kritika/internal/store"
-	"github.com/home-operations/kritika/internal/store/storetest"
-	"github.com/home-operations/kritika/internal/transcript"
-	"github.com/home-operations/kritika/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/adapter"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/contextpack"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/gateway"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/ingest"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
+	"github.com/perfectra1n/kritique/internal/transcript"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 const agenticConfigYAML = `
@@ -317,7 +317,7 @@ func newAgenticHarness(t *testing.T) *agenticHarness {
 	ctx := t.Context()
 	logger := slog.New(slog.DiscardHandler)
 	appStore := storetest.Open(t)
-	runnerStore, err := store.Open(ctx, store.Options{AppURL: storetest.Env(t, "KRITIKA_TEST_RUNNER_URL"), Logger: logger})
+	runnerStore, err := store.Open(ctx, store.Options{AppURL: storetest.Env(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: logger})
 	if err != nil {
 		t.Fatalf("Open runner: %v", err)
 	}
@@ -328,12 +328,12 @@ func newAgenticHarness(t *testing.T) *agenticHarness {
 	t.Cleanup(srv.Close)
 	t.Setenv("TEST_PEM", "pem")
 	t.Setenv("TEST_SECRET", "model-key")
-	t.Setenv("KRITIKA_RUNNER_DEADLINE", "60s")
-	t.Setenv("KRITIKA_RUNNER_TOOLS", `[{"name": "helm", "image": "registry.example/helm:3"},
+	t.Setenv("KRITIQUE_RUNNER_DEADLINE", "60s")
+	t.Setenv("KRITIQUE_RUNNER_TOOLS", `[{"name": "helm", "image": "registry.example/helm:3"},
 		{"name": "kurl", "image": "registry.example/kurl:1", "path": "/usr/bin", "commands": ["curl"]}]`)
 	// Credentials in the provider's URL, which the SDK prints in its errors,
 	// must not reach a runner either.
-	providerURL := strings.Replace(srv.URL, "http://", "http://kritika:provider-secret@", 1)
+	providerURL := strings.Replace(srv.URL, "http://", "http://kritique:provider-secret@", 1)
 	h.config = fmt.Sprintf(agenticConfigYAML, providerURL)
 	if h.file, err = configfiletest.Parse(t, h.config); err != nil {
 		t.Fatal(err)
@@ -560,13 +560,13 @@ func checkAgentSubmits(t *testing.T, h *agenticHarness) {
 	sticky := h.lf.comments[commentBase+1]
 	h.lf.mu.Unlock()
 	if len(inline) != 1 || !strings.Contains(inline[0], "b is unused") || comments != 1 ||
-		!strings.Contains(sticky, "/main.go#L3) [b is unused](local://acme/widgets/pull/1#r1001)") || forgeStatus != "success: kritika: 1 finding(s)" {
+		!strings.Contains(sticky, "/main.go#L3) [b is unused](local://acme/widgets/pull/1#r1001)") || forgeStatus != "success: kritique: 1 finding(s)" {
 		t.Fatalf("inline=%v comments=%d status=%q sticky:\n%s", inline, comments, forgeStatus, sticky)
 	}
 	h.sm.mu.Lock()
 	auth, system := h.sm.auth[0], h.sm.systems[0]
 	h.sm.mu.Unlock()
-	if auth != "Bearer model-key" || !strings.HasPrefix(system, "You are kritika") {
+	if auth != "Bearer model-key" || !strings.HasPrefix(system, "You are kritique") {
 		t.Fatalf("auth=%q system=%.40q", auth, system)
 	}
 	if !strings.Contains(system, "\n\n## Repository instructions\n\n") || !strings.HasSuffix(system, "\n\nKeep functions small.") {
@@ -723,7 +723,7 @@ func checkGatewayConversation(t *testing.T, h *agenticHarness) {
 	}
 	status, body := fetch(kept, "gateway/agent-model")
 	var c agent.Conversation
-	if err := json.Unmarshal(body, &c); status != http.StatusOK || err != nil || !strings.HasPrefix(c.System, "You are kritika") || len(c.Messages) == 0 {
+	if err := json.Unmarshal(body, &c); status != http.StatusOK || err != nil || !strings.HasPrefix(c.System, "You are kritique") || len(c.Messages) == 0 {
 		t.Fatalf("the kept conversation = %d, %v: %.200s", status, err, body)
 	}
 	for name, tc := range map[string]struct{ continues, model string }{
@@ -1162,7 +1162,7 @@ func checkAgentNeverSubmits(t *testing.T, h *agenticHarness) {
 	comments, sticky, forgeStatus := len(h.lf.comments), h.lf.comments[commentBase+1], h.lf.status
 	h.lf.mu.Unlock()
 	if comments != 1 || !strings.Contains(sticky, "**Review incomplete for [`"+next[:7]+"`](local://acme/widgets/commit/"+next+"):** agent stopped: no_submit.") ||
-		strings.Contains(sticky, "b is unused") || forgeStatus != "error: kritika: review incomplete (agent stopped: no_submit)" {
+		strings.Contains(sticky, "b is unused") || forgeStatus != "error: kritique: review incomplete (agent stopped: no_submit)" {
 		t.Fatalf("comments=%d status=%q sticky:\n%s", comments, forgeStatus, sticky)
 	}
 }
@@ -1220,7 +1220,7 @@ func (e *hookExecutor) Run(ctx context.Context, spec executor.Spec) executor.Res
 	e.mu.Unlock()
 	if unstarted != nil {
 		return executor.Result{
-			JobName: "kritika-run-unstarted", StartedAt: time.Now(), TerminationReason: "ErrImagePull", NeverStarted: true, Err: unstarted,
+			JobName: "kritique-run-unstarted", StartedAt: time.Now(), TerminationReason: "ErrImagePull", NeverStarted: true, Err: unstarted,
 		}
 	}
 	if detach {
@@ -1229,7 +1229,7 @@ func (e *hookExecutor) Run(ctx context.Context, spec executor.Spec) executor.Res
 	select {
 	case <-time.After(hold):
 	case <-ctx.Done():
-		return executor.Result{JobName: "kritika-run-held", Err: context.Cause(ctx)}
+		return executor.Result{JobName: "kritique-run-held", Err: context.Cause(ctx)}
 	}
 	res := e.inner.Run(ctx, spec)
 	e.mu.Lock()
@@ -1253,7 +1253,7 @@ func (e *hookExecutor) runDetached(ctx context.Context, spec executor.Spec) exec
 	case <-ctx.Done():
 		cause := context.Cause(ctx)
 		time.AfterFunc(300*time.Millisecond, func() { icancel(cause) })
-		return executor.Result{JobName: "kritika-run-deleted", Err: cause}
+		return executor.Result{JobName: "kritique-run-deleted", Err: cause}
 	}
 }
 
@@ -1368,7 +1368,7 @@ func checkAgentFiltered(t *testing.T, h *agenticHarness) {
 	h.sm.mu.Lock()
 	before := h.sm.requests
 	h.sm.mu.Unlock()
-	base := h.commit(t, ".kritika.yaml", "trigger:\n  exclude: [{ expr: 'pr.body.contains(\"[skip-review]\")' }]\n")
+	base := h.commit(t, ".kritique.yaml", "trigger:\n  exclude: [{ expr: 'pr.body.contains(\"[skip-review]\")' }]\n")
 	h.lf.setBase(base)
 	next := h.commit(t, "main.go", "package main\n\nfunc b() {}\n\nfunc f() {}\n")
 	h.lf.mu.Lock()
@@ -1397,7 +1397,7 @@ func checkAgentFiltered(t *testing.T, h *agenticHarness) {
 	h.lf.mu.Lock()
 	forgeStatus := h.lf.status
 	h.lf.mu.Unlock()
-	if forgeStatus != "success: kritika: skipped (filtered)" {
+	if forgeStatus != "success: kritique: skipped (filtered)" {
 		t.Fatalf("forge status = %q", forgeStatus)
 	}
 }
@@ -1449,7 +1449,7 @@ func checkAgentProviderMissing(t *testing.T, h *agenticHarness) {
 	h.lf.mu.Lock()
 	forgeStatus := h.lf.status
 	h.lf.mu.Unlock()
-	if forgeStatus != `error: kritika: review failed (provider "nowhere" is not in the configuration)` {
+	if forgeStatus != `error: kritique: review failed (provider "nowhere" is not in the configuration)` {
 		t.Fatalf("forge status = %q", forgeStatus)
 	}
 }
@@ -1474,7 +1474,7 @@ func checkAgentCappedUnderLease(t *testing.T, h *agenticHarness) {
 	h.lf.mu.Lock()
 	forgeStatus := h.lf.status
 	h.lf.mu.Unlock()
-	if forgeStatus != "success: kritika: capped ("+errText+")" {
+	if forgeStatus != "success: kritique: capped ("+errText+")" {
 		t.Fatalf("forge status = %q, want the cap as the description", forgeStatus)
 	}
 	var held int
@@ -1562,11 +1562,11 @@ func checkAgentSpecFailed(t *testing.T, h *agenticHarness) {
 		forgeStatus string
 	}{
 		{"the job still runs: River retries", h.ctx, strings.Repeat("e", 40), true, store.ReviewFailed, boom.Error(),
-			"error: kritika: review failed"},
+			"error: kritique: review failed"},
 		{"a remote cancel ends it canceled", remote, strings.Repeat("f", 40), false, store.ReviewCanceled, "",
-			"error: kritika: review canceled"},
+			"error: kritique: review canceled"},
 		{"a timeout ends it failed", timedOut, strings.Repeat("9", 40), false, store.ReviewFailed, "review timed out",
-			"error: kritika: review timed out"},
+			"error: kritique: review timed out"},
 		{"a stopping worker's cut is retried", stopped, strings.Repeat("8", 40), true, store.ReviewSuperseded, "cut by a restart", ""},
 	}
 	for _, tt := range tests {
@@ -1615,7 +1615,7 @@ func checkRunnerNeverStarted(t *testing.T, h *agenticHarness) {
 	h.sm.reset(scriptSubmit)
 	next := h.commit(t, "main.go", "package main\n\nfunc b() {}\n\nfunc u() {}\n")
 	h.exec.mu.Lock()
-	h.exec.unstarted = errors.New("executor: job kritika-run-unstarted never started: ErrImagePull")
+	h.exec.unstarted = errors.New("executor: job kritique-run-unstarted never started: ErrImagePull")
 	h.exec.mu.Unlock()
 	h.dispatch(t, next)
 	var statuses []string
@@ -1641,7 +1641,7 @@ func checkRunnerNeverStarted(t *testing.T, h *agenticHarness) {
 	h.lf.mu.Lock()
 	forgeStatus := h.lf.status
 	h.lf.mu.Unlock()
-	if !strings.HasPrefix(forgeStatus, "success: ") && !strings.HasPrefix(forgeStatus, "error: kritika: review found") {
+	if !strings.HasPrefix(forgeStatus, "success: ") && !strings.HasPrefix(forgeStatus, "error: kritique: review found") {
 		t.Fatalf("forge status = %q after the retry completed", forgeStatus)
 	}
 }
@@ -1702,7 +1702,7 @@ func checkRunnerOnlySkip(t *testing.T, h *agenticHarness) {
 	h.lf.mu.Lock()
 	forgeStatus := h.lf.status
 	h.lf.mu.Unlock()
-	if forgeStatus != "success: kritika: skipped (patch unchanged since the last review)" {
+	if forgeStatus != "success: kritique: skipped (patch unchanged since the last review)" {
 		t.Fatalf("forge status = %q", forgeStatus)
 	}
 }
@@ -1746,7 +1746,7 @@ func checkLinesExcluded(t *testing.T, h *agenticHarness) {
 	}
 }
 
-// checkFilePathsExcluded has the repository's .kritika.yaml exclude by a
+// checkFilePathsExcluded has the repository's .kritique.yaml exclude by a
 // changed path: the worker lets the pull request through to the runner,
 // which skips it, and a review someone asks for is skipped the same way.
 func checkFilePathsExcluded(t *testing.T, h *agenticHarness) {
@@ -1754,7 +1754,7 @@ func checkFilePathsExcluded(t *testing.T, h *agenticHarness) {
 	h.sm.mu.Lock()
 	before := h.sm.requests
 	h.sm.mu.Unlock()
-	base := h.commit(t, ".kritika.yaml", "trigger:\n  exclude: [{ name: generated, paths: ['*_gen.go'] }]\n")
+	base := h.commit(t, ".kritique.yaml", "trigger:\n  exclude: [{ name: generated, paths: ['*_gen.go'] }]\n")
 	h.lf.setBase(base)
 	next := h.commit(t, "api_gen.go", "package main\n\nfunc generated() {}\n")
 	h.lf.mu.Lock()
@@ -1917,7 +1917,7 @@ func checkAgentSplitsALargeReview(t *testing.T, h *agenticHarness) {
 			script: scriptParts, files: [2]string{"split/c/three.go", "split/d/four.go"}, failMerges: 3,
 			asked: []string{"agent-model", "agent-model", "merge-model"}, wantStatus: "success", wantNote: "writing one from them failed",
 		},
-		{script: scriptPartFails, files: [2]string{"split/e/five.go", "split/f/six.go"}, wantStatus: "error: kritika: review incomplete",
+		{script: scriptPartFails, files: [2]string{"split/e/five.go", "split/f/six.go"}, wantStatus: "error: kritique: review incomplete",
 			wantNote: "Part 2 of 2 ended before it submitted, so its files went unreviewed: split/f/six.go"},
 	} {
 		h.sm.reset(round.script)
@@ -2051,7 +2051,7 @@ func (h *agenticHarness) checkRunnerFiltered(t *testing.T, reviewID, name string
 	h.lf.mu.Lock()
 	forgeStatus := h.lf.status
 	h.lf.mu.Unlock()
-	if want := "success: kritika: skipped (filtered: " + name + ")"; forgeStatus != want {
+	if want := "success: kritique: skipped (filtered: " + name + ")"; forgeStatus != want {
 		t.Fatalf("forge status = %q, want %q", forgeStatus, want)
 	}
 }
@@ -2150,7 +2150,7 @@ func checkGatewaySimilar(t *testing.T, h *agenticHarness) {
 // other.go and at main.go, which the pull request changes.
 func seedIndex(t *testing.T, h *agenticHarness, emb *configfile.Embedding, repoID, code string) {
 	t.Helper()
-	if _, err := h.st.EnsureIndexSchema(h.ctx, "kritika_app", emb.Model, emb.Dims); err != nil {
+	if _, err := h.st.EnsureIndexSchema(h.ctx, "kritique_app", emb.Model, emb.Dims); err != nil {
 		t.Fatal(err)
 	}
 	vectors, _, err := h.fe.Embed(h.ctx, []string{code})

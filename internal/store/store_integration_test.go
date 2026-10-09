@@ -18,16 +18,16 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 )
 
 // The suite needs a VectorChord-enabled Postgres with three roles, as
 // `mise run test-integration` provisions:
-//   KRITIKA_TEST_OWNER_URL   database owner (not superuser)
-//   KRITIKA_TEST_APP_URL     application role, owns nothing
-//   KRITIKA_TEST_RUNNER_URL  runner role, owns nothing
-//   KRITIKA_TEST_SUPER_URL   a superuser, used only to assert refusal
+//   KRITIQUE_TEST_OWNER_URL   database owner (not superuser)
+//   KRITIQUE_TEST_APP_URL     application role, owns nothing
+//   KRITIQUE_TEST_RUNNER_URL  runner role, owns nothing
+//   KRITIQUE_TEST_SUPER_URL   a superuser, used only to assert refusal
 
 func testEnv(t *testing.T, key string) string {
 	t.Helper()
@@ -42,14 +42,14 @@ func openStore(t *testing.T) *Store {
 	t.Helper()
 	ctx := t.Context()
 	s, err := Open(ctx, Options{
-		AppURL: testEnv(t, "KRITIKA_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIKA_TEST_OWNER_URL"),
+		AppURL: testEnv(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIQUE_TEST_OWNER_URL"),
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(s.Close)
-	if err := s.Migrate(ctx, "kritika_app", "kritika_runner"); err != nil {
+	if err := s.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	return s
@@ -79,8 +79,8 @@ func TestOpenRefusesUnsafeApplicationDSN(t *testing.T) {
 		url  string
 		want error
 	}{
-		{"superuser as application role", testEnv(t, "KRITIKA_TEST_SUPER_URL"), ErrIsolationOff},
-		{"owner as application role", testEnv(t, "KRITIKA_TEST_OWNER_URL"), ErrIsolationOff},
+		{"superuser as application role", testEnv(t, "KRITIQUE_TEST_SUPER_URL"), ErrIsolationOff},
+		{"owner as application role", testEnv(t, "KRITIQUE_TEST_OWNER_URL"), ErrIsolationOff},
 	}
 	// The owner must own at least one table for the ownership check to bite.
 	openStore(t)
@@ -93,7 +93,7 @@ func TestOpenRefusesUnsafeApplicationDSN(t *testing.T) {
 		})
 	}
 	t.Run("superuser as owner", func(t *testing.T) {
-		_, err := Open(ctx, Options{AppURL: testEnv(t, "KRITIKA_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIKA_TEST_SUPER_URL"), Logger: logger})
+		_, err := Open(ctx, Options{AppURL: testEnv(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIQUE_TEST_SUPER_URL"), Logger: logger})
 		if err == nil || !strings.Contains(err.Error(), "superuser") {
 			t.Fatalf("Open = %v, want a superuser refusal", err)
 		}
@@ -105,7 +105,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if ready, err := s.SchemaReady(t.Context()); err != nil || !ready {
 		t.Fatalf("SchemaReady after Migrate = %v, %v", ready, err)
 	}
-	if err := s.Migrate(t.Context(), "kritika_app", "kritika_runner"); err != nil {
+	if err := s.Migrate(t.Context(), "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
 	names, _ := fs.Glob(migrationFS, "migrations/*.sql")
@@ -128,27 +128,27 @@ apps:
   alpha-bot:
     accounts: [alpha]
     clientId: Iv1.test
-    privateKey: { env: KRITIKA_TEST_TOKEN }
-    webhookSecret: { env: KRITIKA_TEST_TOKEN }
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
   beta-bot:
     accounts: [beta]
     clientId: Iv1.test
-    privateKey: { env: KRITIKA_TEST_TOKEN }
-    webhookSecret: { env: KRITIKA_TEST_TOKEN }
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
 ` + alphaEntry
 	alphaAccount = `
 apps:
   alpha-bot:
     accounts: [alpha]
     clientId: Iv1.test
-    privateKey: { env: KRITIKA_TEST_TOKEN }
-    webhookSecret: { env: KRITIKA_TEST_TOKEN }
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
 ` + alphaEntry
 )
 
 func parse(t *testing.T, yaml string) *configfile.File {
 	t.Helper()
-	t.Setenv("KRITIKA_TEST_TOKEN", "tok")
+	t.Setenv("KRITIQUE_TEST_TOKEN", "tok")
 	return configfiletest.Load(t, yaml)
 }
 
@@ -417,7 +417,7 @@ func TestRunnerRoleUpdatesOnlyWhatARunnerReports(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	runner, err := Open(ctx, Options{AppURL: testEnv(t, "KRITIKA_TEST_RUNNER_URL"), Logger: slog.New(slog.DiscardHandler)})
+	runner, err := Open(ctx, Options{AppURL: testEnv(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatalf("Open runner: %v", err)
 	}
@@ -597,12 +597,12 @@ func TestLeaderLockIsExclusive(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	// Each run starts from an empty schema so the suite is repeatable.
-	if super := os.Getenv("KRITIKA_TEST_SUPER_URL"); super != "" {
+	if super := os.Getenv("KRITIQUE_TEST_SUPER_URL"); super != "" {
 		ctx := context.Background()
 		pool, err := pgxpool.New(ctx, super)
 		if err == nil {
 			_, _ = pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;
-				GRANT ALL ON SCHEMA public TO kritika; GRANT USAGE ON SCHEMA public TO kritika_app, kritika_runner;
+				GRANT ALL ON SCHEMA public TO kritique; GRANT USAGE ON SCHEMA public TO kritique_app, kritique_runner;
 				CREATE EXTENSION IF NOT EXISTS vchord CASCADE`)
 			pool.Close()
 		}
@@ -618,14 +618,14 @@ var _ = filepath.Join
 func TestEnsureIndexSchemaUsesVectorChord(t *testing.T) {
 	ctx := t.Context()
 	s := openStore(t)
-	if err := s.Migrate(ctx, "kritika_app", "kritika_runner"); err != nil {
+	if err := s.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	// The suites share one database: leave no index schema behind.
 	t.Cleanup(func() {
 		_, _ = s.owner.Exec(context.Background(), `DROP TABLE IF EXISTS index_chunks; DELETE FROM index_schema`)
 	})
-	if _, err := s.EnsureIndexSchema(ctx, "kritika_app", "test-embed", 8); err != nil {
+	if _, err := s.EnsureIndexSchema(ctx, "kritique_app", "test-embed", 8); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
 	var method string
@@ -656,7 +656,7 @@ func TestEnsureIndexSchemaRebuildsForANewEmbedder(t *testing.T) {
 	})
 	ensure := func(model string, dims int) bool {
 		t.Helper()
-		rebuilt, err := s.EnsureIndexSchema(ctx, "kritika_app", model, dims)
+		rebuilt, err := s.EnsureIndexSchema(ctx, "kritique_app", model, dims)
 		if err != nil {
 			t.Fatalf("EnsureIndexSchema(%s, %d): %v", model, dims, err)
 		}
@@ -731,7 +731,7 @@ func TestSweepStoppedIndexes(t *testing.T) {
 		_, _ = s.owner.Exec(context.Background(), `UPDATE repositories SET active_index_run_id = NULL, stopped_at = NULL;
 			DROP TABLE IF EXISTS index_chunks; DELETE FROM index_schema`)
 	})
-	if _, err := s.EnsureIndexSchema(ctx, "kritika_app", "test-embed", 8); err != nil {
+	if _, err := s.EnsureIndexSchema(ctx, "kritique_app", "test-embed", 8); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
 	// index gives the repository an active generation with one chunk.

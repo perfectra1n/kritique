@@ -38,7 +38,7 @@ func TestLoad(t *testing.T) {
 		},
 		{
 			name: "explicit values",
-			env:  map[string]string{"KRITIKA_ADDR": ":9090", "KRITIKA_LOG_LEVEL": "debug", "KRITIKA_LOG_FORMAT": "text"},
+			env:  map[string]string{"KRITIQUE_ADDR": ":9090", "KRITIQUE_LOG_LEVEL": "debug", "KRITIQUE_LOG_FORMAT": "text"},
 			check: func(t *testing.T, c *Config) {
 				if c.Addr != ":9090" {
 					t.Fatalf("addr = %q", c.Addr)
@@ -48,17 +48,17 @@ func TestLoad(t *testing.T) {
 				}
 			},
 		},
-		{name: "bad level", env: map[string]string{"KRITIKA_LOG_LEVEL": "loud"}, wantErr: true},
-		{name: "bad format", env: map[string]string{"KRITIKA_LOG_FORMAT": "xml"}, wantErr: true},
-		{name: "database url required", env: map[string]string{"KRITIKA_DATABASE_URL": ""}, wantErr: true},
-		{name: "same role for app and runner", env: map[string]string{"KRITIKA_DATABASE_RUNNER_ROLE": "kritika_app"}, wantErr: true},
-		{name: "zero leader retry", env: map[string]string{"KRITIKA_LEADER_RETRY_INTERVAL": "0"}, wantErr: true},
-		{name: "unknown executor", env: map[string]string{"KRITIKA_EXECUTOR": "docker"}, wantErr: true},
-		{name: "zero review workers", env: map[string]string{"KRITIKA_REVIEW_WORKERS": "0"}, wantErr: true},
+		{name: "bad level", env: map[string]string{"KRITIQUE_LOG_LEVEL": "loud"}, wantErr: true},
+		{name: "bad format", env: map[string]string{"KRITIQUE_LOG_FORMAT": "xml"}, wantErr: true},
+		{name: "database url required", env: map[string]string{"KRITIQUE_DATABASE_URL": ""}, wantErr: true},
+		{name: "same role for app and runner", env: map[string]string{"KRITIQUE_DATABASE_RUNNER_ROLE": "kritique_app"}, wantErr: true},
+		{name: "zero leader retry", env: map[string]string{"KRITIQUE_LEADER_RETRY_INTERVAL": "0"}, wantErr: true},
+		{name: "unknown executor", env: map[string]string{"KRITIQUE_EXECUTOR": "docker"}, wantErr: true},
+		{name: "zero review workers", env: map[string]string{"KRITIQUE_REVIEW_WORKERS": "0"}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("KRITIKA_DATABASE_URL", "postgres://app@db/kritika")
+			t.Setenv("KRITIQUE_DATABASE_URL", "postgres://app@db/kritique")
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}
@@ -88,7 +88,7 @@ func TestWebURL(t *testing.T) {
 		{name: "unset", url: ""},
 		{name: "valid https", url: "https://dash.example.com"},
 		{name: "trailing slash trimmed", url: "http://dash.example.com/", want: "http://dash.example.com"},
-		{name: "under a path", url: "https://example.com/kritika/", want: "https://example.com/kritika", path: "/kritika"},
+		{name: "under a path", url: "https://example.com/kritique/", want: "https://example.com/kritique", path: "/kritique"},
 		{name: "missing scheme", url: "dash.example.com", wantErr: true},
 		{name: "non-http scheme", url: "ftp://dash.example.com", wantErr: true},
 		{name: "missing host", url: "https:///path", wantErr: true},
@@ -97,8 +97,8 @@ func TestWebURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("KRITIKA_DATABASE_URL", "postgres://app@db/kritika")
-			t.Setenv("KRITIKA_WEB_URL", tt.url)
+			t.Setenv("KRITIQUE_DATABASE_URL", "postgres://app@db/kritique")
+			t.Setenv("KRITIQUE_WEB_URL", tt.url)
 			cfg, err := Load()
 			if tt.wantErr {
 				if err == nil {
@@ -131,23 +131,23 @@ func TestWebURL(t *testing.T) {
 }
 
 func TestCommandValidation(t *testing.T) {
-	t.Setenv("KRITIKA_DATABASE_URL", "postgres://app@db/kritika")
+	t.Setenv("KRITIQUE_DATABASE_URL", "postgres://app@db/kritique")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	err = cfg.ValidateServe()
-	for _, want := range []string{"KRITIKA_RUNNER_IMAGE", "KRITIKA_WEB_URL", "KRITIKA_GATEWAY_URL"} {
+	for _, want := range []string{"KRITIQUE_RUNNER_IMAGE", "KRITIQUE_WEB_URL", "KRITIQUE_GATEWAY_URL"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("serve without a runner image, a web URL or the gateway = %v, want %s named", err, want)
 		}
 	}
-	cfg.RunnerImage, cfg.WebURL, cfg.GatewayURL = "img", "https://dash.example.com", "http://kritika-gateway:8082"
+	cfg.RunnerImage, cfg.WebURL, cfg.GatewayURL = "img", "https://dash.example.com", "http://kritique-gateway:8082"
 	if err := cfg.ValidateServe(); err != nil {
 		t.Fatal(err)
 	}
 	cfg.RunnerImagePullPolicy = "Sometimes"
-	if err := cfg.ValidateServe(); err == nil || !strings.Contains(err.Error(), "KRITIKA_RUNNER_IMAGE_PULL_POLICY") {
+	if err := cfg.ValidateServe(); err == nil || !strings.Contains(err.Error(), "KRITIQUE_RUNNER_IMAGE_PULL_POLICY") {
 		t.Fatalf("serve with an unknown runner pull policy = %v", err)
 	}
 	cfg.RunnerImagePullPolicy = "IfNotPresent"
@@ -155,13 +155,13 @@ func TestCommandValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Executor, cfg.RunnerImage = ExecutorLocal, ""
-	if err := cfg.ValidateServe(); err == nil || !strings.Contains(err.Error(), "KRITIKA_RUNNER_DATABASE_URL") {
+	if err := cfg.ValidateServe(); err == nil || !strings.Contains(err.Error(), "KRITIQUE_RUNNER_DATABASE_URL") {
 		t.Fatalf("local executor without a runner DSN = %v", err)
 	}
 	if err := cfg.ValidateRunner(); err == nil {
 		t.Fatal("run without its inputs must fail")
 	}
-	cfg.RunSpecFile = "/var/run/kritika/spec.json"
+	cfg.RunSpecFile = "/var/run/kritique/spec.json"
 	if err := cfg.ValidateRunner(); err != nil {
 		t.Fatal(err)
 	}
@@ -188,8 +188,8 @@ func TestParseCommand(t *testing.T) {
 }
 
 func TestEnv(t *testing.T) {
-	t.Setenv("KRITIKA_DATABASE_URL", "postgres://app:secret@db/kritika")
-	t.Setenv("KRITIKA_ADDR", ":9090")
+	t.Setenv("KRITIQUE_DATABASE_URL", "postgres://app:secret@db/kritique")
+	t.Setenv("KRITIQUE_ADDR", ":9090")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -199,9 +199,9 @@ func TestEnv(t *testing.T) {
 		vars[e.Name] = e
 	}
 	for name, want := range map[string]EnvVar{
-		"KRITIKA_ADDR":         {Name: "KRITIKA_ADDR", Value: ":9090", Set: true},
-		"KRITIKA_METRICS_ADDR": {Name: "KRITIKA_METRICS_ADDR", Value: ":8081"},
-		"KRITIKA_DATABASE_URL": {Name: "KRITIKA_DATABASE_URL", Value: "set", Secret: true, Set: true},
+		"KRITIQUE_ADDR":         {Name: "KRITIQUE_ADDR", Value: ":9090", Set: true},
+		"KRITIQUE_METRICS_ADDR": {Name: "KRITIQUE_METRICS_ADDR", Value: ":8081"},
+		"KRITIQUE_DATABASE_URL": {Name: "KRITIQUE_DATABASE_URL", Value: "set", Secret: true, Set: true},
 	} {
 		if vars[name] != want {
 			t.Errorf("%s = %+v, want %+v", name, vars[name], want)

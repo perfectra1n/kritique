@@ -10,10 +10,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/store"
-	"github.com/home-operations/kritika/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // Service is the store-backed Dispatcher: every write happens in one
@@ -48,7 +48,7 @@ const (
 const jobReview = "review"
 
 // The poller's synthetic actions: ActionPoll for an open pull request it
-// lists, and ActionBaseline for one that predates kritika's knowing its
+// lists, and ActionBaseline for one that predates kritique's knowing its
 // connection, which is recorded, not reviewed.
 const (
 	ActionPoll     = "poll"
@@ -59,7 +59,7 @@ const (
 // request, each saying whether it also starts a review; ActionPoll and
 // ActionBaseline are the poller's synthetic ones. The review job starts at
 // once: the worker waits out the repository's settle time (jobs.Settles),
-// since .kritika.yaml may set it. The record-only actions keep the title,
+// since .kritique.yaml may set it. The record-only actions keep the title,
 // body, labels and draft state current between pushes: a review job reads
 // them when it builds its prompt, and the filter and the rules judge them,
 // so an edit that arrives after the push that queued the job, as
@@ -450,7 +450,7 @@ func (s *Service) installation(ctx context.Context, req Request) (Outcome, error
 // created, archived, unarchived, renamed or transferred. A repository
 // deleted is disabled, and so is the row of the name one renamed or
 // transferred had, as one the App no longer reaches is. That row is the
-// old owner's, which kritika may not serve; a transfer to an account it
+// old owner's, which kritique may not serve; a transfer to an account it
 // does not serve never reaches here.
 func (s *Service) repository(ctx context.Context, req Request) (Outcome, error) {
 	ev := req.Event

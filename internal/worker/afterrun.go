@@ -13,17 +13,17 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/runner"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // prepared is what afterRun hands the publish phase: the patch id, the
-// settings with the repository's .kritika.yaml applied and its templates
+// settings with the repository's .kritique.yaml applied and its templates
 // read, the notes the summary states, whether the review builds on the
 // last completed one, and the ids of the rules the agent was given.
 type prepared struct {
@@ -97,7 +97,7 @@ func (w *Review) afterRun(
 		}
 		owner, repo := pr.ownerRepo()
 		state, desc := skipVerdict(carried, eff.Confidence.Gate, skipDescription(pack.SkipReason, pack.SkipDetail))
-		if err := client.SetStatus(ctx, owner, repo, args.HeadSHA, state, "kritika: "+desc); err != nil {
+		if err := client.SetStatus(ctx, owner, repo, args.HeadSHA, state, "kritique: "+desc); err != nil {
 			logger.Warn("commit status not set", "error", err)
 		}
 		carryApproval(ctx, logger, client, pr, eff.Settings, carried)

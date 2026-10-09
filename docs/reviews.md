@@ -1,11 +1,11 @@
 # Reviews
 
-What kritika does on a pull request: when it reviews one, what it posts,
+What kritique does on a pull request: when it reviews one, what it posts,
 and the commands that steer it.
 
 ## When a review runs
 
-| What happens                                           | What kritika reviews                                                                                                                              |
+| What happens                                           | What kritique reviews                                                                                                                              |
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | The pull request opens, reopens or is ready for review | its head, unless a review has already seen it                                                                                                     |
 | A push                                                 | the new head, once `trigger.settle` has passed: only what changed since the last review, unless more files moved than `review.incremental` allows |
@@ -24,7 +24,7 @@ closed. A review asked for then is a look back at its last head, for what
 a review missed: it posts its summary and findings, but sets no commit
 status and approves nothing. Where a merge commit or a fast-forward put
 the head in its base branch, it diffs against the merge base the last
-review used; with none, nothing is left to review, and kritika says so.
+review used; with none, nothing is left to review, and kritique says so.
 
 ## What it posts
 
@@ -32,8 +32,8 @@ review used; with none, nothing is left to review, and kritika says so.
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | The summary       | one comment, which each review edits                                                                                                                                 |
 | Findings          | inline comments on the lines they concern, each with its severity, category, explanation, a one-click suggestion where it has a fix, and a prompt for a coding agent |
-| The commit status | `Kritika / Review`, on the head commit                                                                                                                               |
-| Reactions         | 👀 on the pull request while a review runs, 👍 once one is posted; a mention kritika answers gets the same ([permissions](setup.md#register-the-github-app))         |
+| The commit status | `Kritique / Review`, on the head commit                                                                                                                               |
+| Reactions         | 👀 on the pull request while a review runs, 👍 once one is posted; a mention kritique answers gets the same ([permissions](setup.md#register-the-github-app))         |
 | An approval       | with `review.approve` on ([approvals](confidence.md#approvals))                                                                                                      |
 
 ### Findings
@@ -47,7 +47,7 @@ unless `comments.inline` is off; the summary lists every finding.
 Every finding carries a category beside its severity, what kind of problem
 it is: `correctness`, `security`, `performance`, `reliability`,
 `maintainability` or `tests`. The comments show it, the dashboard filters
-by it, and `kritika_findings_total` counts by it.
+by it, and `kritique_findings_total` counts by it.
 
 ### The summary comment
 
@@ -72,7 +72,7 @@ From the top, each part shown only when it has something to say:
 7. **Sources consulted**, links to what the review's commands fetched: a
    command's when it succeeded, and a `fetch_repo` that found files or a
    diff, not a tag listing. Then notes, such as files left out of the
-   prompt or a `.kritika.yaml` value that was dropped.
+   prompt or a `.kritique.yaml` value that was dropped.
 8. The footer: `Reviews (3) · Last reviewed commit: "subject" · <model>`,
    the model as `<model>/<effort>` when a [`review.effort`](models.md#effort)
    is set, ending with the pull request's cost when the admin turns
@@ -86,11 +86,11 @@ dashboard. A repository can replace the comment with its own template
 
 | State   | Description                                                                                                       | When                                                                  |
 | ------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| pending | `kritika: review running`                                                                                         | a review is running                                                   |
-| success | `kritika: 2 finding(s)`, or `kritika: confidence 4/5, 2 finding(s)` when scored                                   | the review posted, and its score passed or is not gated               |
-| failure | `kritika: confidence 2/5, below 4, 3 finding(s)`                                                                  | `confidence.gate` is on and the score is under the threshold          |
-| error   | `kritika: review failed`, `kritika: review incomplete (<reason>)`, `kritika: confidence not scored, 2 finding(s)` | the review failed, or a gated review went unscored                    |
-| success | `kritika: skipped (<reason>)`, such as `skipped (filtered: skip-label)`                                           | the review was skipped; a score it carries still decides under a gate |
+| pending | `kritique: review running`                                                                                         | a review is running                                                   |
+| success | `kritique: 2 finding(s)`, or `kritique: confidence 4/5, 2 finding(s)` when scored                                   | the review posted, and its score passed or is not gated               |
+| failure | `kritique: confidence 2/5, below 4, 3 finding(s)`                                                                  | `confidence.gate` is on and the score is under the threshold          |
+| error   | `kritique: review failed`, `kritique: review incomplete (<reason>)`, `kritique: confidence not scored, 2 finding(s)` | the review failed, or a gated review went unscored                    |
+| success | `kritique: skipped (<reason>)`, such as `skipped (filtered: skip-label)`                                           | the review was skipped; a score it carries still decides under a gate |
 
 ## Commands
 
@@ -103,17 +103,17 @@ someone with write access to the repository gets an answer.
 | `@<bot> review`           | Queues a review of the head, even one the admin's trigger lists keep out, such as a fork's where forks are excluded, or a paused pull request's.                                                        |
 | `@<bot> pause`            | Stops the pull request's automatic reviews.                                                                                                                                                             |
 | `@<bot> resume`           | Starts them again.                                                                                                                                                                                      |
-| `@<bot> dismiss <reason>` | As a reply in one of kritika's finding threads: resolves the thread, tells later reviews of the pull request not to raise the finding again, and lists it dismissed, with the reason, on the dashboard. |
+| `@<bot> dismiss <reason>` | As a reply in one of kritique's finding threads: resolves the thread, tells later reviews of the pull request not to raise the finding again, and lists it dismissed, with the reason, on the dashboard. |
 
-Resolving one of kritika's finding threads on GitHub, as someone with
+Resolving one of kritique's finding threads on GitHub, as someone with
 write access, dismisses its finding too, unless a push has changed the
 lines it was made on (GitHub shows the thread as outdated): then
 resolving it counts as fixed, nothing is recorded, and a later review may
 raise the finding again should the fix be lost, as when a rebase drops a
 committed suggestion. To dismiss a finding after such a push, reply
 `@<bot> dismiss` instead. Unresolving a thread takes the dismissal back.
-kritika resolves a thread only when its App has write access to contents;
+kritique resolves a thread only when its App has write access to contents;
 otherwise it leaves the thread open for a person to resolve.
 
-kritika answers at most five mentions of a pull request an hour, commands
+kritique answers at most five mentions of a pull request an hour, commands
 included, and says so once when it stops.

@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/gitfetch"
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // SpecVersion is the only job document version this runner understands. A
@@ -90,7 +90,7 @@ type AgentLimits struct {
 
 // Prompt is what a review run needs beyond the checkout to write its
 // review prompt and to tell whether the worker will skip the review: the
-// pull request, the review settings with the merge-base .kritika.yaml
+// pull request, the review settings with the merge-base .kritique.yaml
 // applied, and the last completed review's findings. A follow-up's prompt
 // is written from the same pull request, rules, context files and
 // findings.
@@ -178,12 +178,12 @@ type Spec struct {
 	PriorHead    string   `json:"priorHead,omitempty"`
 	PriorChanged []string `json:"priorChanged,omitempty"`
 	PriorBase    string   `json:"priorBase,omitempty"`
-	// Ignore globs, the admin's and .kritika.yaml's, are skipped by the
+	// Ignore globs, the admin's and .kritique.yaml's, are skipped by the
 	// context stages, and a review whose every changed path matches one is
 	// skipped.
 	Ignore []string `json:"ignore,omitempty"`
 	// RepoFiles are repository paths read from the merge base: the files
-	// the review settings name, and .kritika.yaml itself when there is one.
+	// the review settings name, and .kritique.yaml itself when there is one.
 	RepoFiles []string       `json:"repoFiles,omitempty"`
 	Agent     *AgentLimits   `json:"agent,omitempty"`
 	Model     *ModelEndpoint `json:"model,omitempty"`

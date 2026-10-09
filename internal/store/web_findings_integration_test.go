@@ -11,7 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // TestListAccountFindings checks that a finding is listed once per pull
@@ -321,8 +321,8 @@ apps:
   %[1]s-bot:
     accounts: [%[1]s]
     clientId: Iv1.test
-    privateKey: { env: KRITIKA_TEST_TOKEN }
-    webhookSecret: { env: KRITIKA_TEST_TOKEN }
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
 repositories:
   %[1]s/one: {}
 `, name)

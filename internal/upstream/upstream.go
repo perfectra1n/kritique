@@ -32,15 +32,15 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 
-	"github.com/home-operations/kritika/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
 )
 
 const remoteName = "origin"
 
-// Refs the fetched commits are kept under, private to kritika.
+// Refs the fetched commits are kept under, private to kritique.
 const (
-	toRef   = plumbing.ReferenceName("refs/kritika/to")
-	fromRef = plumbing.ReferenceName("refs/kritika/from")
+	toRef   = plumbing.ReferenceName("refs/kritique/to")
+	fromRef = plumbing.ReferenceName("refs/kritique/from")
 )
 
 // ErrTooLarge is what a fetch fails with when the server sends more than
@@ -122,7 +122,7 @@ const nearMax = 5
 // Fetcher fetches repositories within its Limits.
 type Fetcher struct {
 	// Transport carries the fetch's HTTP requests. Nil is a clone of
-	// http.DefaultTransport: a client of kritika's own takes the place of
+	// http.DefaultTransport: a client of kritique's own takes the place of
 	// go-git's, so the transport has to read the proxy, the egress
 	// gateway, from the environment as go-git's does.
 	Transport http.RoundTripper
@@ -137,7 +137,7 @@ func (f *Fetcher) Fetch(ctx context.Context, req Request, dest string) (*Result,
 	if err != nil {
 		return nil, err
 	}
-	dir, err := os.MkdirTemp("", "kritika-upstream-")
+	dir, err := os.MkdirTemp("", "kritique-upstream-")
 	if err != nil {
 		return nil, fmt.Errorf("upstream: temp dir: %w", err)
 	}
@@ -481,7 +481,7 @@ func backfill(ctx context.Context, repo *git.Repository, opts []client.Option, h
 	}
 	specs := make([]config.RefSpec, len(missing))
 	for i, h := range missing {
-		specs[i] = config.RefSpec(fmt.Sprintf("%s:refs/kritika/blobs/%d", h, i))
+		specs[i] = config.RefSpec(fmt.Sprintf("%s:refs/kritique/blobs/%d", h, i))
 	}
 	if err := fetch(ctx, repo, opts, specs, 0, ""); err != nil {
 		return err

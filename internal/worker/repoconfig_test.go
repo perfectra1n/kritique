@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 func adminSettings(t *testing.T) configfile.Settings {
@@ -45,7 +45,7 @@ func TestEffective(t *testing.T) {
 
 	tests := []struct {
 		name string
-		// doc is the merge-base .kritika.yaml, none when empty; files are
+		// doc is the merge-base .kritique.yaml, none when empty; files are
 		// what the runner read.
 		doc          string
 		files        repoconfig.Files
@@ -79,27 +79,27 @@ func TestEffective(t *testing.T) {
 			name: "review.fixes may only turn on", doc: "review: { fixes: false }\n", files: adminFiles,
 			enabled: true, ignore: []string{"vendor/**"}, repoFiles: append(adminPaths, repoconfig.FileName),
 			templates: adminDefaults, strict: true,
-			notes: []string{".kritika.yaml: review.fixes false was dropped; allowed: true, since an admin requires a suggested fix"},
+			notes: []string{".kritique.yaml: review.fixes false was dropped; allowed: true, since an admin requires a suggested fix"},
 		},
 		{
 			name:    "repository file rules follow the admin's, and its summary template replaces the admin's",
-			doc:     "rules: [{ id: repo, file: .kritika/rules.md }]\ncomments:\n  summary: .kritika/summary.tmpl\n",
-			files:   with(repoconfig.Files{".kritika/rules.md": "repo rules", ".kritika/summary.tmpl": "repo summary"}),
+			doc:     "rules: [{ id: repo, file: .kritique/rules.md }]\ncomments:\n  summary: .kritique/summary.tmpl\n",
+			files:   with(repoconfig.Files{".kritique/rules.md": "repo rules", ".kritique/summary.tmpl": "repo summary"}),
 			enabled: true, ignore: []string{"vendor/**"},
-			repoFiles: []string{"ops/rules.md", ".kritika/rules.md", ".kritika/summary.tmpl", "ops/inline.tmpl", repoconfig.FileName},
+			repoFiles: []string{"ops/rules.md", ".kritique/rules.md", ".kritique/summary.tmpl", "ops/inline.tmpl", repoconfig.FileName},
 			templates: review.Templates{Summary: "repo summary", Inline: "op inline"}, strict: true,
 		},
 		{
-			name: "a template the runner could not read leaves the built-in one", doc: "comments:\n  summary: .kritika/gone.tmpl\n",
+			name: "a template the runner could not read leaves the built-in one", doc: "comments:\n  summary: .kritique/gone.tmpl\n",
 			files: adminFiles, enabled: true, ignore: []string{"vendor/**"},
-			repoFiles: []string{"ops/rules.md", ".kritika/gone.tmpl", "ops/inline.tmpl", repoconfig.FileName},
+			repoFiles: []string{"ops/rules.md", ".kritique/gone.tmpl", "ops/inline.tmpl", repoconfig.FileName},
 			templates: review.Templates{Inline: "op inline"}, strict: true,
 		},
 		{
 			name: "invalid yaml is noted and the admin's settings apply", doc: "enabled: false\nunknown: 1\n", files: adminFiles,
 			enabled: true, ignore: []string{"vendor/**"}, repoFiles: append(adminPaths, repoconfig.FileName),
 			templates: adminDefaults, strict: true,
-			notes: []string{".kritika.yaml was ignored: repoconfig: parse: yaml: construct errors: line 2: field unknown not found in type repoconfig.File"},
+			notes: []string{".kritique.yaml was ignored: repoconfig: parse: yaml: construct errors: line 2: field unknown not found in type repoconfig.File"},
 		},
 	}
 	for _, tt := range tests {
@@ -164,7 +164,7 @@ func TestEffectiveSkip(t *testing.T) {
 		})
 	}
 	for r, want := range map[repoconfig.SkipReason]string{
-		repoconfig.SkipDisabled: "disabled in .kritika.yaml", repoconfig.SkipFiltered: "filtered", repoconfig.SkipOnlyPaths: "only ignored paths changed",
+		repoconfig.SkipDisabled: "disabled in .kritique.yaml", repoconfig.SkipFiltered: "filtered", repoconfig.SkipOnlyPaths: "only ignored paths changed",
 	} {
 		if r.Description() != want {
 			t.Fatalf("%q.Description() = %q, want %q", r, r.Description(), want)
@@ -257,7 +257,7 @@ func (f fileForge) MergeBase(context.Context, string, string, string, string) (s
 }
 
 func TestFollowUpRepoConfig(t *testing.T) {
-	files := map[string]string{"ops/rules.md": "admin rules", ".kritika/rules.md": "repo rules"}
+	files := map[string]string{"ops/rules.md": "admin rules", ".kritique/rules.md": "repo rules"}
 	with := func(doc string) map[string]string {
 		m := maps.Clone(files)
 		m[repoconfig.FileName] = doc
@@ -274,14 +274,14 @@ func TestFollowUpRepoConfig(t *testing.T) {
 	}{
 		{name: "no file", files: files, model: "p/big", read: []string{"ops/inline.tmpl", "ops/rules.md", "ops/summary.tmpl"}},
 		{
-			name: "the repository's model and file rules", files: with("review: { model: p/small }\nrules: [{ id: repo, file: .kritika/rules.md }]\n"),
-			model: "p/small", read: []string{".kritika.yaml", ".kritika/rules.md", "ops/inline.tmpl", "ops/rules.md", "ops/summary.tmpl"},
+			name: "the repository's model and file rules", files: with("review: { model: p/small }\nrules: [{ id: repo, file: .kritique/rules.md }]\n"),
+			model: "p/small", read: []string{".kritique.yaml", ".kritique/rules.md", "ops/inline.tmpl", "ops/rules.md", "ops/summary.tmpl"},
 		},
 		{
 			name: "a model of a provider the account may not use is dropped", files: with("review: { model: q/huge }\n"), model: "p/big",
-			read: []string{".kritika.yaml", "ops/inline.tmpl", "ops/rules.md", "ops/summary.tmpl"},
+			read: []string{".kritique.yaml", "ops/inline.tmpl", "ops/rules.md", "ops/summary.tmpl"},
 		},
-		{name: "disabled", files: with("enabled: false\n"), reason: "disabled in .kritika.yaml", model: "p/big"},
+		{name: "disabled", files: with("enabled: false\n"), reason: "disabled in .kritique.yaml", model: "p/big"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

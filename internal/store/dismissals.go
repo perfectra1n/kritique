@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // Dismissal is a finding a maintainer dismissed on a pull request, by the

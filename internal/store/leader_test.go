@@ -14,7 +14,7 @@ import (
 // lock rather than ending the process. The pool opens lazily, so a port
 // nothing listens on fails at acquire, not at construction.
 func TestRunAsLeaderRetriesAnUnreachableDatabase(t *testing.T) {
-	owner, err := pgxpool.New(t.Context(), "postgres://kritika@127.0.0.1:1/kritika?connect_timeout=1")
+	owner, err := pgxpool.New(t.Context(), "postgres://kritique@127.0.0.1:1/kritique?connect_timeout=1")
 	if err != nil {
 		t.Fatal(err)
 	}

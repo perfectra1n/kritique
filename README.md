@@ -1,29 +1,29 @@
 <div align="center">
 
-# kritika
+# kritique
 
 **Repository-aware AI pull request review for GitHub.**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/home-operations/kritika/ci.yaml?branch=main&label=ci)](https://github.com/home-operations/kritika/actions/workflows/ci.yaml)
-[![Release](https://img.shields.io/github/actions/workflow/status/home-operations/kritika/release.yaml?branch=main&label=release)](https://github.com/home-operations/kritika/actions/workflows/release.yaml)
-[![License](https://img.shields.io/github/license/home-operations/kritika)](https://github.com/home-operations/kritika/blob/main/LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/perfectra1n/kritique/ci.yaml?branch=main&label=ci)](https://github.com/perfectra1n/kritique/actions/workflows/ci.yaml)
+[![Release](https://img.shields.io/github/actions/workflow/status/perfectra1n/kritique/release.yaml?branch=main&label=release)](https://github.com/perfectra1n/kritique/actions/workflows/release.yaml)
+[![License](https://img.shields.io/github/license/perfectra1n/kritique)](https://github.com/perfectra1n/kritique/blob/main/LICENSE)
 
 </div>
 
 > [!WARNING]
-> kritika is early and under active development: configuration and the APIs
+> kritique is early and under active development: configuration and the APIs
 > can still change from one release to the next, so read the
 > [changelog](CHANGELOG.md) before upgrading. Schema changes arrive as
 > migrations the leader applies.
 
-kritika indexes a repository, reviews each pull request against that context,
+kritique indexes a repository, reviews each pull request against that context,
 posts one sticky summary comment plus inline findings and a commit status, and
 answers follow-ups when the bot is @-mentioned. A pull request from a fork is
 reviewed like any other unless the configuration excludes it. One deployment serves any
 number of forge accounts, and every index, review and follow-up job runs in
 its own Kubernetes Job pod that holds no provider key or App key.
 
-📖 **Docs site: <https://kritika.home-operations.com/>**
+📖 **Docs site: <https://kritique.perfectra1n.github.io/>**
 
 ## Features
 
@@ -65,8 +65,8 @@ its own Kubernetes Job pod that holds no provider key or App key.
 - **Providers and limits.** OpenRouter, OpenAI, Anthropic and OpenCode adapters, with
   per-account concurrency, daily review and monthly token caps. The provider
   key never enters a runner pod: the agent reaches its model through
-  kritika's gateway.
-- **Repository overrides.** A `.kritika.yaml`, read from the merge-base, can
+  kritique's gateway.
+- **Repository overrides.** A `.kritique.yaml`, read from the merge-base, can
   narrow the admin's settings and bring its own rules, context files and
   comment templates.
 - **Skills.** A review is offered the [Agent Skills](https://agentskills.io)
@@ -75,15 +75,15 @@ its own Kubernetes Job pod that holds no provider key or App key.
   from the merge-base and grant no tool or command.
 - **Configuration in git.** One YAML file holds the whole configuration,
   read at startup, and a change rolls the pods; secrets stay in Secrets,
-  which reach kritika as environment variables.
+  which reach kritique as environment variables.
 - **Dashboard.** Sign-in, live review state, full model transcripts, the
   running configuration, repository on/off and an audit log.
 
 ## Installing
 
-kritika ships as an OCI Helm chart, `oci://ghcr.io/home-operations/charts/kritika`.
-The chart's [README](charts/kritika/README.md) lists every value, and
-[Postgres with CloudNativePG](https://kritika.home-operations.com/database/)
+kritique ships as an OCI Helm chart, `oci://ghcr.io/perfectra1n/charts/kritique`.
+The chart's [README](charts/kritique/README.md) lists every value, and
+[Postgres with CloudNativePG](https://kritique.perfectra1n.github.io/database/)
 sets up the database and its three roles. In short, it needs:
 
 - a Postgres with [VectorChord](https://github.com/tensorchord/VectorChord)
@@ -94,41 +94,41 @@ sets up the database and its three roles. In short, it needs:
 - a way to sign in under `auth`;
 - the configuration file under `configFile`.
 
-It runs as one Deployment of `kritika serve`, one replica by default,
+It runs as one Deployment of `kritique serve`, one replica by default,
 which creates a runner Job for each review, follow-up and index run; the
 chart README's Topology section covers when to run two.
 
-The [setup guide](https://kritika.home-operations.com/setup/) takes a
+The [setup guide](https://kritique.perfectra1n.github.io/setup/) takes a
 fresh instance through its GitHub App, model key and embedder to its first
 review; the dashboard's setup checklist shows what is still missing.
 
 ### Security notes
 
-- **Install kritika into a namespace of its own:** kritika's Role can
+- **Install kritique into a namespace of its own:** kritique's Role can
   create, patch and delete every Secret in the release namespace.
 - **Turn on the chart's NetworkPolicy:** runner pods then reach the
-  outside only through kritika's egress gateway.
+  outside only through kritique's egress gateway.
 - **Run runner Jobs under a sandboxed RuntimeClass** such as gVisor, since
   the pod parses untrusted content.
 
-[Security](https://kritika.home-operations.com/security/) covers what a
+[Security](https://kritique.perfectra1n.github.io/security/) covers what a
 runner holds, the gateway and the sandbox.
 
 ## Documentation
 
-| Page                                                                                | What it covers                                                                              |
-| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| [Setup](https://kritika.home-operations.com/setup/)                                 | from install to the first review: the GitHub App, its permissions and its webhook           |
-| [Configuration](https://kritika.home-operations.com/configuration/)                 | the configuration file: sign-in, GitHub Apps, repository settings, accounts and egress      |
-| [Models](https://kritika.home-operations.com/models/)                               | providers and their keys, retries, fallback, the embedder, local models and OpenCode        |
-| [`.kritika.yaml` reference](https://kritika.home-operations.com/repository-config/) | what a repository's own file can change                                                     |
-| [Security](https://kritika.home-operations.com/security/)                           | hardening an install, what a runner holds, the egress gateway, runner tools and the sandbox |
-| [Chart values](charts/kritika/README.md)                                            | every value of the Helm chart                                                               |
-| [Reviews](https://kritika.home-operations.com/reviews/)                             | when a review runs, what it posts, and the commands that steer it                           |
-| [Confidence and approvals](https://kritika.home-operations.com/confidence/)         | the confidence score, the commit status it can gate, risk, and when kritika approves        |
-| [Dashboard](https://kritika.home-operations.com/dashboard/)                         | the setup checklist, the Configuration page, repository on/off and actions                  |
-| [Metrics](https://kritika.home-operations.com/metrics/)                             | what kritika exports to Prometheus, and the chart's alerts and Grafana dashboard            |
-| [Development](https://kritika.home-operations.com/development/)                     | building, testing, evaluation and the cluster loop                                          |
+| Page                                                                                    | What it covers                                                                              |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [Setup](https://kritique.perfectra1n.github.io/setup/)                                  | from install to the first review: the GitHub App, its permissions and its webhook           |
+| [Configuration](https://kritique.perfectra1n.github.io/configuration/)                  | the configuration file: sign-in, GitHub Apps, repository settings, accounts and egress      |
+| [Models](https://kritique.perfectra1n.github.io/models/)                                | providers and their keys, retries, fallback, the embedder, local models and OpenCode        |
+| [`.kritique.yaml` reference](https://kritique.perfectra1n.github.io/repository-config/) | what a repository's own file can change                                                     |
+| [Security](https://kritique.perfectra1n.github.io/security/)                            | hardening an install, what a runner holds, the egress gateway, runner tools and the sandbox |
+| [Chart values](charts/kritique/README.md)                                               | every value of the Helm chart                                                               |
+| [Reviews](https://kritique.perfectra1n.github.io/reviews/)                              | when a review runs, what it posts, and the commands that steer it                           |
+| [Confidence and approvals](https://kritique.perfectra1n.github.io/confidence/)          | the confidence score, the commit status it can gate, risk, and when kritique approves       |
+| [Dashboard](https://kritique.perfectra1n.github.io/dashboard/)                          | the setup checklist, the Configuration page, repository on/off and actions                  |
+| [Metrics](https://kritique.perfectra1n.github.io/metrics/)                              | what kritique exports to Prometheus, and the chart's alerts and Grafana dashboard           |
+| [Development](https://kritique.perfectra1n.github.io/development/)                      | building, testing, evaluation and the cluster loop                                          |
 
 ## License
 

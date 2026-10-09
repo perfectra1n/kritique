@@ -11,11 +11,11 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/runner"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 func TestSplitDropped(t *testing.T) {
@@ -54,7 +54,7 @@ func TestSplitDropped(t *testing.T) {
 }
 
 func TestMarkedInline(t *testing.T) {
-	const login = "kritika[bot]"
+	const login = "kritique[bot]"
 	fp := review.Fingerprint(review.Finding{Path: "a.go", Title: "nil deref"})
 	marked := func(id int64, author, fingerprint string, inReplyTo int64) forge.Comment {
 		return forge.Comment{ID: id, Author: author, Body: "**nil deref**\n\n" + review.FindingMarker(fingerprint), InReplyTo: inReplyTo}
@@ -71,7 +71,7 @@ func TestMarkedInline(t *testing.T) {
 		{name: "the bot's root comment maps its fingerprint", comments: []forge.Comment{marked(5, login, fp, 0)}, want: map[string]int64{fp: 5}},
 		{name: "a reply is ignored", comments: []forge.Comment{marked(6, login, fp, 5)}, want: map[string]int64{}},
 		{name: "another author's planted marker is ignored", comments: []forge.Comment{marked(7, "mallory", fp, 0)}, want: map[string]int64{}},
-		{name: "the author match ignores case", comments: []forge.Comment{marked(8, "Kritika[Bot]", fp, 0)}, want: map[string]int64{fp: 8}},
+		{name: "the author match ignores case", comments: []forge.Comment{marked(8, "Kritique[Bot]", fp, 0)}, want: map[string]int64{fp: 8}},
 		{name: "a later comment for the same finding wins",
 			comments: []forge.Comment{marked(9, login, fp, 0), marked(10, login, fp, 0)}, want: map[string]int64{fp: 10}},
 		{name: "a comment without a marker contributes nothing",
@@ -244,7 +244,7 @@ type stickyForge struct {
 	calls     []string
 }
 
-func (f *stickyForge) BotLogin(context.Context) (string, error) { return "kritika[bot]", nil }
+func (f *stickyForge) BotLogin(context.Context) (string, error) { return "kritique[bot]", nil }
 
 func (f *stickyForge) FindComment(_ context.Context, _, _ string, _ int, _, marker string) (int64, error) {
 	f.calls = append(f.calls, "find")
@@ -276,7 +276,7 @@ func (f *stickyForge) UpdateComment(_ context.Context, _, _ string, id int64, bo
 
 func TestWriteSticky(t *testing.T) {
 	t.Parallel()
-	const marker = "<!-- kritika:pr-7 -->"
+	const marker = "<!-- kritique:pr-7 -->"
 	tests := []struct {
 		name      string
 		stored    int64

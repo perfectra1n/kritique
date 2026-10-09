@@ -16,7 +16,7 @@
 
 {#if reason}
   <div class="setup-banner" role="note">
-    <span>kritika cannot review yet: {reason}.</span>
+    <span>kritique cannot review yet: {reason}.</span>
     <a class="btn btn-small" href={href({ name: 'console' })}>See what is missing</a>
   </div>
 {/if}

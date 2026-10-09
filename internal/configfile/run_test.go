@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/jobtimeout"
 )
 
-// TestRun checks how kritika runs comes from the environment: its defaults,
+// TestRun checks how kritique runs comes from the environment: its defaults,
 // values set, an interval of 0s that turns polling off, and values refused.
 func TestRun(t *testing.T) {
 	t.Setenv("TEST_PRIVATE_KEY", "tok")
@@ -28,9 +28,9 @@ func TestRun(t *testing.T) {
 
 	t.Run("set values, and an interval of 0s turns polling off", func(t *testing.T) {
 		for k, v := range map[string]string{
-			"KRITIKA_POLL_INTERVAL": "0s", "KRITIKA_POLL_LOOKBACK": "1h", "KRITIKA_ONBOARD_WINDOW": "8", "KRITIKA_INDEX_GRACE": "48h",
-			"KRITIKA_TRANSCRIPT_RETENTION": "72h", "KRITIKA_DIFF_RETENTION": "96h", "KRITIKA_RUNNER_DEADLINE": "10m",
-			"KRITIKA_RUNNER_RESOURCES": `{"limits":{"memory":"1Gi"}}`,
+			"KRITIQUE_POLL_INTERVAL": "0s", "KRITIQUE_POLL_LOOKBACK": "1h", "KRITIQUE_ONBOARD_WINDOW": "8", "KRITIQUE_INDEX_GRACE": "48h",
+			"KRITIQUE_TRANSCRIPT_RETENTION": "72h", "KRITIQUE_DIFF_RETENTION": "96h", "KRITIQUE_RUNNER_DEADLINE": "10m",
+			"KRITIQUE_RUNNER_RESOURCES": `{"limits":{"memory":"1Gi"}}`,
 		} {
 			t.Setenv(k, v)
 		}
@@ -43,13 +43,13 @@ func TestRun(t *testing.T) {
 	})
 
 	refused := []struct{ env, value, want string }{
-		{"KRITIKA_POLL_INTERVAL", "-1m", "must not be negative"},
-		{"KRITIKA_ONBOARD_WINDOW", "0", "KRITIKA_ONBOARD_WINDOW must be positive"},
-		{"KRITIKA_TRANSCRIPT_RETENTION", "1h", "KRITIKA_TRANSCRIPT_RETENTION must be at least 24h"},
-		{"KRITIKA_DIFF_RETENTION", "1h", "KRITIKA_DIFF_RETENTION must be at least 24h"},
-		{"KRITIKA_RUNNER_DEADLINE", fmt.Sprintf("%ds", int64(jobtimeout.MaxRunnerDeadline.Seconds())+1), "KRITIKA_RUNNER_DEADLINE must not exceed"},
-		{"KRITIKA_RUNNER_RESOURCES", "[1]", "KRITIKA_RUNNER_RESOURCES"},
-		{"KRITIKA_POLL_LOOKBACK", "soon", "KRITIKA_POLL_LOOKBACK"},
+		{"KRITIQUE_POLL_INTERVAL", "-1m", "must not be negative"},
+		{"KRITIQUE_ONBOARD_WINDOW", "0", "KRITIQUE_ONBOARD_WINDOW must be positive"},
+		{"KRITIQUE_TRANSCRIPT_RETENTION", "1h", "KRITIQUE_TRANSCRIPT_RETENTION must be at least 24h"},
+		{"KRITIQUE_DIFF_RETENTION", "1h", "KRITIQUE_DIFF_RETENTION must be at least 24h"},
+		{"KRITIQUE_RUNNER_DEADLINE", fmt.Sprintf("%ds", int64(jobtimeout.MaxRunnerDeadline.Seconds())+1), "KRITIQUE_RUNNER_DEADLINE must not exceed"},
+		{"KRITIQUE_RUNNER_RESOURCES", "[1]", "KRITIQUE_RUNNER_RESOURCES"},
+		{"KRITIQUE_POLL_LOOKBACK", "soon", "KRITIQUE_POLL_LOOKBACK"},
 	}
 	for _, tt := range refused {
 		t.Run(tt.env+"="+tt.value, func(t *testing.T) {
@@ -60,7 +60,7 @@ func TestRun(t *testing.T) {
 		})
 	}
 	t.Run("a deadline at the cap", func(t *testing.T) {
-		t.Setenv("KRITIKA_RUNNER_DEADLINE", jobtimeout.MaxRunnerDeadline.String())
+		t.Setenv("KRITIQUE_RUNNER_DEADLINE", jobtimeout.MaxRunnerDeadline.String())
 		mustLoad(t, minimal)
 	})
 }
@@ -68,7 +68,7 @@ func TestRun(t *testing.T) {
 func TestTools(t *testing.T) {
 	t.Setenv("TEST_PRIVATE_KEY", "tok")
 	t.Setenv("TEST_WEBHOOK_SECRET", "whsec")
-	t.Setenv("KRITIKA_RUNNER_TOOLS", `[{"name": "helm", "image": "registry.example/helm:3", "path": "/usr/bin"},
+	t.Setenv("KRITIQUE_RUNNER_TOOLS", `[{"name": "helm", "image": "registry.example/helm:3", "path": "/usr/bin"},
 		{"name": "flux-tools", "image": "registry.example/flux:2", "commands": ["flux", "flate"]}]`)
 	f := mustLoad(t, minimal)
 	names := func(ts []Tool) []string {
@@ -91,7 +91,7 @@ func TestTools(t *testing.T) {
 	refused := map[string]string{
 		`{"name": "Helm", "image": "x"}`:                                 "must be lowercase",
 		`{"name": "helm", "image": "x"}, {"name": "helm", "image": "y"}`: `"helm" is listed twice`,
-		`{"name": "helm"}`: "KRITIKA_RUNNER_TOOLS[0].image is required",
+		`{"name": "helm"}`: "KRITIQUE_RUNNER_TOOLS[0].image is required",
 		`{"name": "helm", "image": "x", "path": "usr/bin"}`:                                     "must be a clean absolute path",
 		`{"name": "helm", "image": "x", "path": "/usr/../etc"}`:                                 "must be a clean absolute path",
 		`{"name": "helm", "image": "x", "commands": ["bin/helm"]}`:                              "must be a bare command name",
@@ -100,7 +100,7 @@ func TestTools(t *testing.T) {
 	}
 	for list, want := range refused {
 		t.Run(list, func(t *testing.T) {
-			t.Setenv("KRITIKA_RUNNER_TOOLS", "["+list+"]")
+			t.Setenv("KRITIQUE_RUNNER_TOOLS", "["+list+"]")
 			if _, err := Parse([]byte(minimal)); err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("Parse = %v, want an error containing %q", err, want)
 			}

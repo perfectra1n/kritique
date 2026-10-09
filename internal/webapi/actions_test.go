@@ -5,7 +5,7 @@ import (
 
 	"github.com/riverqueue/river/rivertype"
 
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 func TestQueuedMessage(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // Message is one comment in a thread, as the follow-up prompt shows it.
@@ -32,8 +32,8 @@ func NewMessage(author, body string, when time.Time) Message {
 // FollowUpSystem is the reviewer's standing instructions when answering a
 // thread rather than reviewing a diff, before the review's read-only
 // tools; it answers by calling submit_reply.
-const FollowUpSystem = `You are kritika, a code reviewer for pull requests, now answering a question in a pull request thread. You see
-the diff of the change, the findings kritika posted and the thread, and can read the rest of the head commit through
+const FollowUpSystem = `You are kritique, a code reviewer for pull requests, now answering a question in a pull request thread. You see
+the diff of the change, the findings kritique posted and the thread, and can read the rest of the head commit through
 tools. You cannot change anything, on the pull request or anywhere else; say so when a request needs that.
 
 Answer the last message directly and concisely in plain markdown without headings. Refer to lines of the diff by
@@ -103,14 +103,14 @@ func ParseFollowUp(raw, repository string) (string, error) {
 const maxMessageChars = 2000
 
 // BuildFollowUp renders the follow-up user message: the review input as
-// Build renders it, then the findings kritika posted, then the thread, as
+// Build renders it, then the findings kritique posted, then the thread, as
 // NewMessage cut each message, with the one to answer last. The thread is
 // never cut further; the diff and context give way to it, since the
 // question is what matters.
 func BuildFollowUp(in Input, findings []Finding, thread []Message) string {
 	var tail strings.Builder
 	if len(findings) > 0 {
-		fmt.Fprintf(&tail, "\n\nFindings kritika posted on this pull request (%d):\n", len(findings))
+		fmt.Fprintf(&tail, "\n\nFindings kritique posted on this pull request (%d):\n", len(findings))
 		for _, f := range findings {
 			tail.WriteString(findingLine(f))
 		}
@@ -150,25 +150,25 @@ func FollowUpBody(reply, model, effort string) string {
 	if effort != "" {
 		model += "/" + effort
 	}
-	return reply + fmt.Sprintf("\n\n<sub>kritika follow-up with %s.</sub>\n", model)
+	return reply + fmt.Sprintf("\n\n<sub>kritique follow-up with %s.</sub>\n", model)
 }
 
 // LimitBody is posted once when a thread hits its follow-up rate limit.
-const LimitBody = "kritika has answered the limit of follow-ups for this pull request in the past hour and will pick up again later.\n"
+const LimitBody = "kritique has answered the limit of follow-ups for this pull request in the past hour and will pick up again later.\n"
 
 // DismissedBody is the reply to a dismissal of the finding a comment
 // replies to.
 const DismissedBody = "Dismissed: later reviews of this pull request will not raise this finding again.\n"
 
 // DismissHintBody is the reply to a dismissal made anywhere but as a reply
-// in one of kritika's finding threads, where there is no finding to
+// in one of kritique's finding threads, where there is no finding to
 // dismiss.
-const DismissHintBody = "`dismiss` works as a reply in one of kritika's finding threads: it dismisses that finding, " +
+const DismissHintBody = "`dismiss` works as a reply in one of kritique's finding threads: it dismisses that finding, " +
 	"with the rest of the comment as the reason.\n"
 
-// DismissUnknownBody is the reply to a dismissal of a finding kritika has
+// DismissUnknownBody is the reply to a dismissal of a finding kritique has
 // no record of.
-const DismissUnknownBody = "kritika has no record of this finding, so there is nothing to dismiss.\n"
+const DismissUnknownBody = "kritique has no record of this finding, so there is nothing to dismiss.\n"
 
 // PausedBody is the reply to a request to pause the pull request's
 // automatic reviews; slug names the bot.

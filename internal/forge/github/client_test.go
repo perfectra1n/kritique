@@ -14,7 +14,7 @@ import (
 
 	gh "github.com/google/go-github/v92/github"
 
-	"github.com/home-operations/kritika/internal/forge"
+	"github.com/perfectra1n/kritique/internal/forge"
 )
 
 // newTestClient builds a Client whose underlying go-github API calls, and
@@ -192,16 +192,16 @@ func TestMergeBaseAndBranchTip(t *testing.T) {
 
 func TestFileAt(t *testing.T) {
 	f, c := newFakeAPI(t)
-	f.reply("GET /api/v3/repos/o/r/contents/.kritika.yaml", 200, `{"type":"file","size":8,"encoding":"base64","content":"bW9kZTog\neA=="}`)
+	f.reply("GET /api/v3/repos/o/r/contents/.kritique.yaml", 200, `{"type":"file","size":8,"encoding":"base64","content":"bW9kZTog\neA=="}`)
 	f.reply("GET /api/v3/repos/o/r/contents/gone.yaml", 404, `{"message":"Not Found"}`)
 	f.reply("GET /api/v3/repos/o/r/contents/docs", 200, `[{"type":"file","name":"a.md"}]`)
 	f.reply("GET /api/v3/repos/o/r/contents/link", 200, `{"type":"symlink","target":"a.md"}`)
 	f.reply("GET /api/v3/repos/o/r/contents/big.bin", 200, `{"type":"file","size":1048577,"encoding":"none","content":""}`)
-	got, err := c.FileAt(t.Context(), "o", "r", "base123", ".kritika.yaml")
+	got, err := c.FileAt(t.Context(), "o", "r", "base123", ".kritique.yaml")
 	if err != nil || string(got) != "mode: x" {
 		t.Fatalf("FileAt = %q, %v", got, err)
 	}
-	if !f.saw("GET /api/v3/repos/o/r/contents/.kritika.yaml?ref=base123") {
+	if !f.saw("GET /api/v3/repos/o/r/contents/.kritique.yaml?ref=base123") {
 		t.Fatalf("requests = %v, want the file at the ref", f.requests)
 	}
 	for _, path := range []string{"gone.yaml", "docs", "link"} {
@@ -256,14 +256,14 @@ func TestFindCommentPaginatesAndMatchesAuthorPlusMarker(t *testing.T) {
 	f.mux.HandleFunc("GET /api/v3/repos/o/r/issues/7/comments", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Query().Get("page") == "2" {
-			_, _ = w.Write([]byte(`[{"id":30,"body":"<!-- kritika:pr-7 --> real","user":{"login":"bot[bot]","type":"Bot"}}]`))
+			_, _ = w.Write([]byte(`[{"id":30,"body":"<!-- kritique:pr-7 --> real","user":{"login":"bot[bot]","type":"Bot"}}]`))
 			return
 		}
 		w.Header().Set("Link", `<`+"http://x"+r.URL.Path+`?page=2>; rel="next"`)
-		_, _ = w.Write([]byte(`[{"id":10,"body":"<!-- kritika:pr-7 --> planted","user":{"login":"attacker","type":"User"}},
+		_, _ = w.Write([]byte(`[{"id":10,"body":"<!-- kritique:pr-7 --> planted","user":{"login":"attacker","type":"User"}},
 			{"id":20,"body":"unrelated","user":{"login":"bot[bot]","type":"Bot"}}]`))
 	})
-	id, err := c.FindComment(t.Context(), "o", "r", 7, "bot[bot]", "<!-- kritika:pr-7 -->")
+	id, err := c.FindComment(t.Context(), "o", "r", 7, "bot[bot]", "<!-- kritique:pr-7 -->")
 	if err != nil || id != 30 {
 		t.Fatalf("FindComment = %d, %v; a planted marker by another author must not match", id, err)
 	}
@@ -341,12 +341,12 @@ func TestChangesRequested(t *testing.T) {
 			{"id":1,"user":{"login":"human"},"state":"CHANGES_REQUESTED"},
 			{"id":2,"user":{"login":"human"},"state":"APPROVED"}]`},
 		{name: "a dismissed one does not stand", reviews: `[{"id":1,"user":{"login":"human"},"state":"DISMISSED"}]`},
-		{name: "the bot's own does not count", reviews: `[{"id":1,"user":{"login":"kritika[bot]"},"state":"CHANGES_REQUESTED"}]`},
+		{name: "the bot's own does not count", reviews: `[{"id":1,"user":{"login":"kritique[bot]"},"state":"CHANGES_REQUESTED"}]`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f, c := newFakeAPI(t)
-			c.login = "kritika[bot]"
+			c.login = "kritique[bot]"
 			f.reply("GET /api/v3/repos/o/r/pulls/7/reviews", 200, tt.reviews)
 			got, err := c.ChangesRequested(t.Context(), "o", "r", 7)
 			if err != nil || got != tt.want {
@@ -358,12 +358,12 @@ func TestChangesRequested(t *testing.T) {
 
 func TestApproveAndDismissApprovals(t *testing.T) {
 	f, c := newFakeAPI(t)
-	c.login = "kritika[bot]"
+	c.login = "kritique[bot]"
 	f.reply("GET /api/v3/repos/o/r/pulls/7/reviews", 200, `[
-		{"id":1,"user":{"login":"kritika[bot]"},"state":"COMMENTED","commit_id":"abc"},
+		{"id":1,"user":{"login":"kritique[bot]"},"state":"COMMENTED","commit_id":"abc"},
 		{"id":2,"user":{"login":"human"},"state":"APPROVED","commit_id":"abc"},
-		{"id":3,"user":{"login":"kritika[bot]"},"state":"DISMISSED","commit_id":"old"},
-		{"id":4,"user":{"login":"kritika[bot]"},"state":"APPROVED","commit_id":"old"}]`)
+		{"id":3,"user":{"login":"kritique[bot]"},"state":"DISMISSED","commit_id":"old"},
+		{"id":4,"user":{"login":"kritique[bot]"},"state":"APPROVED","commit_id":"old"}]`)
 	f.reply("POST /api/v3/repos/o/r/pulls/7/reviews", 200, `{"id":5}`)
 	f.reply("PUT /api/v3/repos/o/r/pulls/7/reviews/4/dismissals", 200, `{"id":4,"state":"DISMISSED"}`)
 

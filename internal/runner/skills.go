@@ -13,9 +13,9 @@ import (
 
 	"github.com/go-git/go-git/v6/plumbing/object"
 
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // Notes the runner adds to the pack about the repository's skills.

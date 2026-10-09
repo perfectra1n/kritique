@@ -119,7 +119,7 @@
   }
 </script>
 
-<svelte:head><title>Findings · {slug} · kritika</title></svelte:head>
+<svelte:head><title>Findings · {slug} · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">

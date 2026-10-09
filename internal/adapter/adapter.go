@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/model"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 // Steppers resolves a configured provider to its model adapter, built on

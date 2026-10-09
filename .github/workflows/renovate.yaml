@@ -1,8 +1,9 @@
----
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
 name: Renovate
 
 on:
+  schedule:
+    - cron: 17 * * * *
   push:
     branches:
       - main
@@ -10,6 +11,12 @@ on:
       - .renovaterc.json5
       - .renovate/**.json5
   workflow_dispatch:
+    inputs:
+      logLevel:
+        description: Renovate log level
+        type: choice
+        options: [info, debug]
+        default: info
   issues:
     types:
       - edited
@@ -27,73 +34,90 @@ concurrency:
 jobs:
   renovate:
     name: Renovate
+    # Scheduled, pushed and dispatched runs always go; issue and pull request
+    # events only when they are a ticked Renovate Dashboard box or a Renovate
+    # pull request, so ordinary issue edits don't start a run.
     if: >-
+      github.event_name == 'schedule' ||
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
       (
-        github.actor != vars.BOT_USERNAME &&
+        github.event_name == 'issues' &&
+        contains(github.event.issue.title, 'Renovate Dashboard') &&
         (
-          (
-            github.event_name == 'issues' &&
-            contains(github.event.issue.title, 'Renovate Dashboard') &&
-            (
-              contains(github.event.issue.body, '- [x]') ||
-              contains(github.event.issue.body, 'approve-all-pending-prs') ||
-              contains(github.event.issue.body, 'create-all-rate-limited-prs') ||
-              contains(github.event.issue.body, 'rebase-all-open-prs')
-            )
-          ) ||
-          (
-            github.event_name == 'pull_request' &&
-            github.event.pull_request.user.login == vars.BOT_USERNAME &&
-            (
-              github.event.action == 'closed' ||
-              contains(github.event.pull_request.body, '- [x]')
-            )
-          )
+          contains(github.event.issue.body, '- [x]') ||
+          contains(github.event.issue.body, 'approve-all-pending-prs') ||
+          contains(github.event.issue.body, 'create-all-rate-limited-prs') ||
+          contains(github.event.issue.body, 'rebase-all-open-prs')
+        )
+      ) ||
+      (
+        github.event_name == 'pull_request' &&
+        startsWith(github.event.pull_request.head.ref, 'renovate/') &&
+        (
+          github.event.action == 'closed' ||
+          contains(github.event.pull_request.body, '- [x]')
         )
       )
     runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      # renovate/stability-days and the other branch statuses.
+      statuses: write
     steps:
-      - name: Generate Token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          client-id: ${{ secrets.BOT_CLIENT_ID }}
-          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ".github"
-          permission-actions: write
+          persist-credentials: false
 
-      - name: Run Renovate
-        id: dispatch
-        env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO_NAME: ${{ github.event.repository.name }}
+      - name: Restore Renovate repository cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/renovate/cache/renovate/repository
+          key: renovate-repository-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: renovate-repository-cache-
+
+      - name: Align cache ownership for the Renovate container
         run: |
-          RUN_URL=$(gh workflow run renovate.yaml \
-            --repo "${{ github.repository_owner }}/.github" \
-            --ref main \
-            --field "autodiscoverFilter=${REPO_NAME}")
-          echo "run_id=${RUN_URL##*/}" >> "$GITHUB_OUTPUT"
+          sudo mkdir -p /tmp/renovate/cache/renovate/repository
+          # Renovate runs in its container as uid 12021; give it ownership so it
+          # can read and rewrite the restored cache.
+          sudo chown -R 12021:0 /tmp/renovate
 
-      - name: Await Renovate Completion
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+      # RENOVATE_TOKEN, a fine-grained PAT with contents, pull requests,
+      # issues and workflows write on this repository, is optional but
+      # recommended: pull requests opened with the built-in token don't start
+      # CI, so they never go green to automerge, and the built-in token can't
+      # change files under .github/workflows.
+      #
+      # The entrypoint installs helm-docs and helm-schema, which the shared
+      # preset's post-upgrade tasks regenerate the chart README and schema
+      # with, and the allowlists below are the ones the org-wide Renovate in
+      # home-operations/.github ran these presets with.
+      - name: Renovate
+        uses: renovatebot/github-action@6d26fcf0275dc65624cbc3d51fe78bc773f98321 # v46.3.6
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
-        run: |
-          gh run watch \
-            --repo "${{ github.repository_owner }}/.github" \
-            "${RUN_ID}" \
-            --exit-status
+          LOG_LEVEL: ${{ inputs.logLevel || 'info' }}
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          RENOVATE_ONBOARDING: "false"
+          RENOVATE_REQUIRE_CONFIG: optional
+          RENOVATE_PLATFORM: github
+          RENOVATE_PLATFORM_COMMIT: enabled
+          RENOVATE_INTERNAL_CHECKS_FILTER: strict
+          RENOVATE_CUSTOM_ENV_VARIABLES: '{"MISE_TRUSTED_CONFIG_PATHS":"/tmp/renovate/repos"}'
+          RENOVATE_ALLOWED_UNSAFE_EXECUTIONS: '["goGenerate", "mise"]'
+          RENOVATE_ALLOWED_COMMANDS: '["^helm-docs ", "^helm-schema ", "^npm "]'
+          RENOVATE_REPOSITORY_CACHE: enabled
+        with:
+          docker-cmd-file: .github/renovate-entrypoint.sh
+          docker-user: root
+          token: ${{ secrets.RENOVATE_TOKEN || github.token }}
 
-      - name: Renovate Output
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-        env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          RUN_ID: ${{ steps.dispatch.outputs.run_id }}
-        run: |-
-          gh run view \
-            --repo "${{ github.repository_owner }}/.github" \
-            --log "${RUN_ID}"
+      - name: Save Renovate repository cache
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/renovate/cache/renovate/repository
+          key: renovate-repository-cache-${{ github.run_id }}-${{ github.run_attempt }}

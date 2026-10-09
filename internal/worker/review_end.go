@@ -9,10 +9,10 @@ import (
 
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritika/internal/executor"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // judgeRun ends a review whose run ended before its agent could finish it,
@@ -82,7 +82,7 @@ func (w *Review) finishReview(ctx context.Context, accountID, reviewID string, s
 // a head whose review broke must not read as one still waiting for it.
 // The description stays generic since the error can name internal hosts.
 func (w *Review) failReview(ctx context.Context, e endedReview, patchID, errText string) error {
-	if err := e.client.SetStatus(ctx, e.owner, e.repo, e.headSHA, forge.StatusError, "kritika: review failed"); err != nil {
+	if err := e.client.SetStatus(ctx, e.owner, e.repo, e.headSHA, forge.StatusError, "kritique: review failed"); err != nil {
 		e.logger.Warn("commit status not set", "error", err)
 	}
 	return w.finishReview(ctx, e.accountID, e.reviewID, store.ReviewFailed, patchID, errText)
@@ -126,9 +126,9 @@ func (w *Review) finishEnded(ctx context.Context, e endedReview, err error) erro
 		w.Metrics.Review(e.accountKey, string(store.ReviewSuperseded), time.Since(e.started))
 		return fmt.Errorf("worker: review %s: %w", why, cause)
 	}
-	status, errText, desc := store.ReviewCanceled, "", "kritika: review canceled"
+	status, errText, desc := store.ReviewCanceled, "", "kritique: review canceled"
 	if !errors.Is(cause, river.ErrJobCancelledRemotely) {
-		status, errText, desc = store.ReviewFailed, "review timed out: "+cause.Error(), "kritika: review timed out"
+		status, errText, desc = store.ReviewFailed, "review timed out: "+cause.Error(), "kritique: review timed out"
 	}
 	finished, ferr := w.endReview(cctx, e.accountID, e.reviewID, store.ReviewEnd{Status: status, Error: errText, OnlyUnfinished: true})
 	if ferr != nil || !finished {

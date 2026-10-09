@@ -9,8 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/auth"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // defaultUsageWindow is the span a usage series covers without ?from=, and

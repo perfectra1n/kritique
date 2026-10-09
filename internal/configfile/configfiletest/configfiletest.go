@@ -5,7 +5,7 @@ package configfiletest
 import (
 	"testing"
 
-	"github.com/home-operations/kritika/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // Load parses doc as the configuration file, failing the test on any

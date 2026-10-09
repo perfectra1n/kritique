@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/model"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 // fakeTool is a Tool whose Run returns a fixed output or error, for

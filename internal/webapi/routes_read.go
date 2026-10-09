@@ -14,11 +14,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/auth"
-	"github.com/home-operations/kritika/internal/config"
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/config"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // recentIndexRuns is how many index runs a repository's detail lists.
@@ -313,7 +313,7 @@ func (s *Server) getRepo(w http.ResponseWriter, r *http.Request, t *accountScope
 	return nil
 }
 
-// repoConfig applies the .kritika.yaml a review read to the admin's
+// repoConfig applies the .kritique.yaml a review read to the admin's
 // settings as they are now; nil when no review has read one.
 func repoConfig(settings configfile.Settings, row *store.RepoFileRow) *RepoConfig {
 	if row == nil {

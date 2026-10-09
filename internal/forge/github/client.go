@@ -13,8 +13,8 @@ import (
 
 	gh "github.com/google/go-github/v92/github"
 
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // Client is one App installation's access to GitHub.

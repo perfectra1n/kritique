@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/home-operations/kritika/internal/model"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 // ContinueTokens is the most a conversation may hold, in tokens, for a

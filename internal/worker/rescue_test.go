@@ -10,9 +10,9 @@ import (
 
 	"github.com/riverqueue/river/rivertype"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // fakeRescueStore hands out abandoned jobs and orphaned runs and records
@@ -224,9 +224,9 @@ apps:
 		want []string
 	}{
 		{"discarded on its last attempt", store.AbandonedJob{ID: 1, Kind: "review", Attempt: 8, MaxAttempts: 8}, head,
-			[]string{"acme/widgets@abc error kritika: review failed"}},
+			[]string{"acme/widgets@abc error kritique: review failed"}},
 		{"cancelled", store.AbandonedJob{ID: 1, Kind: "review", Attempt: 1, MaxAttempts: 8, CancelRequested: true}, head,
-			[]string{"acme/widgets@abc error kritika: review canceled"}},
+			[]string{"acme/widgets@abc error kritique: review canceled"}},
 		{"retried", store.AbandonedJob{ID: 1, Kind: "review", Attempt: 1, MaxAttempts: 8}, head, nil},
 		{"an index job", store.AbandonedJob{ID: 1, Kind: "index", Attempt: 3, MaxAttempts: 3}, head, nil},
 		{"a job that started no review", store.AbandonedJob{ID: 1, Kind: "review", Attempt: 8, MaxAttempts: 8}, store.JobHead{}, nil},

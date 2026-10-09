@@ -3,7 +3,7 @@ package gitfetch
 import (
 	"testing"
 
-	"github.com/home-operations/kritika/internal/udiff"
+	"github.com/perfectra1n/kritique/internal/udiff"
 )
 
 const twoHunks = `diff --git a/svc.go b/svc.go

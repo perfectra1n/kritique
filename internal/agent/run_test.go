@@ -18,13 +18,13 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/storage/memory"
 
-	"github.com/home-operations/kritika/internal/gittest"
+	"github.com/perfectra1n/kritique/internal/gittest"
 )
 
 // helperEnv makes the test binary act as a command for the run tool, so
 // the tests run a real process without depending on what the host has on
 // its PATH.
-const helperEnv = "KRITIKA_AGENT_TEST_HELPER"
+const helperEnv = "KRITIQUE_AGENT_TEST_HELPER"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(helperEnv) == "1" {

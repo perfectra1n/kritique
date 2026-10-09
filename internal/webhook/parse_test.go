@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 const ghPullRequest = `{
@@ -170,7 +170,7 @@ func TestParseGitHubRepositoryTraits(t *testing.T) {
 	}
 	ev, err := Parse(configfile.ForgeGitHub, gh("repository"), []byte(`{"action":"edited","repository":{"full_name":"a/b"}}`))
 	if err != nil || ev.Kind != KindIgnored || ev.Action != "repository" {
-		t.Fatalf("an edit changes nothing kritika keeps: %+v %v", ev, err)
+		t.Fatalf("an edit changes nothing kritique keeps: %+v %v", ev, err)
 	}
 }
 
@@ -214,9 +214,9 @@ func TestParseGitHubReviewThread(t *testing.T) {
 		{"a file-level comment is not outdated", `{"action":"resolved","pull_request":{"number":8},"sender":{"login":"devin","type":"User"},
 		  "thread":{"comments":[{"id":100,"in_reply_to_id":null,"line":null,"original_line":null}]},` + repo + `}`,
 			KindThread, Thread{Number: 8, CommentID: 100, Resolved: true, Sender: "devin"}},
-		{"unresolved by the bot", `{"action":"unresolved","pull_request":{"number":8},"sender":{"login":"kritika[bot]","type":"Bot"},
+		{"unresolved by the bot", `{"action":"unresolved","pull_request":{"number":8},"sender":{"login":"kritique[bot]","type":"Bot"},
 		  "thread":{"comments":[{"id":101,"in_reply_to_id":100},{"id":100}]},` + repo + `}`,
-			KindThread, Thread{Number: 8, CommentID: 100, Sender: "kritika[bot]", SenderIsBot: true}},
+			KindThread, Thread{Number: 8, CommentID: 100, Sender: "kritique[bot]", SenderIsBot: true}},
 		{"no comments", `{"action":"resolved","pull_request":{"number":8},"sender":{"login":"devin"},"thread":{"comments":[]},` + repo + `}`,
 			KindThread, Thread{Number: 8, Resolved: true, Sender: "devin"}},
 		{"other action", `{"action":"edited","pull_request":{"number":8},"sender":{"login":"devin"},"thread":{},` + repo + `}`,

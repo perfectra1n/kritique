@@ -1,5 +1,5 @@
 // Package prfilter compiles and evaluates a CEL boolean expression that decides
-// which pull requests kritika reviews (a condition of the configuration's
+// which pull requests kritique reviews (a condition of the configuration's
 // trigger.include and trigger.exclude lists).
 //
 // The expression sees a single variable, pr — a map of the PR's fields. The
@@ -107,7 +107,7 @@ func (p *Program) Uses(field string) bool {
 
 // Eval runs the expression against the given pr field map and reports whether
 // the PR is allowed. A runtime error or a non-boolean result is returned as an
-// error (the caller decides the fail-safe; kritika skips the PR and logs).
+// error (the caller decides the fail-safe; kritique skips the PR and logs).
 func (p *Program) Eval(pr map[string]any) (bool, error) {
 	out, _, err := p.prg.Eval(map[string]any{"pr": pr})
 	if err != nil {

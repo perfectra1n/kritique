@@ -9,11 +9,11 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/runner"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 func TestDedupesBotPatch(t *testing.T) {
@@ -79,15 +79,15 @@ func TestEarlyEndStatus(t *testing.T) {
 		want      string
 	}{
 		{name: "the repository's filter", status: store.ReviewSkipped, skip: string(repoconfig.SkipFiltered),
-			wantState: forge.StatusSuccess, want: "kritika: skipped (filtered)"},
+			wantState: forge.StatusSuccess, want: "kritique: skipped (filtered)"},
 		{name: "an exclusion with a name", status: store.ReviewSkipped, skip: string(repoconfig.SkipFiltered), filter: "skip-label",
-			wantState: forge.StatusSuccess, want: "kritika: skipped (filtered: skip-label)"},
+			wantState: forge.StatusSuccess, want: "kritique: skipped (filtered: skip-label)"},
 		{name: "a bot's unchanged patch", status: store.ReviewSkipped, skip: runner.SkipUnchangedPatch,
-			wantState: forge.StatusSuccess, want: "kritika: skipped (patch unchanged since the last review)"},
+			wantState: forge.StatusSuccess, want: "kritique: skipped (patch unchanged since the last review)"},
 		{name: "an admission's own reason", status: store.ReviewSkipped, reason: "no review model is configured for this repository",
-			wantState: forge.StatusSuccess, want: "kritika: skipped (no review model is configured for this repository)"},
+			wantState: forge.StatusSuccess, want: "kritique: skipped (no review model is configured for this repository)"},
 		{name: "a cap", status: store.ReviewCapped, reason: "reviewsPerDay (5) reached",
-			wantState: forge.StatusSuccess, want: "kritika: capped (reviewsPerDay (5) reached)"},
+			wantState: forge.StatusSuccess, want: "kritique: capped (reviewsPerDay (5) reached)"},
 		{name: "a superseded head reports nothing", status: store.ReviewSuperseded},
 	}
 	for _, tt := range tests {

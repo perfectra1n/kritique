@@ -10,9 +10,9 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/gitfetch"
-	"github.com/home-operations/kritika/internal/indexer"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/indexer"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // stagingBatch is how many staged chunks one INSERT carries.

@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 func TestRequestsDismiss(t *testing.T) {
@@ -14,15 +14,15 @@ func TestRequestsDismiss(t *testing.T) {
 		reason string
 		want   bool
 	}{
-		{"@kritika dismiss", "", true},
-		{"@kritika dismiss: we lock this upstream", "we lock this upstream", true},
-		{"@Kritika Dismissed, the caller checks nil\nalways has", "the caller checks nil\nalways has", true},
-		{"@kritika dismissing this", "", false},
-		{"@kritikabot dismiss", "", false},
-		{"please @kritika review", "", false},
-		{"dismiss @kritika", "", false},
+		{"@kritique dismiss", "", true},
+		{"@kritique dismiss: we lock this upstream", "we lock this upstream", true},
+		{"@Kritique Dismissed, the caller checks nil\nalways has", "the caller checks nil\nalways has", true},
+		{"@kritique dismissing this", "", false},
+		{"@kritiquebot dismiss", "", false},
+		{"please @kritique review", "", false},
+		{"dismiss @kritique", "", false},
 	} {
-		reason, ok := requestsDismiss(tt.body, "kritika")
+		reason, ok := requestsDismiss(tt.body, "kritique")
 		if ok != tt.want || reason != tt.reason {
 			t.Errorf("requestsDismiss(%q) = %q, %v; want %q, %v", tt.body, reason, ok, tt.reason, tt.want)
 		}
@@ -68,13 +68,13 @@ func TestRequestsPause(t *testing.T) {
 		body       string
 		paused, ok bool
 	}{
-		{"@kritika pause", true, true},
-		{"@Kritika Resume please", false, true},
-		{"@kritika paused?", false, false},
-		{"@kritikabot pause", false, false},
-		{"pause @kritika", false, false},
+		{"@kritique pause", true, true},
+		{"@Kritique Resume please", false, true},
+		{"@kritique paused?", false, false},
+		{"@kritiquebot pause", false, false},
+		{"pause @kritique", false, false},
 	} {
-		paused, ok := requestsPause(tt.body, "kritika")
+		paused, ok := requestsPause(tt.body, "kritique")
 		if ok != tt.ok || paused != tt.paused {
 			t.Errorf("requestsPause(%q) = %v, %v; want %v, %v", tt.body, paused, ok, tt.paused, tt.ok)
 		}

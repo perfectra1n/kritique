@@ -10,8 +10,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/textcut"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // Limits bounds a Run: how many steps it may take, how much of a tool's

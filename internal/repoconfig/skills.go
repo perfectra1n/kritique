@@ -12,9 +12,9 @@ import (
 
 	"go.yaml.in/yaml/v4"
 
-	"github.com/home-operations/kritika/internal/chunk"
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/chunk"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // SkillFile is the file that makes a folder a skill: frontmatter with the

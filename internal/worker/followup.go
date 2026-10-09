@@ -13,15 +13,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/executor"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/gateway"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/runner"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/gateway"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Follow-up bounds: mentions answered per pull request per hour before a
@@ -107,7 +107,7 @@ type followUp struct {
 	file     *configfile.File
 	account  *configfile.Account
 	settings configfile.Settings
-	// eff is settings with the merge-base .kritika.yaml applied, and
+	// eff is settings with the merge-base .kritique.yaml applied, and
 	// mergeBase that commit; repoConfig reads both.
 	eff       Effective
 	mergeBase string
@@ -510,7 +510,7 @@ func (f *followUp) diffBase(rec reviewRecord) string {
 	return f.mergeBase
 }
 
-// repoConfig applies the .kritika.yaml at the pull request's merge base to
+// repoConfig applies the .kritique.yaml at the pull request's merge base to
 // the follow-up's settings, so it answers with the repository's model,
 // agent settings and instructions. It returns why the file stops the
 // follow-up, or "".

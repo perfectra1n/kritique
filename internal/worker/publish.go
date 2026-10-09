@@ -11,14 +11,14 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/agent"
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/jobs"
-	"github.com/home-operations/kritika/internal/repoconfig"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/runner"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/runner"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // publishPhase writes a prepared review's answer back to the forge and the
@@ -41,7 +41,7 @@ type publishPhase struct {
 	trigger string
 	logger  *slog.Logger
 	// parse and templates are the repository's contract settings; the zero
-	// values are kritika's defaults.
+	// values are kritique's defaults.
 	parse     review.ParseOptions
 	templates review.Templates
 	// repoNotes are what the summary states about the repository's
@@ -294,7 +294,7 @@ func skipDescription(reason, filter string) string {
 }
 
 // incomplete replaces the sticky comment with one saying why this head was
-// not fully reviewed, in kritika's own template, and records the model.
+// not fully reviewed, in kritique's own template, and records the model.
 func (p *publishPhase) incomplete(ctx context.Context, reason, modelName string) error {
 	owner, repo := p.pr.ownerRepo()
 	web, pull := p.dashboard(owner, repo)
@@ -307,7 +307,7 @@ func (p *publishPhase) incomplete(ctx context.Context, reason, modelName string)
 	if err != nil {
 		return err
 	}
-	if err := p.client.SetStatus(ctx, owner, repo, p.pr.headSHA, forge.StatusError, "kritika: review incomplete ("+reason+")"); err != nil {
+	if err := p.client.SetStatus(ctx, owner, repo, p.pr.headSHA, forge.StatusError, "kritique: review incomplete ("+reason+")"); err != nil {
 		p.logger.Warn("commit status not set", "error", err)
 	}
 	p.statusReported = true
@@ -468,7 +468,7 @@ func (p *publishPhase) writeBack(
 		}
 	}
 	state, desc := p.verdict(counts.Total())
-	if err := p.client.SetStatus(ctx, owner, repo, p.pr.headSHA, state, "kritika: "+desc); err != nil {
+	if err := p.client.SetStatus(ctx, owner, repo, p.pr.headSHA, state, "kritique: "+desc); err != nil {
 		p.logger.Warn("commit status not set", "error", err)
 	}
 	// A merged or closed pull request's head merges no more, so it is

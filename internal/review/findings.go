@@ -1,5 +1,5 @@
 // Package review turns a context pack into a prompt, a model answer into
-// findings, and findings into the comments kritika posts. It knows nothing
+// findings, and findings into the comments kritique posts. It knows nothing
 // about forges or models beyond their interfaces.
 //
 // # Templates
@@ -11,7 +11,7 @@
 // available: env, filesystem, network, random, uniqueid, checksum and
 // crypto, and the template, define and block actions, so a template can
 // read no file and call no other template. Rendering is bounded, and a
-// template that steps outside a bound falls back to kritika's default with
+// template that steps outside a bound falls back to kritique's default with
 // a note:
 //
 //   - output of 64 KiB, marker included;
@@ -20,7 +20,7 @@
 //     for repeat, indent, nindent, join, replace, regexReplaceAll,
 //     regexReplaceAllLiteral, seq, until, untilStep and printf, an estimate
 //     of what it allocates; printf refuses a width or precision given as *;
-//   - two seconds per render; identifiers starting with __kritika_ are
+//   - two seconds per render; identifiers starting with __kritique_ are
 //     reserved.
 //
 // The summary template's dot is a RenderData, the inline template's a
@@ -36,7 +36,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/contextpack"
+	"github.com/perfectra1n/kritique/internal/contextpack"
 )
 
 // Severity of a finding, in the order the summary lists them.
@@ -155,11 +155,11 @@ type Finding struct {
 	// prefers it, so a finding reported again in other words keeps the
 	// thread its first wording opened.
 	Fingerprint string `json:"fingerprint,omitempty"`
-	// URL links the finding's lines at the head commit. kritika sets it
+	// URL links the finding's lines at the head commit. kritique sets it
 	// when rendering; the model never does.
 	URL string `json:"-"`
 	// ThreadURL links the finding's inline comment thread on the forge,
-	// "" when it has none. kritika sets it when rendering.
+	// "" when it has none. kritique sets it when rendering.
 	ThreadURL string `json:"-"`
 }
 
@@ -228,7 +228,7 @@ func (r Result) Counts() Counts {
 // Total is the number of findings at any severity.
 func (c Counts) Total() int { return c.Blocking + c.Important + c.Nit }
 
-// Approvable reports whether the result lets kritika approve the pull
+// Approvable reports whether the result lets kritique approve the pull
 // request: nothing blocking and nothing important, so nits alone do not
 // withhold an approval.
 func (c Counts) Approvable() bool { return c.Blocking == 0 && c.Important == 0 }
@@ -298,7 +298,7 @@ const (
 // JSON Schema types the answer shapes use more than once.
 const schemaObject, schemaString, schemaArray = "object", "string", "array"
 
-// jsonSchema is the subset of JSON Schema kritika's answer shapes use.
+// jsonSchema is the subset of JSON Schema kritique's answer shapes use.
 type jsonSchema struct {
 	Type        string                 `json:"type"`
 	Description string                 `json:"description,omitempty"`
@@ -579,7 +579,7 @@ func Lenient(check func(json.RawMessage) error) func(json.RawMessage) bool {
 	}
 }
 
-// Parse decodes the model's JSON and drops findings kritika cannot post: an
+// Parse decodes the model's JSON and drops findings kritique cannot post: an
 // unknown severity or category, a missing field, a missing fix when opts
 // require one, or a line the diff
 // does not add or keep. Dropped findings are returned

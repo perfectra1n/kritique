@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // retentionSweepInterval is how often the leader deletes model-call

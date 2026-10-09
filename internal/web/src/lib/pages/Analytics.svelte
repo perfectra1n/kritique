@@ -84,7 +84,7 @@
   ];
 </script>
 
-<svelte:head><title>Analytics · {slug} · kritika</title></svelte:head>
+<svelte:head><title>Analytics · {slug} · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">
@@ -95,12 +95,12 @@
         <header class="panel-head"><h2 id="an-connection">Connection</h2></header>
         {#if unsignedWebhooks(inst)}
           <p class="notice" role="note">
-            GitHub sends <span class="mono">{inst.name}</span>'s webhooks with no signature, so kritika refuses them, only polls for
-            new pull requests and cannot answer mentions. Set the GitHub App's webhook secret to the one kritika holds.
+            GitHub sends <span class="mono">{inst.name}</span>'s webhooks with no signature, so kritique refuses them, only polls for
+            new pull requests and cannot answer mentions. Set the GitHub App's webhook secret to the one kritique holds.
           </p>
         {:else}
           <p class="notice" role="note">
-            No webhook has reached <span class="mono">{inst.name}</span>, so kritika only polls it for new pull requests and
+            No webhook has reached <span class="mono">{inst.name}</span>, so kritique only polls it for new pull requests and
             cannot answer mentions. Point the GitHub App's webhook at <span class="mono">{hookURL(inst.hookPath)}</span>.
           </p>
         {/if}
@@ -195,7 +195,7 @@
               now={c.medianMergeMs}
               before={p.medianMergeMs}
               good="down"
-              define="The median time from opening to merging, of the pull requests kritika knows that merged in the period"
+              define="The median time from opening to merging, of the pull requests kritique knows that merged in the period"
             />
             <StatTile
               label="Reactions"

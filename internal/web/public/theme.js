@@ -5,7 +5,7 @@
 (() => {
   let pref = 'auto';
   try {
-    pref = localStorage.getItem('kritika-theme') ?? 'auto';
+    pref = localStorage.getItem('kritique-theme') ?? 'auto';
   } catch {
     // Storage blocked: follow the OS, as theme.svelte.ts does.
   }

@@ -1,0 +1,171 @@
+{{ template "chart.header" . }}
+
+{{- /* Hand-rolled badges instead of chart.badgesSection so release-please can
+stamp the version: its updater replaces only the first semver on an annotated
+line and would swallow a `-color` suffix as a prerelease, so each version badge
+uses the static/v1 query form (version followed by `&`), keeps the version out
+of its alt text, and carries its own annotation. */}}
+![Version](https://img.shields.io/static/v1?label=Version&message={{ .Version }}&color=informational&style=flat-square) <!-- x-release-please-version -->
+![Type: {{ .Type }}](https://img.shields.io/badge/Type-{{ .Type }}-informational?style=flat-square)
+![AppVersion](https://img.shields.io/static/v1?label=AppVersion&message={{ .AppVersion }}&color=informational&style=flat-square) <!-- x-release-please-version -->
+
+{{ template "chart.description" . }}
+
+{{ template "chart.homepageLine" . }}
+
+## Usage
+
+kritique ships as an OCI Helm chart. It needs a Postgres with
+[VectorChord](https://github.com/tensorchord/VectorChord) and pgvector, three
+roles, its public URL, a way to sign in, and its configuration file:
+
+```sh
+helm install kritique oci://ghcr.io/perfectra1n/charts/kritique \
+  --set database.app.existingSecret=kritique-postgres-app \
+  --set database.owner.existingSecret=kritique-postgres-credentials \
+  --set database.runner.existingSecret=kritique-postgres-runner \
+  --values my-values.yaml
+```
+
+where `my-values.yaml` sets:
+
+```yaml
+config:
+  webUrl: https://kritique.example.com
+  authAdminPassword:
+    valueFrom:
+      secretKeyRef: { name: kritique-admin, key: password }
+  providersApiKey:
+    valueFrom:
+      secretKeyRef: { name: kritique-openrouter, key: api-key }
+  reviewModel: openrouter/vendor/large-model
+configFile:
+  apps:
+    github:
+      accounts: [org-1]
+      clientId: Iv1.example
+      privateKey: { env: GITHUB_APP_PRIVATE_KEY }
+      webhookSecret: { env: GITHUB_APP_WEBHOOK_SECRET }
+# A Secret with the keys GITHUB_APP_PRIVATE_KEY and GITHUB_APP_WEBHOOK_SECRET.
+envFrom:
+  - secretRef:
+      name: kritique-bot
+ingress:
+  enabled: true
+  hosts: [{ host: kritique.example.com, paths: [{ path: / }] }]
+  tls: [{ hosts: [kritique.example.com], secretName: kritique-tls }]
+```
+
+`config` is every `KRITIQUE_*` variable the chart does not derive from its
+other values, keyed by its name without the prefix in camelCase
+(`pollInterval` is `KRITIQUE_POLL_INTERVAL`): `webUrl`, the one public URL,
+with the dashboard at it and the webhook listener under it at `/hooks`;
+logging, the workers, polling, retention and runner Jobs' deadline and
+RuntimeClass; and the variables that stand in for the configuration file's
+sections, sign-in, one app, one provider, the review, confidence and
+trigger settings and the embedder (see
+[the configuration reference](https://github.com/perfectra1n/kritique/blob/main/docs/configuration.md)).
+A key left empty sets nothing and kritique's default applies; a secret
+takes a `valueFrom` map, like the admin password above, which is the way
+into a fresh instance. The chart's Ingress or HTTPRoute must route
+`webUrl`'s host.
+
+`configFile` is what is reviewed and how: sign-in (`auth`), the GitHub
+`apps`, model `providers`, the `embedding`, `egress`, the settings every
+repository gets (`review`, `confidence`, `trigger`, `comments`, `agent`),
+`repositories` entries keyed `owner/*` or `owner/name`, and `accounts`,
+with the `config` variables winning over it.
+
+- kritique reads it at startup: the pods carry its checksum, so a change
+  rolls them, and a pod whose file doesn't load never becomes ready while
+  the ones before it keep serving.
+- Secrets never go in it: it names environment variables, which `env` and
+  `envFrom` set from existing Secrets, the way any Kubernetes container's
+  environment is set.
+- The chart refuses a `KRITIQUE_*` variable under `env`, naming its
+  `config` key, and a `config` key for a variable it derives from its
+  other values, such as the addresses or the database.
+
+The
+[setup guide](https://github.com/perfectra1n/kritique/blob/main/docs/setup.md)
+covers creating the GitHub App, and the dashboard's setup checklist shows
+what a fresh instance still lacks.
+
+### Database
+
+The chart requires three Postgres roles, and kritique checks them at
+start:
+
+| Role        | Values                                                   | What it does                                             | kritique refuses one that                        |
+| ----------- | -------------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------- |
+| owner       | `database.owner.existingSecret`                          | runs migrations and applies configuration on the leader  | is a superuser                                  |
+| application | `database.app.existingSecret`, `database.app.role`       | serves everything else, under row-level security         | owns a table, is a superuser or has `BYPASSRLS` |
+| runner      | `database.runner.existingSecret`, `database.runner.role` | is handed to runner Jobs, and can only write its own run |                                                 |
+
+The `vchord` (VectorChord) and `vector` (pgvector, whose types it builds on)
+extensions must exist before the first start, and `vchord` must be in
+`shared_preload_libraries`.
+
+The owner and application connections must reach Postgres directly, or
+through a pooler in session mode. The leader is whichever replica holds a
+session advisory lock on its owner connection, and the dashboard's live
+updates and the job queue's notifications `LISTEN` on the application
+connection. A transaction-mode pooler, such as PgBouncer or a CloudNativePG
+`Pooler` with `poolMode: transaction`, hands a session to other clients
+between transactions, which breaks both. `kritique_leader` is 1 on the replica
+that holds the lock.
+
+[Postgres with CloudNativePG](https://kritique.perfectra1n.github.io/database/)
+sets this up end to end: a two-instance cluster with VectorChord mounted as
+an image volume extension, the extensions through a `Database` resource, the
+application and runner roles as `DatabaseRole` resources, the Secrets with
+their `uri` key for `database.*.existingSecret`, failover and backups.
+
+### Security
+
+Runner Jobs parse untrusted content and run what the model asks, so the
+chart confines them:
+
+- With `networkPolicy.enabled`, a runner pod reaches nothing but DNS,
+  Postgres and the egress gateway kritique serve runs on
+  `service.gatewayPort`, which allows what the configuration file's
+  `egress` lists and is the runner's only way to its model.
+- A runner holds no provider key or App key: only a GitHub token for its
+  run, a gateway token and the runner role's database URI.
+- `runner.tools` adds programs a review's `agent.commands` may run, from
+  their own images; `config.runnerRuntimeClass` puts runner Jobs under a
+  sandboxed runtime such as gVisor; `runner.resources` keeps a runaway run
+  in its own cgroup.
+
+[Security](https://kritique.perfectra1n.github.io/security/) covers the
+gateway, runner tools and the sandbox in full.
+
+### Topology
+
+The chart runs one Deployment of `kritique serve`, one replica by default.
+Its rolling update surges a new pod and takes the old one down only once the
+new one is ready, so a rollout, such as the one a changed `configFile`
+starts, keeps one serving on its own: a pod is ready only once its database
+answers and it serves webhooks. Every replica serves webhooks and
+the dashboard and works jobs, and one holds the leader lock at a time, so
+`replicas: 2` keeps one serving while a pod or node is lost; the chart then
+adds a PodDisruptionBudget so a drain takes one at a time. Until a lost
+replica is back, webhooks are refused; the next poll picks up the pull
+requests they missed, though not the mentions, which only a webhook
+delivers. Runner pods are the Jobs `kritique serve` creates, one per review,
+follow-up and index run, running `kritique run`. A replica that stops drains its jobs
+first; one that dies outright leaves them to the leader, which hands them
+back to the queue within a few minutes and deletes the runner Jobs they
+left, and a remaining replica works them.
+
+{{ template "chart.maintainersSection" . }}
+
+{{ template "chart.sourcesSection" . }}
+
+{{ template "chart.requirementsSection" . }}
+
+{{ template "chart.valuesSection" . }}
+
+---
+
+_This README is generated by [helm-docs](https://github.com/norwoodj/helm-docs) from `Chart.yaml` and `values.yaml`. Edit those (or `README.md.gotmpl`) and run `mise run generate`._

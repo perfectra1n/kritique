@@ -1,6 +1,6 @@
 # Dashboard
 
-kritika serves a dashboard at `KRITIKA_WEB_URL`, the chart's
+kritique serves a dashboard at `KRITIQUE_WEB_URL`, the chart's
 `config.webUrl`, which the webhook listener shares under `/hooks`. Sign in
 with a local admin password, GitHub or an OIDC provider, as
 [`auth`](configuration.md#auth) configures, with the role it maps you to.
@@ -28,7 +28,7 @@ The instance's tabs are about every account at once:
 
 | Tab           | What it shows                                                                                                                                                                                                                                           |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Overview      | totals across the accounts you can read, and each account's own with its health: the open pull requests that want a look, a cap that is close, and whether its App's webhooks arrive or kritika only polls it; each links to where the account shows it |
+| Overview      | totals across the accounts you can read, and each account's own with its health: the open pull requests that want a look, a cap that is close, and whether its App's webhooks arrive or kritique only polls it; each links to where the account shows it |
 | Queue         | with more than one account, the review, follow-up and index jobs of all of them, and how many of each account's model slots (`limits.concurrency`) running reviews hold, which is why a review of it waits                                              |
 | Configuration | for an admin, the [Configuration page](#configuration-page)                                                                                                                                                                                             |
 
@@ -52,7 +52,7 @@ span before, by day or week:
 
 - pull requests reviewed, reviews, findings and the share addressed;
 - the median review time, and the median time from opening to merging;
-- the 👍 and 👎 on kritika's inline comments, which the poller reads for a
+- the 👍 and 👎 on kritique's inline comments, which the poller reads for a
   week after a pull request's latest review, so they need polling on;
 - spend, and the most reviewed repositories.
 
@@ -60,7 +60,7 @@ Its **Findings** list has each finding once per pull request, however many
 reviews repeated it: addressed once a later review of the pull request, at
 a newer head, no longer reports it, or dismissed, with the reason, once a
 maintainer dismissed it ([commands](reviews.md#commands)). A finding
-kritika posted inline links to its thread on GitHub, here and on its
+kritique posted inline links to its thread on GitHub, here and on its
 review, and one that enforces a written rule names it. The tab also counts
 findings by category.
 
@@ -90,7 +90,7 @@ as you type:
 The Rules tab lists what the account's reviews check: rules written in the
 configuration, as text or a file, and context files that explain the
 code. Each shows where it is set (a layer of the configuration, a
-repository's entry, or a repository's `.kritika.yaml` as its last review
+repository's entry, or a repository's `.kritique.yaml` as its last review
 read it), the paths it applies to, and the repositories that read it. A
 written rule also has the findings that cite it, counted as the Findings
 list counts them, and how many of those were addressed, so a noisy rule
@@ -111,7 +111,7 @@ be out of date until they are back.
 
 ## First run
 
-The dashboard does not configure kritika: the configuration file does.
+The dashboard does not configure kritique: the configuration file does.
 Until an instance can review, with a GitHub App and a default review
 model, a banner tells an admin so and leads to the Configuration page,
 whose Setup checklist names each step still missing and what to set for
@@ -171,7 +171,7 @@ Re-run, cancel and reindex queue the work rather than running it inline.
 
 - The configuration is read at startup. A file that does not load fails
   startup, so a rollout that brings one leaves the old pods serving; one
-  the leader cannot apply to the store raises the `kritika_config_error`
+  the leader cannot apply to the store raises the `kritique_config_error`
   gauge, keeps the last applied configuration, and is not tried again
   before a restart.
 - A secret is read from its variable at startup too: restart the pods

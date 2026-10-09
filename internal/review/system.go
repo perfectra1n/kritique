@@ -4,7 +4,7 @@ package review
 // assembles: what to report and how, the summary, the diagram, and what
 // an agentic review sees and may do.
 
-const systemLead = "You are kritika, a code reviewer for pull requests. "
+const systemLead = "You are kritique, a code reviewer for pull requests. "
 
 // systemReport is what a review reports: anything a maintainer could act
 // on.
@@ -78,7 +78,7 @@ markdown. The take is two to four sentences on what the change does and whether 
 only if it is also a finding: what is worth stating is worth a finding, and what is not worth a finding is not worth
 stating. It does not say what the diff cannot show or what you could not verify; the reader knows what a diff is. It
 does not give a verdict, count the findings or say there are none, and does not list what you read or how you read
-it: kritika states the count and lists the sources itself. Praise lists at most three specific things done well, and
+it: kritique states the count and lists the sources itself. Praise lists at most three specific things done well, and
 is empty when nothing stands out.`
 
 // summaryDiagram follows systemRules when the repository asks for a

@@ -43,21 +43,21 @@ func TestFooterSubject(t *testing.T) {
 func TestRenderSummaryRerunBadge(t *testing.T) {
 	d := sampleData()
 	body, _ := RenderSummary(t.Context(), Templates{}, d)
-	if strings.Contains(body, "badges/rerun") || !strings.Contains(body, "\n## Kritika Review\n") {
+	if strings.Contains(body, "badges/rerun") || !strings.Contains(body, "\n## Kritique Review\n") {
 		t.Fatalf("without a dashboard the heading is bare:\n%s", body)
 	}
-	d.WebURL, d.PullURL = "https://kritika.example/k", "https://kritika.example/k/#/a/github/acme/pulls/acme/widgets/42"
+	d.WebURL, d.PullURL = "https://kritique.example/k", "https://kritique.example/k/#/a/github/acme/pulls/acme/widgets/42"
 	body, _ = RenderSummary(t.Context(), Templates{}, d)
-	want := "\n## <a href=\"https://kritika.example/k/#/a/github/acme/pulls/acme/widgets/42\"><picture>" +
-		"<source media=\"(prefers-color-scheme: dark)\" srcset=\"https://kritika.example/k/badges/rerun-dark.svg\">" +
-		"<img alt=\"Re-run\" src=\"https://kritika.example/k/badges/rerun.svg\" align=\"right\"></picture></a>Kritika Review\n"
+	want := "\n## <a href=\"https://kritique.example/k/#/a/github/acme/pulls/acme/widgets/42\"><picture>" +
+		"<source media=\"(prefers-color-scheme: dark)\" srcset=\"https://kritique.example/k/badges/rerun-dark.svg\">" +
+		"<img alt=\"Re-run\" src=\"https://kritique.example/k/badges/rerun.svg\" align=\"right\"></picture></a>Kritique Review\n"
 	if !strings.Contains(body, want) {
 		t.Fatalf("missing %q in:\n%s", want, body)
 	}
 }
 
 func TestPullPageURL(t *testing.T) {
-	web, _ := url.Parse("https://kritika.example/k")
+	web, _ := url.Parse("https://kritique.example/k")
 	tests := []struct {
 		name                        string
 		web                         *url.URL
@@ -65,8 +65,8 @@ func TestPullPageURL(t *testing.T) {
 		want                        string
 	}{
 		{"no dashboard", nil, "github", "acme", "acme", "widgets", ""},
-		{"with a base path", web, "github", "acme", "acme", "widgets", "https://kritika.example/k/#/a/github/acme/pulls/acme/widgets/42"},
-		{"escaped segments", web, "forgejo", "Acme Org", "acme", "a/b", "https://kritika.example/k/#/a/forgejo/Acme%20Org/pulls/acme/a%2Fb/42"},
+		{"with a base path", web, "github", "acme", "acme", "widgets", "https://kritique.example/k/#/a/github/acme/pulls/acme/widgets/42"},
+		{"escaped segments", web, "forgejo", "Acme Org", "acme", "a/b", "https://kritique.example/k/#/a/forgejo/Acme%20Org/pulls/acme/a%2Fb/42"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -87,7 +87,7 @@ func TestRenderSummaryDefault(t *testing.T) {
 		t.Fatalf("first line = %q", first)
 	}
 	for _, want := range []string{
-		"## Kritika Review\n\nAdds the widget cache.\n\n**2 findings** · 1 blocking · 1 nit\n\n## Findings\n",
+		"## Kritique Review\n\nAdds the widget cache.\n\n**2 findings** · 1 blocking · 1 nit\n\n## Findings\n",
 		"**2 findings** · 1 blocking · 1 nit\n",
 		"## Findings\n\n- **[blocking",
 		"### Summary\n\nSolid change with one real bug.\n\n**What's good**\n\n- Clear tests\n",
@@ -332,7 +332,7 @@ func TestRenderSummaryIncomplete(t *testing.T) {
 		t.Fatalf("notes = %v", notes)
 	}
 	for _, want := range []string{
-		Marker(7), "## Kritika Review\n\n**Review incomplete for", "**Review incomplete for `0123456`:** agent stopped: max_steps.", "_a note._",
+		Marker(7), "## Kritique Review\n\n**Review incomplete for", "**Review incomplete for `0123456`:** agent stopped: max_steps.", "_a note._",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in:\n%s", want, body)
@@ -371,7 +371,7 @@ func TestRenderSummaryCustom(t *testing.T) {
 		{name: "deadline", template: "{{ .Number }}", note: "time"},
 		{name: "loop iteration budget", template: `{{ range until 10000 }}{{ range until 10000 }}{{ end }}{{ end }}`, note: "summary template"},
 		{name: "integer range", template: `{{ range 1000000000 }}{{ end }}`, note: "summary template"},
-		{name: "reserved names", template: `{{ __kritika_iter 1 }}`, note: "summary template"},
+		{name: "reserved names", template: `{{ __kritique_iter 1 }}`, note: "summary template"},
 		{name: "mutating a dict", template: `{{ $d := dict "a" 1 }}{{ set $d "b" $d }}`, note: "summary template"},
 		{name: "random is not defined", template: `{{ randAlpha 8 }}`, note: "summary template"},
 	}
@@ -401,7 +401,7 @@ func TestRenderSummaryCustom(t *testing.T) {
 			if len(notes) != 1 || !strings.Contains(notes[0], tt.note) {
 				t.Fatalf("notes = %v, want one containing %q", notes, tt.note)
 			}
-			if !strings.Contains(body, "## Kritika Review\n") || !strings.Contains(body, notes[0]) {
+			if !strings.Contains(body, "## Kritique Review\n") || !strings.Contains(body, notes[0]) {
 				t.Fatalf("fallback body should be the default and carry the note:\n%s", body)
 			}
 			if len(body) > MaxRenderBytes {

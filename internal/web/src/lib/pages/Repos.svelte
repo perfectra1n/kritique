@@ -22,7 +22,7 @@
 
   let { slug }: { slug: string } = $props();
   let filter = $state('');
-  // Which repositories the list shows: by default those kritika can run,
+  // Which repositories the list shows: by default those kritique can run,
   // neither archived nor forks but the forks turned on; or the forks, or
   // the archived ones.
   let kind = $state<'' | 'forks' | 'archived'>('');
@@ -127,7 +127,7 @@
   const selectedOff = $derived(paged.items.filter((r) => selected.includes(r.fullName) && !isOn(r)).length);
 </script>
 
-<svelte:head><title>Repositories · {slug} · kritika</title></svelte:head>
+<svelte:head><title>Repositories · {slug} · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">

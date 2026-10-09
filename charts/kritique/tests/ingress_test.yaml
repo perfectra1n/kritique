@@ -1,0 +1,51 @@
+suite: ingress
+templates:
+  - ingress.tpl
+values:
+  - ../ci/lint-values.yaml
+tests:
+  - it: is not rendered by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: routes each host's paths to the public Service, which serves the webhooks and the dashboard
+    set:
+      ingress.enabled: true
+      ingress.className: nginx
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.ingressClassName
+          value: nginx
+      - equal:
+          path: spec.rules[0].host
+          value: kritique.example.com
+      - equal:
+          path: spec.rules[0].http.paths
+          value:
+            - path: /
+              pathType: Prefix
+              backend: { service: { name: RELEASE-NAME-kritique, port: { name: http } } }
+
+  - it: resolves a templated host and defaults the path type
+    set:
+      ingress.enabled: true
+      ingress.hosts:
+        - host: "{{ .Release.Name }}.example.com"
+          paths: [{ path: /kritique }]
+      ingress.tls: [{ hosts: [kritique.example.com], secretName: kritique-tls }]
+    asserts:
+      - equal:
+          path: spec.rules[0].host
+          value: RELEASE-NAME.example.com
+      - equal:
+          path: spec.rules[0].http.paths[0].path
+          value: /kritique
+      - equal:
+          path: spec.rules[0].http.paths[0].pathType
+          value: Prefix
+      - equal:
+          path: spec.tls[0].secretName
+          value: kritique-tls

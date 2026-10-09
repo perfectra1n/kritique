@@ -7,8 +7,8 @@ import (
 	"io/fs"
 	"log/slog"
 
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/review"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // linkedIssues reads the issues of owner/repo that body, the pull request

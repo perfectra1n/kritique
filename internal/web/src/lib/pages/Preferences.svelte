@@ -29,7 +29,7 @@
   ] as const;
 </script>
 
-<svelte:head><title>Your settings · kritika</title></svelte:head>
+<svelte:head><title>Your settings · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">

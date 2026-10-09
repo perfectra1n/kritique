@@ -1,6 +1,6 @@
 {
-  "webUrl": "https://kritika.example",
-  "hooksUrl": "https://kritika.example/hooks/",
+  "webUrl": "https://kritique.example",
+  "hooksUrl": "https://kritique.example/hooks/",
   "connections": ["alpha-bot"],
   "reviewModel": "openrouter/acme-large",
   "embedding": false

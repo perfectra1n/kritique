@@ -9,7 +9,7 @@ test('highlight: languageOf() reads a name, an alias, an extension or a Dockerfi
     ['go', 'go'],
     ['golang', 'go'],
     ['internal/web/src/main.ts', 'typescript'],
-    ['charts/kritika/values.yml', 'yaml'],
+    ['charts/kritique/values.yml', 'yaml'],
     ['Dockerfile', 'dockerfile'],
     ['build/Dockerfile.tools', 'dockerfile'],
     ['result.json', 'json'],

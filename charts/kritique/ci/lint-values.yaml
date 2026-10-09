@@ -1,0 +1,29 @@
+---
+# Values that make the chart render without a real cluster: helm lint,
+# helm template and CI use them. Nothing here is a working configuration.
+database:
+  app:
+    existingSecret: kritique-postgres-app
+  owner:
+    existingSecret: kritique-postgres-credentials
+  runner:
+    existingSecret: kritique-postgres-runner
+config:
+  webUrl: https://kritique.example.com
+  authAdminPassword:
+    valueFrom:
+      secretKeyRef: { name: kritique-auth, key: password }
+configFile:
+  apps:
+    github:
+      accounts: [org-1]
+      clientId: Iv1.example
+      privateKey: { env: GITHUB_APP_PRIVATE_KEY }
+      webhookSecret: { env: GITHUB_APP_WEBHOOK_SECRET }
+env:
+  GITHUB_APP_PRIVATE_KEY:
+    valueFrom:
+      secretKeyRef: { name: kritique-bot, key: private-key.pem }
+  GITHUB_APP_WEBHOOK_SECRET:
+    valueFrom:
+      secretKeyRef: { name: kritique-bot, key: webhook-secret }

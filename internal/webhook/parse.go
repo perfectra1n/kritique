@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/home-operations/kritika/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
-// stateOpen is the pull request state kritika acts on; everything else is
+// stateOpen is the pull request state kritique acts on; everything else is
 // closed, merged or not.
 const stateOpen = "open"
 
@@ -30,7 +30,7 @@ const (
 // Kind is what a webhook is about, after the forge-specific shape is gone.
 type Kind string
 
-// Event kinds kritika acts on. Anything else parses to KindIgnored.
+// Event kinds kritique acts on. Anything else parses to KindIgnored.
 const (
 	KindPing         Kind = "ping"
 	KindPullRequest  Kind = "pull_request"
@@ -461,7 +461,7 @@ func parsePush(delivery string, body []byte) (Event, error) {
 }
 
 // repositoryActions are the repository event actions that change what
-// kritika records of one; the rest, such as edited, change nothing it keeps.
+// kritique records of one; the rest, such as edited, change nothing it keeps.
 var repositoryActions = map[string]bool{
 	"created": true, "archived": true, "unarchived": true, "renamed": true, "transferred": true, "deleted": true,
 }

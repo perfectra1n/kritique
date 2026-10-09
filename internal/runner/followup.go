@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/home-operations/kritika/internal/agent"
-	"github.com/home-operations/kritika/internal/gitfetch"
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/review"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 const submitReplyDescription = "Submit the reply and end the run. The input is the whole reply, as it is posted in the thread. " +
@@ -17,7 +17,7 @@ const submitReplyDescription = "Submit the reply and end the run. The input is t
 
 // runFollowUp answers the last comment of the spec's thread: it fetches the
 // head and merge-base as a review does, shows the agent the diff, the
-// findings kritika posted and the thread, and runs it with a review's
+// findings kritique posted and the thread, and runs it with a review's
 // tools until it submits the reply, which the worker posts. It writes no
 // context pack: nothing builds on a follow-up.
 func runFollowUp(ctx context.Context, st *store.Store, p Spec, secrets Secrets, logger *slog.Logger) error {

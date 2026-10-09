@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/home-operations/kritika/internal/egress"
+	"github.com/perfectra1n/kritique/internal/egress"
 )
 
 // GitHubHost is the forge every connection and GitHub sign-in talks to, and

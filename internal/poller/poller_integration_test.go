@@ -20,13 +20,13 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
-	"github.com/home-operations/kritika/internal/forge"
-	"github.com/home-operations/kritika/internal/ingest"
-	"github.com/home-operations/kritika/internal/store"
-	"github.com/home-operations/kritika/internal/store/storetest"
-	"github.com/home-operations/kritika/internal/webhook"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/ingest"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 const configYAML = `
@@ -120,7 +120,7 @@ func TestPollerEnqueuesOnceAndAdvancesState(t *testing.T) {
 		Number: 7, Title: "poll me", Author: "onedr0p", State: "open", HeadRef: "f", HeadSHA: "abc123", BaseRef: "main",
 		UpdatedAt: time.Now(), DefaultBranch: "main",
 	}, {
-		// Last touched before kritika knew the account.
+		// Last touched before kritique knew the account.
 		Number: 8, Title: "leave me", Author: "onedr0p", State: "open", HeadRef: "g", HeadSHA: "old888", BaseRef: "main",
 		UpdatedAt: installed.Add(-time.Hour), DefaultBranch: "main",
 	}}}
@@ -524,7 +524,7 @@ func (f *reactionForge) ListInline(_ context.Context, _, _ string, number int) (
 	return f.inline[number], nil
 }
 
-// TestPollerReadsReactions: a poll reads the reactions on kritika's inline
+// TestPollerReadsReactions: a poll reads the reactions on kritique's inline
 // comments into every finding that carries the comment's thread, for the
 // pull requests reviewed lately only.
 func TestPollerReadsReactions(t *testing.T) {
@@ -731,7 +731,7 @@ func TestPollerRunCutsAPollAtItsInterval(t *testing.T) {
 	st := storetest.Open(t)
 	t.Setenv("TEST_PEM", "pem")
 	t.Setenv("TEST_SECRET", "s")
-	t.Setenv("KRITIKA_POLL_INTERVAL", "100ms")
+	t.Setenv("KRITIQUE_POLL_INTERVAL", "100ms")
 	file := configfiletest.Load(t, configYAML)
 	if err := st.ApplyConfig(ctx, file); err != nil {
 		t.Fatal(err)
@@ -783,7 +783,7 @@ func TestPollerRunCutsAPollAtItsInterval(t *testing.T) {
 	}
 }
 
-// TestPollerClosesAPullRequestWhoseEventWasMissed: a pull request kritika
+// TestPollerClosesAPullRequestWhoseEventWasMissed: a pull request kritique
 // holds open that the forge no longer lists as open is asked for by number
 // and recorded closed, merged or not; one the forge still has open, and one
 // it does not know, are left as they are.

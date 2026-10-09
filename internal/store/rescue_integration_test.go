@@ -344,7 +344,7 @@ func TestRecordRunnerRunLeavesUnknownTimesNull(t *testing.T) {
 		if _, err := tx.Exec(ctx, `SET LOCAL TIME ZONE 'Asia/Tokyo'`); err != nil {
 			return err
 		}
-		if err := RecordRunnerRun(ctx, tx, runID, RunnerResult{JobName: "kritika-run-x", Error: "never started"}); err != nil {
+		if err := RecordRunnerRun(ctx, tx, runID, RunnerResult{JobName: "kritique-run-x", Error: "never started"}); err != nil {
 			return err
 		}
 		return tx.QueryRow(ctx, `SELECT scheduled_at, started_at, phase FROM runner_runs WHERE id = $1`, runID).

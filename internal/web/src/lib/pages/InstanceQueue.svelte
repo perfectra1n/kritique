@@ -18,7 +18,7 @@
   $effect(() => pollJobs(() => void res.load()));
 </script>
 
-<svelte:head><title>Queue · kritika</title></svelte:head>
+<svelte:head><title>Queue · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">

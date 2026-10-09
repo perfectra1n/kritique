@@ -1,6 +1,6 @@
 # Development
 
-Tool versions and tasks live in [`.mise/config.toml`](https://github.com/home-operations/kritika/blob/main/.mise/config.toml):
+Tool versions and tasks live in [`.mise/config.toml`](https://github.com/perfectra1n/kritique/blob/main/.mise/config.toml):
 
 ```sh
 mise install
@@ -8,7 +8,7 @@ mise run build
 mise run test               # unit tests; mise run test -- ./internal/worker/ runs one package's
 mise run test-integration   # Postgres suites against a throwaway VectorChord container
 mise run lint
-mise run smoke              # kritika serve in a kind cluster with CloudNativePG (needs docker, kind, kubectl, helm, openssl)
+mise run smoke              # kritique serve in a kind cluster with CloudNativePG (needs docker, kind, kubectl, helm, openssl)
 ```
 
 `mise run smoke` is what CI's Serve Smoke job runs: it builds the image,
@@ -16,8 +16,8 @@ creates a kind cluster, installs CloudNativePG and a one-instance Postgres
 with VectorChord as an image volume extension and the three roles, installs
 the chart with two replicas and waits for both to be ready, runs `helm
 test`, and checks that the replicas settle on one leader with the
-configuration applied. `KRITIKA_SMOKE_KEEP=1` leaves the cluster running
-for a look afterwards, and `KRITIKA_SMOKE_IMAGE` names an image already
+configuration applied. `KRITIQUE_SMOKE_KEEP=1` leaves the cluster running
+for a look afterwards, and `KRITIQUE_SMOKE_IMAGE` names an image already
 built, to skip the build.
 
 ## Docs
@@ -60,7 +60,7 @@ pointers never enter the repository:
   its roles, the bot and provider credentials as ExternalSecrets). It
   expects the CloudNativePG, External Secrets and Prometheus operators.
 - `.private/values.yaml`: the chart values for that cluster; `mise run
-deploy` installs `charts/kritika` with them and the freshly pushed image,
+deploy` installs `charts/kritique` with them and the freshly pushed image,
   so every dev loop exercises the chart.
 - `.private/mise.local.toml`: `[env] KUBECONFIG = "..."`, symlinked from
   the repo root as `.mise.local.toml` so mise picks it up.
@@ -73,8 +73,8 @@ mise run logs       # follow one of the deployment's pods
 mise run undeploy   # delete everything, database included
 ```
 
-Images go to the registry `KRITIKA_DEV_REGISTRY` names, or to `ttl.sh` (24h
+Images go to the registry `KRITIQUE_DEV_REGISTRY` names, or to `ttl.sh` (24h
 TTL) when it is unset, under a fresh name on every deploy, so a redeploy
 always pulls new code.
-The Helm chart is the supported way to run kritika; `.private/deploy` is a
+The Helm chart is the supported way to run kritique; `.private/deploy` is a
 development harness, not an example to copy.

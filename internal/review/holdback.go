@@ -1,6 +1,6 @@
 package review
 
-import "github.com/home-operations/kritika/internal/contextpack"
+import "github.com/perfectra1n/kritique/internal/contextpack"
 
 // HeldBackLines is how far from every line changed since the last review
 // an incremental re-review's new finding may point before it is held back.

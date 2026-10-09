@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/home-operations/kritika/internal/auth"
-	"github.com/home-operations/kritika/internal/configfile"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 func testHub(t *testing.T) (*hub, *configfile.File) {

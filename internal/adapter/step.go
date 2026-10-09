@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/home-operations/kritika/internal/model"
-	"github.com/home-operations/kritika/internal/store"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // A step that failed in a way another attempt may not is tried again after

@@ -1,6 +1,6 @@
 <script lang="ts">
   // The running connections, and the accounts one's GitHub App is installed
-  // on: kritika serves only the accounts a connection lists, and an
+  // on: kritique serves only the accounts a connection lists, and an
   // installation on any other can be removed.
   import { getJSON, sendJSON } from '../../api.svelte';
   import { Resource } from '../../resource.svelte';
@@ -129,7 +129,7 @@
 
 <Dialog bind:open={confirmOpen} title="Uninstall the App?" fallback="#op-connections">
   <p>
-    GitHub removes <span class="mono">{selected}</span>'s App from <span class="mono">{removing?.account}</span>. kritika does
+    GitHub removes <span class="mono">{selected}</span>'s App from <span class="mono">{removing?.account}</span>. kritique does
     not serve that account, so nothing it reviews changes.
   </p>
   {#snippet footer()}

@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kritique.perfectra1n.github.io/kritique.schema.json",
+  "title": ".kritique.yaml",
+  "description": "A repository's kritique configuration, read from the merge base. See docs/repository-config.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "description": "false stops reviews, follow-ups and indexing; true cannot turn a disabled repository on."
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How a review is done.",
+      "properties": {
+        "model": { "$ref": "#/$defs/model" },
+        "fallback": { "$ref": "#/$defs/model" },
+        "effort": {
+          "$ref": "#/$defs/effort",
+          "description": "How hard the review model, and the fallback that takes its step, reasons; replaces the admin's."
+        },
+        "fixes": {
+          "type": "boolean",
+          "description": "true requires a suggested fix on every finding; false cannot lift the admin's requirement."
+        },
+        "approve": {
+          "type": "boolean",
+          "description": "true approves a pull request whose review finds nothing blocking or important, or, with a confidence score, whose score reaches the threshold and whose risk is within confidence.risk; a later review that no longer allows it dismisses the approval; replaces the admin's."
+        },
+        "diagram": {
+          "type": "boolean",
+          "description": "true has the summary draw the flow the change adds or alters as a Mermaid diagram; replaces the admin's."
+        }
+      }
+    },
+    "confidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How a review is judged: a second model scores the reviewed pull request from 0 to 5.",
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/model",
+          "description": "The model that scores a reviewed pull request, replacing the admin's."
+        },
+        "fallback": {
+          "$ref": "#/$defs/model",
+          "description": "The model that takes the scorer's call when the confidence model fails, replacing the admin's."
+        },
+        "effort": {
+          "$ref": "#/$defs/effort",
+          "description": "How hard the confidence model, and the fallback that takes its call, reasons; replaces the admin's."
+        },
+        "threshold": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5,
+          "description": "The score a pull request must reach to be approved and, with gate, for its commit status to pass, replacing the admin's."
+        },
+        "gate": {
+          "type": "boolean",
+          "description": "true fails the commit status under the threshold, so it can be a required check; replaces the admin's."
+        },
+        "risk": {
+          "enum": ["low", "medium", "high", "critical"],
+          "description": "The highest risk a change may be rated and still be approved; it may only lower the admin's."
+        }
+      }
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Which pull requests get a review.",
+      "properties": {
+        "include": {
+          "type": "array",
+          "description": "Conditions that let a pull request in: it is reviewed when any of them holds, or the list is empty, and no exclude condition does. It must pass the admin's lists as well.",
+          "items": { "$ref": "#/$defs/condition" }
+        },
+        "exclude": {
+          "type": "array",
+          "description": "Conditions that keep a pull request out: it is skipped when any of them holds, whatever include says. A skip names the condition that held when it has a name.",
+          "items": { "$ref": "#/$defs/condition" }
+        }
+      }
+    },
+    "ignore": {
+      "type": "array",
+      "description": "Globs of paths kritique leaves out of a review's context and of the index, added to the admin's; a pull request that changes only ignored paths is skipped.",
+      "items": { "$ref": "#/$defs/glob" }
+    },
+    "comments": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How a review comments.",
+      "properties": {
+        "inline": {
+          "type": "boolean",
+          "description": "false posts the summary alone."
+        },
+        "summary": {
+          "$ref": "#/$defs/path",
+          "description": "A repository file, read from the merge base, that replaces the summary comment's template."
+        },
+        "finding": {
+          "$ref": "#/$defs/path",
+          "description": "A repository file, read from the merge base, that replaces an inline finding's template."
+        }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "description": "Checks the review makes, added after the admin's. A rule may not reuse the id of an admin's.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "oneOf": [{ "required": ["rule"] }, { "required": ["file"] }],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+            "description": "Names the rule to the findings that cite it."
+          },
+          "rule": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "What to check, and why."
+          },
+          "file": {
+            "$ref": "#/$defs/path",
+            "description": "A repository file, read from the merge base, whose content is the check."
+          },
+          "paths": {
+            "type": "array",
+            "description": "Apply the rule only when a changed path matches one of these.",
+            "items": { "$ref": "#/$defs/glob" }
+          },
+          "when": {
+            "type": "array",
+            "description": "Conditions on the pull request: the rule applies only when one of them holds.",
+            "items": { "$ref": "#/$defs/when" }
+          }
+        }
+      }
+    },
+    "context": {
+      "type": "array",
+      "description": "Files that explain the code, added after the admin's.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "description"],
+        "properties": {
+          "path": { "$ref": "#/$defs/path" },
+          "description": { "type": "string", "minLength": 1 },
+          "paths": {
+            "type": "array",
+            "description": "Name the file only when a changed path matches one of these.",
+            "items": { "$ref": "#/$defs/glob" }
+          }
+        }
+      }
+    },
+    "skills": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The repository's Agent Skills: folders holding a SKILL.md, read from the merge base. A review is offered each one's name and description and reads the skill when it fits.",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "description": "The directories whose folders each hold a skill, replacing the admin's; .agents/skills and .claude/skills when no one sets them, and an empty list turns skills off.",
+          "items": { "$ref": "#/$defs/path" }
+        },
+        "scope": {
+          "type": "object",
+          "description": "Narrows when a skill is offered, by the skill's name; added to the admin's, a skill named in both taking this file's.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "paths": {
+                "type": "array",
+                "description": "Offer the skill only when a changed path matches one of these.",
+                "items": { "$ref": "#/$defs/glob" }
+              },
+              "when": {
+                "type": "array",
+                "description": "Conditions on the pull request: the skill is offered only when one of them holds.",
+                "items": { "$ref": "#/$defs/when" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "anyOf": [{ "required": ["expr"] }, { "required": ["paths"] }],
+      "description": "One condition on a pull request, in trigger.include or trigger.exclude: expr, paths, or both, when both must hold. One with paths, or whose expr reads pr.lines, is judged once the pull request's diff is fetched.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "What the condition is called where a skip names it, unique in its list; it may not be one an admin's condition has."
+        },
+        "expr": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "A CEL expression over pr that says whether the condition holds. pr.lines is the lines the diff adds and removes, ignored paths left out."
+        },
+        "paths": {
+          "type": "array",
+          "description": "The condition holds only when a changed path matches one of these.",
+          "items": { "$ref": "#/$defs/glob" }
+        }
+      }
+    },
+    "when": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expr"],
+      "description": "One condition on a pull request, in a rule's or a skill scope's when.",
+      "properties": {
+        "name": { "type": "string", "description": "What the condition is for." },
+        "expr": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "A CEL expression over pr, as a trigger.include or trigger.exclude expression sees it, without pr.lines."
+        }
+      }
+    },
+    "model": {
+      "type": "string",
+      "pattern": "^[^/]+/.+$",
+      "description": "A <provider>/<model> reference, of a provider the instance or the account declares."
+    },
+    "effort": {
+      "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max", ""],
+      "description": "A reasoning effort, lowest first, or \"\" to leave it to the provider. Every provider takes low to max; the Anthropic Messages API has no level under low and gets none and minimal as low."
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "^(/|\\.\\.(/|$))" },
+      "description": "A path relative to the repository root."
+    },
+    "glob": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A doublestar glob, such as docs/** or **/*.sql."
+    }
+  }
+}

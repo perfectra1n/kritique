@@ -25,15 +25,15 @@ func NewPoolCollector(stats map[string]func() *pgxpool.Stat) *PoolCollector {
 const lblPool = "pool"
 
 var (
-	poolConns = prometheus.NewDesc("kritika_db_pool_connections",
+	poolConns = prometheus.NewDesc("kritique_db_pool_connections",
 		"Connections the pool holds, by state: idle, acquired (in use), constructing.", []string{lblPool, "state"}, nil)
-	poolMax = prometheus.NewDesc("kritika_db_pool_max_connections",
+	poolMax = prometheus.NewDesc("kritique_db_pool_max_connections",
 		"The pool's ceiling on connections.", []string{lblPool}, nil)
-	poolAcquires = prometheus.NewDesc("kritika_db_pool_acquires_total",
+	poolAcquires = prometheus.NewDesc("kritique_db_pool_acquires_total",
 		"Connections taken from the pool.", []string{lblPool}, nil)
-	poolWaited = prometheus.NewDesc("kritika_db_pool_empty_acquires_total",
+	poolWaited = prometheus.NewDesc("kritique_db_pool_empty_acquires_total",
 		"Connections taken from the pool after waiting for one to free: the pool was empty.", []string{lblPool}, nil)
-	poolWait = prometheus.NewDesc("kritika_db_pool_acquire_seconds_total",
+	poolWait = prometheus.NewDesc("kritique_db_pool_acquire_seconds_total",
 		"Time spent waiting for connections from the pool.", []string{lblPool}, nil)
 )
 

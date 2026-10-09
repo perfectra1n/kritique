@@ -6,7 +6,7 @@
 
 export type ThemePref = 'auto' | 'light' | 'dark';
 
-const KEY = 'kritika-theme';
+const KEY = 'kritique-theme';
 // Guarded so importing this module never throws outside a browser (tests, a
 // future SSR build); in that case the app behaves as auto/light until init.
 const mq = typeof window === 'undefined' ? null : window.matchMedia('(prefers-color-scheme: dark)');

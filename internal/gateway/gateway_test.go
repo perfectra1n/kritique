@@ -8,8 +8,8 @@ import (
 
 	"github.com/openai/openai-go/v3"
 
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
-	"github.com/home-operations/kritika/internal/model"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/model"
 )
 
 func TestUpstreamStatus(t *testing.T) {
@@ -59,7 +59,7 @@ func TestMaskProvider(t *testing.T) {
 	f, err := configfiletest.Parse(t, `providers:
   p:
     type: openai
-    baseUrl: https://kritika:url-secret@llm.example/v1
+    baseUrl: https://kritique:url-secret@llm.example/v1
     apiKey: { env: TEST_PROVIDER_KEY }
 apps:
   acme-bot:
@@ -71,7 +71,7 @@ apps:
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := maskProvider(`POST "https://kritika:url-secret@llm.example/v1/chat/completions": 401 {"error":"bad key sk-provider"}`, f.Providers["p"])
+	got := maskProvider(`POST "https://kritique:url-secret@llm.example/v1/chat/completions": 401 {"error":"bad key sk-provider"}`, f.Providers["p"])
 	want := `POST "https://***@llm.example/v1/chat/completions": 401 {"error":"bad key ***"}`
 	if got != want {
 		t.Fatalf("masked = %s\nwant     %s", got, want)

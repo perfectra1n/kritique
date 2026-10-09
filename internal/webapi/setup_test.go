@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/home-operations/kritika/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 )
 
 func TestSetupStatus(t *testing.T) {
@@ -13,7 +13,7 @@ func TestSetupStatus(t *testing.T) {
   acme-bot: { accounts: [acme], clientId: Iv1.acme, privateKey: { env: TEST_KEY }, webhookSecret: { env: TEST_KEY } }
 `
 	const provider = "providers:\n  p: { type: openai, apiKey: { env: TEST_KEY } }\n"
-	base := SetupStatus{WebURL: "https://kritika.example", HooksURL: "https://kritika.example/hooks/", Connections: []string{}}
+	base := SetupStatus{WebURL: "https://kritique.example", HooksURL: "https://kritique.example/hooks/", Connections: []string{}}
 	with := func(edit func(*SetupStatus)) SetupStatus {
 		s := base
 		edit(&s)
@@ -32,7 +32,7 @@ func TestSetupStatus(t *testing.T) {
 		})},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got := setupStatus(configfiletest.Load(t, tt.doc), "https://kritika.example/")
+			got := setupStatus(configfiletest.Load(t, tt.doc), "https://kritique.example/")
 			if got.WebURL != tt.want.WebURL || got.HooksURL != tt.want.HooksURL || !slices.Equal(got.Connections, tt.want.Connections) || got.ReviewModel != tt.want.ReviewModel ||
 				got.Embedding != tt.want.Embedding {
 				t.Fatalf("setupStatus = %+v, want %+v", got, tt.want)

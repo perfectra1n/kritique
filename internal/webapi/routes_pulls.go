@@ -8,8 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/home-operations/kritika/internal/store"
-	"github.com/home-operations/kritika/internal/transcript"
+	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
 func (s *Server) getAttention(w http.ResponseWriter, r *http.Request, t *accountScope) error {
