@@ -44,12 +44,16 @@ func TestForgejoConnections(t *testing.T) {
 	if fj.TokenValue().Value() != "fj-token" || fj.GitTokenValue().Value() != "fj-read" || fj.WebhookSecretValue().Value() != "whsec" {
 		t.Fatal("forgejo credentials not resolved")
 	}
-	gt, _ := f.Connection("work-gitea")
-	if gt.Forge != ForgeGitea || gt.Host() != "gitea.internal" || gt.GitTokenValue().Value() != "" {
+	gt, ok := f.Connection("work-gitea")
+	if !ok || gt.Forge != ForgeGitea || gt.Host() != "gitea.internal" || gt.GitTokenValue().Value() != "" ||
+		gt.WebURL() != "http://gitea.internal:3000/sub" {
 		t.Fatalf("work-gitea = %+v", gt)
 	}
+	if fj.WebURL() != "https://git.example.com" {
+		t.Fatalf("forgejo WebURL = %q", fj.WebURL())
+	}
 	gh, _ := f.Connection("acme-bot")
-	if gh.Forge != ForgeGitHub || gh.Host() != GitHubHost {
+	if gh.Forge != ForgeGitHub || gh.Host() != GitHubHost || gh.WebURL() != GitHubWebURL {
 		t.Fatalf("acme-bot = %+v", gh)
 	}
 	// The same name on two forges is two accounts, and an entry keyed by

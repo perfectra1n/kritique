@@ -16,6 +16,9 @@ func TestJobCause(t *testing.T) {
 		{"forge server error", "github: find App installation for alpha/one: GET https://api.github.com/repos/alpha/one/installation: 503 Service Unavailable []", CauseForgeUnavailable},
 		{"forge refused the call", "github: find App installation for alpha/one: GET https://api.github.com/repos/alpha/one/installation: 404 Not Found []", ""},
 		{"a timeout that is not the forge's", "model: complete: context deadline exceeded", ""},
+		{"forgejo server error", "forgejo: merge base of a/b: GET /repos/a/b/pulls/3: 502 Bad Gateway: <html>", CauseForgeUnavailable},
+		{"forgejo refused the connection", "worker: review: forgejo: GET /repos/a/b: dial tcp 10.0.0.1:443: connect: connection refused", CauseForgeUnavailable},
+		{"forgejo refused the call", "forgejo: GET /repos/a/b/pulls/3: 404 Not Found: {}", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := jobCause(tc.lastError); got != tc.want {
