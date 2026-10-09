@@ -13,6 +13,7 @@ const (
 	RoleEmbedding  = "embedding"
 	RoleFollowUp   = "followup"
 	RoleConfidence = "confidence"
+	RoleTask       = "task"
 )
 
 // Usage is one model call charged to an account, and to the review it

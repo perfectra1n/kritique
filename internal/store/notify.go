@@ -20,12 +20,13 @@ const (
 	EventIndexRun  EventKind = "index_run"
 	EventFollowup  EventKind = "followup"
 	EventModelCall EventKind = "model_call"
+	EventTaskRun   EventKind = "task_run"
 )
 
 // Valid reports whether k is one of the known event kinds.
 func (k EventKind) Valid() bool {
 	switch k {
-	case EventReview, EventRunnerRun, EventIndexRun, EventFollowup, EventModelCall:
+	case EventReview, EventRunnerRun, EventIndexRun, EventFollowup, EventModelCall, EventTaskRun:
 		return true
 	}
 	return false

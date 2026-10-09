@@ -21,6 +21,7 @@ const (
 	ModelCallFollowUp   = transcript.KindFollowUp
 	ModelCallConfidence = transcript.KindConfidence
 	ModelCallMerge      = transcript.KindMerge
+	ModelCallTask       = transcript.KindTask
 )
 
 // ModelCall is one row of model_calls. ReviewID, RunnerRunID and
@@ -31,6 +32,8 @@ type ModelCall struct {
 	ReviewID          string
 	RunnerRunID       string
 	FollowupCommentID int64
+	// TaskRunID is the task run the call was made for, "" for none.
+	TaskRunID string
 	// Carries is the run whose conversation RunnerRunID may carry on, ""
 	// for none: an agent step's first row is then a delta against that
 	// run's transcript, so the conversation is not recorded twice. Record
@@ -66,13 +69,14 @@ func InsertModelCall(ctx context.Context, tx pgx.Tx, c ModelCall) error {
 	_, err := tx.Exec(ctx, `INSERT INTO model_calls
 		(account_id, review_id, runner_run_id, followup_comment_id, kind, step, model, upstream, system, tools,
 		 messages_from, messages, response, stop_reason, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
-		 cost_usd, duration_ms, error, truncated, messages_end, messages_sha, system_sha, tools_sha, run_bytes, carried_from, part)
+		 cost_usd, duration_ms, error, truncated, messages_end, messages_sha, system_sha, tools_sha, run_bytes, carried_from, part, task_run_id)
 		VALUES ($1, nullif($2, '')::uuid, nullif($3, '')::uuid, nullif($4::bigint, 0), $5, $6, $7, $8, $9, $10::jsonb,
-		 $11, $12::jsonb, $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, nullif($28, '')::uuid, $29)`,
+		 $11, $12::jsonb, $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, nullif($28, '')::uuid, $29,
+		 nullif($30, '')::uuid)`,
 		c.AccountID, c.ReviewID, c.RunnerRunID, c.FollowupCommentID, string(c.Kind), c.Step, c.Model, c.Upstream, c.Row.System, tools,
 		c.Row.MessagesFrom, string(c.Row.Messages), string(c.Row.Response), string(c.Stop),
 		c.Usage.Input, c.Usage.CacheRead, c.Usage.CacheWrite, c.Usage.Output, c.CostUSD, c.Duration.Milliseconds(), c.Error,
-		c.Row.Truncated, st.MessagesEnd, st.MessagesSHA[:], st.SystemSHA[:], st.ToolsSHA[:], st.Bytes, c.Carries, c.Part)
+		c.Row.Truncated, st.MessagesEnd, st.MessagesSHA[:], st.SystemSHA[:], st.ToolsSHA[:], st.Bytes, c.Carries, c.Part, c.TaskRunID)
 	if err != nil {
 		return fmt.Errorf("store: insert model call: %w", err)
 	}

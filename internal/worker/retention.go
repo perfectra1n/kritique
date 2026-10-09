@@ -29,12 +29,14 @@ type retentionStore interface {
 		ctx context.Context, grace time.Duration, runs func(accountID, fullName string, t configfile.RepoTraits) bool,
 	) (int64, error)
 	SweepConversations(ctx context.Context, olderThan time.Duration) (int64, error)
+	SweepTaskEvents(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
 // Retention deletes what is kept only so long: model-call transcripts
 // older than the current configuration's retention window, review diffs
 // past theirs, the indexes of repositories it has not run for longer than
-// its index grace and agent conversations older than conversationRetention
+// its index grace, agent conversations older than conversationRetention
+// and task events past the transcripts' window
 // (owner pool, bypassing row-level security), and expired dashboard
 // sessions (app pool). A leader duty.
 type Retention struct {
@@ -77,6 +79,10 @@ func (r *Retention) Run(ctx context.Context) {
 		report("stopped repositories' indexes", "repositories", n, err)
 		n, err = r.Store.SweepConversations(ctx, conversationRetention)
 		report("agent conversations", "rows", n, err)
+		// A task event is the delivery a task ran on, kept as long as the
+		// transcripts of its runs; the runs keep their record.
+		n, err = r.Store.SweepTaskEvents(ctx, f.TranscriptRetention())
+		report("task events", "rows", n, err)
 		select {
 		case <-ctx.Done():
 			return

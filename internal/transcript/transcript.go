@@ -26,12 +26,15 @@ const (
 	KindConfidence Kind = "confidence"
 	// KindMerge writes a split review's summary from its parts'.
 	KindMerge Kind = "merge"
+	// KindTask is a single-mode task's structured call; an agentic task's
+	// steps are agent steps of its task run.
+	KindTask Kind = "task"
 )
 
 // Valid reports whether k is a model call kind.
 func (k Kind) Valid() bool {
 	switch k {
-	case KindAgentStep, KindFollowUp, KindConfidence, KindMerge:
+	case KindAgentStep, KindFollowUp, KindConfidence, KindMerge, KindTask:
 		return true
 	}
 	return false
