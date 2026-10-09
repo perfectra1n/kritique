@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://kritique.perfectra1n.github.io/kritique.schema.json",
+  "$id": "https://raw.githubusercontent.com/perfectra1n/kritique/main/docs/kritique.schema.json",
   "title": ".kritique.yaml",
   "description": "A repository's kritique configuration, read from the merge base. See docs/repository-config.md.",
   "type": "object",

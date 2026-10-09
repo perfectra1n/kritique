@@ -3,7 +3,6 @@ CHANGELOG.md
 .release-please-manifest.json
 charts/kritique/README.md
 charts/kritique/values.schema.json
-# Authored MkDocs docs site (pymdownx blocks admonitions/tabs break under
-# oxfmt) and its build output.
+# The docs keep their hand-wrapped layout; formatting them would churn every
+# page on each change.
 docs/
-site/

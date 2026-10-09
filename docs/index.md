@@ -2,14 +2,12 @@
 
 **Repository-aware AI pull request review for GitHub.**
 
-/// warning | Not production ready
-
-kritique is early and under active development: configuration and the APIs
-can still change from one release to the next, so read the
-[changelog](https://github.com/perfectra1n/kritique/blob/main/CHANGELOG.md)
-before upgrading. Schema changes arrive as migrations the leader applies.
-
-///
+> [!WARNING]
+> **Not production ready.** kritique is early and under active development:
+> configuration and the APIs can still change from one release to the next,
+> so read the
+> [changelog](https://github.com/perfectra1n/kritique/blob/main/CHANGELOG.md)
+> before upgrading. Schema changes arrive as migrations the leader applies.
 
 kritique indexes a repository, reviews each pull request against that context,
 posts one sticky summary comment plus inline findings and a commit status, and
