@@ -53,7 +53,7 @@ type Comment struct {
 }
 
 // Issue is an issue of a repository, as a pull request's description links
-// one it closes.
+// one it closes, or the issue or pull request a task reads and acts on.
 type Issue struct {
 	Number int
 	Title  string
@@ -63,6 +63,13 @@ type Issue struct {
 	// PullRequest is set when the number names a pull request, which the
 	// forge files among its issues.
 	PullRequest bool
+	State       string // "open" or "closed"
+	Author      string
+	Labels      []string
+	Assignees   []string
+	// Draft is whether a pull request is a draft, false for an issue and
+	// on a forge too old to report it.
+	Draft bool
 }
 
 // InlineComment is one finding attached to a line on the head side of the
@@ -140,6 +147,10 @@ const MaxFileBytes = 1 << 20
 
 // ErrFileTooLarge is FileAt refusing a file over MaxFileBytes.
 var ErrFileTooLarge = errors.New("forge: file is over the size limit")
+
+// ErrNoReadToken means the forge has no read-only credential to hand a
+// runner.
+var ErrNoReadToken = errors.New("forge: no read-only git token")
 
 // Client is one connection's access to its forge.
 type Client interface {
@@ -264,4 +275,24 @@ func CanWrite(permission Permission) bool {
 		return true
 	}
 	return false
+}
+
+// pullRequestKey is the context key WithPullRequest stores its number
+// under.
+type pullRequestKey struct{}
+
+// WithPullRequest returns ctx naming pull request number as the one the
+// forge calls made with it are about. A Client method that takes no number
+// may need one on a forge whose API keys the thing by its pull request:
+// Forgejo and Gitea find an inline comment by id, and a commit's merge base,
+// only through the pull request. GitHub needs none.
+func WithPullRequest(ctx context.Context, number int) context.Context {
+	return context.WithValue(ctx, pullRequestKey{}, number)
+}
+
+// PullRequestFrom returns the pull request number WithPullRequest put in
+// ctx, and whether there is one.
+func PullRequestFrom(ctx context.Context) (int, bool) {
+	n, ok := ctx.Value(pullRequestKey{}).(int)
+	return n, ok && n > 0
 }
