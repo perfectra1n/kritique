@@ -436,7 +436,7 @@
         },
         "webUrl": {
           "default": "",
-          "description": "(required) Public URL the dashboard is reached at, e.g. https://kritique.example.com; the webhooks share it under `/hooks/\u003capp name\u003e`. Must be an absolute http(s) URL with no query or fragment. GitHub delivers webhooks to it and sign-in redirects back to it, so the chart's Ingress or HTTPRoute must route this name.",
+          "description": "(required) Public URL the dashboard is reached at, e.g. https://kritique.example.com; the webhooks share it under `/hooks/\u003capp name\u003e`. Must be an absolute http(s) URL with no query or fragment. Each forge delivers webhooks to it and sign-in redirects back to it, so the chart's Ingress or HTTPRoute must route this name.",
           "title": "webUrl",
           "type": "string"
         }
@@ -716,7 +716,7 @@
       "type": "array"
     },
     "ingress": {
-      "description": "One Ingress, or one Gateway API HTTPRoute, to the public Service, which\nserves the webhooks under `/hooks` and the dashboard. Its host must be\n`config.webUrl`'s: GitHub delivers webhooks to that URL and sign-in\nredirects back to it, so a route for another name serves a dashboard\nthat cannot sign in.",
+      "description": "One Ingress, or one Gateway API HTTPRoute, to the public Service, which\nserves the webhooks under `/hooks` and the dashboard. Its host must be\n`config.webUrl`'s: the forges deliver webhooks to that URL and sign-in\nredirects back to it, so a route for another name serves a dashboard\nthat cannot sign in.",
       "properties": {
         "annotations": {
           "description": "Ingress annotations.",
@@ -1030,7 +1030,7 @@
           "type": "boolean"
         },
         "egressPorts": {
-          "description": "TCP ports the service pods may egress to for forges and model endpoints. Runner pods reach the gateway alone.",
+          "description": "TCP ports the service pods may egress to for forges and model endpoints, to any address. Add the port of a forge or model endpoint served on another, such as an in-cluster Forgejo on 3000. Runner pods reach the gateway alone.",
           "items": {
             "anyOf": [
               {
@@ -1369,7 +1369,7 @@
       "properties": {
         "gatewayPort": {
           "default": 8082,
-          "description": "Port of the gateway the kritique serve pods run, on the pods and its Service: the forward proxy runner Jobs are handed as `HTTPS_PROXY`, allowing only the hosts the configuration names (github.com once an app is configured, `egress.allow` less `egress.deny`), so runner pods need no direct internet egress, and the model and similar-code endpoints a runner calls with a per-run token, so no provider key enters a runner pod.",
+          "description": "Port of the gateway the kritique serve pods run, on the pods and its Service: the forward proxy runner Jobs are handed as `HTTPS_PROXY`, allowing only the hosts the configuration names (the forge hosts of the configured apps, github.com for a GitHub App, and `egress.allow` less `egress.deny`), so runner pods need no direct internet egress, and the model and similar-code endpoints a runner calls with a per-run token, so no provider key enters a runner pod.",
           "title": "gatewayPort",
           "type": "integer"
         },
