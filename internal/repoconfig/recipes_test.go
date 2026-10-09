@@ -67,8 +67,8 @@ func TestRecipes(t *testing.T) {
 			t.Parallel()
 			doc, f, files := recipeFiles(t, tt.dir)
 			for _, p := range append([]string{FileName}, slices.Sorted(maps.Keys(files))...) {
-				if snippet := `--8<-- "docs/recipes/` + tt.dir + "/" + p + `"`; !strings.Contains(string(ref), snippet) {
-					t.Errorf("docs/tasks.md does not include docs/recipes/%s/%s", tt.dir, p)
+				if link := "](recipes/" + tt.dir + "/" + p + ")"; !strings.Contains(string(ref), link) {
+					t.Errorf("docs/tasks.md does not link docs/recipes/%s/%s", tt.dir, p)
 				}
 			}
 			for i := range f.Tasks {

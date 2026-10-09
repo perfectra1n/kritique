@@ -9,6 +9,62 @@ import (
 	"strings"
 )
 
+// GitHubApp is a GitHub App credential owned by a connection. The client
+// id is not secret, but admins often keep it next to the key, so it may
+// be given inline or by reference. WebhookSecret is every forge's: a
+// Forgejo or Gitea connection sets it alone of the three.
+type GitHubApp struct {
+	ClientID      ValueOrRef `yaml:"clientId"`
+	PrivateKey    SecretRef  `yaml:"privateKey"`
+	WebhookSecret SecretRef  `yaml:"webhookSecret"`
+
+	clientID      string
+	privateKey    Secret
+	webhookSecret Secret
+}
+
+// ClientIDValue returns the client id, inline or resolved.
+func (a GitHubApp) ClientIDValue() string { return a.clientID }
+
+// PrivateKeyValue returns the resolved private key PEM.
+func (a GitHubApp) PrivateKeyValue() Secret { return a.privateKey }
+
+// Connection is one GitHub App, or one Forgejo or Gitea bot account,
+// serving the accounts it lists, an entry of the configuration's apps,
+// which are keyed by name. The name is the hook path, /hooks/{name}.
+type Connection struct {
+	// Name is the entry's key under apps.
+	Name string `yaml:"-"`
+	// Forge is the forge the connection talks to, ForgeGitHub when the
+	// entry names none.
+	Forge Forge `yaml:"forge,omitempty"`
+	// Accounts are the users and organizations the connection serves: a
+	// webhook for any other account is ignored, and a repository belongs to
+	// the connection serving its owner. A public GitHub App installed on
+	// several organizations lists each one kritique reviews for; nothing is
+	// served that is not listed.
+	Accounts []string `yaml:"accounts"`
+
+	App GitHubApp `yaml:",inline"`
+
+	// URL is a Forgejo or Gitea instance's base URL, such as
+	// https://forgejo.example.com, which its API is under at /api/v1.
+	URL string `yaml:"url,omitempty"`
+	// Token is the Forgejo or Gitea bot account's API token, which posts
+	// the reviews: it needs write access to issues and repositories.
+	Token SecretRef `yaml:"token,omitempty"`
+	// GitToken is a Forgejo or Gitea token runners fetch the repository
+	// with in place of Token: a runner reads untrusted content and runs
+	// commands an agent chose, so a token that can only read belongs here.
+	// Without one, runners are handed Token.
+	GitToken SecretRef `yaml:"gitToken,omitempty"`
+
+	token, gitToken Secret
+}
+
+// WebhookSecretValue returns the resolved webhook secret.
+func (i *Connection) WebhookSecretValue() Secret { return i.App.webhookSecret }
+
 // SelfHosted reports whether the forge is reached at a connection's URL
 // with a token, rather than on github.com through a GitHub App.
 func (f Forge) SelfHosted() bool { return f == ForgeForgejo || f == ForgeGitea }
