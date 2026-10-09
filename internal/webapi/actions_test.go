@@ -21,7 +21,7 @@ func TestQueuedMessage(t *testing.T) {
 		{
 			"waiting after the forge did not answer",
 			&store.JobRow{ID: 7, State: rivertype.JobStateRetryable, Attempt: 3, MaxAttempts: 8, LastError: timedOut},
-			"review job #7 failed attempt 3 of 8 and will run again: GitHub did not answer",
+			"review job #7 failed attempt 3 of 8 and will run again: the forge did not answer",
 		},
 		{
 			"waiting after an error with no cause",
@@ -31,7 +31,7 @@ func TestQueuedMessage(t *testing.T) {
 		{
 			"running again after the forge did not answer",
 			&store.JobRow{ID: 7, State: rivertype.JobStateRunning, Attempt: 4, MaxAttempts: 8, LastError: timedOut},
-			"review job #7 is on attempt 4 of 8, the one before failed: GitHub did not answer",
+			"review job #7 is on attempt 4 of 8, the one before failed: the forge did not answer",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

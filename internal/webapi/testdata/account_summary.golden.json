@@ -1,5 +1,6 @@
 {
   "slug": "github/alpha",
+  "forge": "github",
   "connection": "alpha-bot",
   "repositories": 3,
   "reviews7d": 9,

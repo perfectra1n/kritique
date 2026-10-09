@@ -91,8 +91,12 @@ type Followup struct {
 	Status         store.FollowupStatus `json:"status"`
 	Reason         string               `json:"reason"`
 	ReplyCommentID *int64               `json:"replyCommentId"`
-	Model          string               `json:"model"`
-	CreatedAt      time.Time            `json:"createdAt"`
+	// CommentURL is the mention on the forge, ReplyURL kritique's answer
+	// to it, "" when it posted none.
+	CommentURL string    `json:"commentUrl"`
+	ReplyURL   string    `json:"replyUrl"`
+	Model      string    `json:"model"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 // PullDetail is a pull request with every review and follow-up. Job is

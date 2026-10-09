@@ -217,3 +217,9 @@ table.audit .collapsible-body {
   gap: 2px;
 }
 
+.forge-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+}

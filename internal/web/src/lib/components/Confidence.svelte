@@ -1,7 +1,7 @@
 <script lang="ts">
   // The scorer's verdict on a review as one line, as the forge comment
   // carries it: the score against the threshold, the risk, and the reason,
-  // which is prose with its GitHub references already linked.
+  // which is prose with its forge references already linked.
   import type { Confidence } from '../types';
   import Markdown from './Markdown.svelte';
   let { c }: { c: Confidence } = $props();

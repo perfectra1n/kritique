@@ -2,7 +2,6 @@
 // separate owner/repo fields, and the API paths of an account.
 import { slugPath, type Route } from './routes';
 import { splitRepo } from './format';
-import { safeHref } from './markdown';
 
 // pullKey names a pull request across the account's repositories.
 export function pullKey(p: { repository: string; number: number }): string {
@@ -27,17 +26,6 @@ export function accountApi(slug: string): string {
 export function rerunPath(slug: string, p: { repository: string; number: number }): string {
   const n = splitRepo(p.repository);
   return `${accountApi(slug)}/pulls/${encodeURIComponent(n.owner)}/${encodeURIComponent(n.repo)}/${p.number}/rerun`;
-}
-
-// threadUrl links the thread of an inline comment on a pull request; none
-// for a finding kritique did not post inline, or whose comment id it lacks.
-export function threadUrl(pullUrl: string, commentId: number | null): string | undefined {
-  return commentId ? safeHref(`${pullUrl}#discussion_r${commentId}`) : undefined;
-}
-
-// commentUrl links a comment on a pull request's conversation.
-export function commentUrl(pullUrl: string, commentId: number | null): string | undefined {
-  return commentId ? safeHref(`${pullUrl}#issuecomment-${commentId}`) : undefined;
 }
 
 export function cancelPath(slug: string, reviewId: string): string {

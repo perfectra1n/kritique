@@ -12,9 +12,8 @@
   let {
     file,
     findings,
-    pullUrl,
     initiallyOpen = true,
-  }: { file: DiffFile; findings: Finding[]; pullUrl: string; initiallyOpen?: boolean } = $props();
+  }: { file: DiffFile; findings: Finding[]; initiallyOpen?: boolean } = $props();
   let open = $state(untrack(() => initiallyOpen));
   const id = $props.id();
 
@@ -50,7 +49,7 @@
   </h3>
   {#if open}
     <div {id}>
-      {#each orphans as f (f.id)}<div class="diff-finding"><FindingCard {f} {pullUrl} /></div>{/each}
+      {#each orphans as f (f.id)}<div class="diff-finding"><FindingCard {f} /></div>{/each}
       {#if file.lines.length === 0}
         <p class="small muted diff-empty">{file.header.slice(1).join(' · ') || 'No textual changes.'}</p>
       {:else}
@@ -67,7 +66,7 @@
                 {#if anchored}
                   <tr class="dl-finding">
                     <td colspan="3">
-                      {#each anchored as f (f.id)}<div class="diff-finding"><FindingCard {f} {pullUrl} compact /></div>{/each}
+                      {#each anchored as f (f.id)}<div class="diff-finding"><FindingCard {f} compact /></div>{/each}
                     </td>
                   </tr>
                 {/if}

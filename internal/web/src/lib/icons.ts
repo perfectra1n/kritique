@@ -46,6 +46,10 @@ export {
   mdiThumbDownOutline,
 } from '@mdi/js';
 
-import { siGithub } from 'simple-icons';
+import { siForgejo, siGitea, siGithub } from 'simple-icons';
+import type { Forge } from './types';
 
 export const githubIcon = siGithub.path;
+
+// forgeIcon is each forge's mark.
+export const forgeIcon: Record<Forge, string> = { github: siGithub.path, forgejo: siForgejo.path, gitea: siGitea.path };

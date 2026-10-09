@@ -3,6 +3,7 @@
   "connection": {
     "name": "alpha-bot",
     "forge": "github",
+    "webUrl": "https://github.com",
     "accounts": ["alpha"],
     "credentials": {
       "clientId": true,

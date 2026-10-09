@@ -7,7 +7,9 @@
   import { href, navigate, replace } from '../router.svelte';
   import { FINDING_STATUSES, findingFilter, type FindingFilter } from '../routes';
   import { Paged, Resource, live } from '../resource.svelte';
-  import { accountApi, pullRoute, threadUrl } from '../links';
+  import { accountApi, pullRoute } from '../links';
+  import { safeHref } from '../markdown';
+  import { forgeName, slugForge } from '../forge';
   import { CATEGORIES, SEVERITIES } from '../format';
   import { formatTokens, type Parsed, type TokenSpec } from '../tokensearch';
   import { listKeys } from '../listkeys';
@@ -33,6 +35,7 @@
   ] as const;
 
   let { slug, filter }: { slug: string; filter?: FindingFilter } = $props();
+  const forge = $derived(forgeName(slugForge(slug)));
 
   const account = $derived(accountApi(slug));
   function query(after?: string): string {
@@ -186,9 +189,9 @@
                       <a class="mono" href={href(pullRoute(slug, f.pull))} title={f.pull.title}>{f.pull.repository}#{f.pull.number}</a>
                       <span class="finding-sub mono">
                         {f.path}:{f.line}
-                        {#if threadUrl(f.pull.url, f.forgeCommentId)}
-                          <a class="external" href={threadUrl(f.pull.url, f.forgeCommentId)} target="_blank" rel="noopener noreferrer" title="The finding's thread on GitHub">
-                            <Icon path={mdiOpenInNew} size={11} label="Thread on GitHub" />
+                        {#if safeHref(f.threadUrl)}
+                          <a class="external" href={safeHref(f.threadUrl)} target="_blank" rel="noopener noreferrer" title={`The finding's thread on ${forge}`}>
+                            <Icon path={mdiOpenInNew} size={11} label={`Thread on ${forge}`} />
                           </a>
                         {/if}
                       </span>

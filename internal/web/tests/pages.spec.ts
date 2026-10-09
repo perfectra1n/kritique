@@ -617,7 +617,7 @@ test.describe('findings', () => {
     await expect(row.getByRole('link', { name: `${f.pull.repository}#${f.pull.number}` })).toHaveAttribute('href', `#/a/${g.SLUG}/pulls/alpha/one/7`);
     await expect(row.locator('.status-word')).toHaveText(f.status);
     await expect(row.getByTitle('Reactions to its comment on GitHub')).toHaveText(`${f.reactionsUp} ${f.reactionsDown}`);
-    await expect(row.getByRole('link', { name: 'Thread on GitHub' })).toHaveAttribute('href', `${f.pull.url}#discussion_r${f.forgeCommentId}`);
+    await expect(row.getByRole('link', { name: 'Thread on GitHub' })).toHaveAttribute('href', f.threadUrl);
     await expect(row.locator('.finding-rules').getByRole('link')).toHaveText(f.rules);
     await expect(page.locator('.sections .section-tab.active')).toHaveText('Analytics');
     await expect(page.getByRole('navigation', { name: 'Analytics' }).getByRole('link', { name: 'Findings' })).toHaveAttribute('aria-current', 'page');
@@ -802,7 +802,7 @@ test('pull detail leads with its latest review, then the history and follow-ups 
   await expect(latest.locator('.confidence-line')).toHaveAttribute('title', `scored by ${c.model}`);
   const f = g.reviewDetail.findings[0]!;
   await expect(latest.getByRole('list', { name: 'Findings' }).getByRole('listitem')).toHaveText([`${f.severity} ${f.title} ${f.path}:${f.line} Thread`]);
-  await expect(latest.getByRole('link', { name: 'Thread' })).toHaveAttribute('href', `${p.url}#discussion_r${f.forgeCommentId}`);
+  await expect(latest.getByRole('link', { name: 'Thread' })).toHaveAttribute('href', f.threadUrl);
   await expect(latest.getByRole('link', { name: 'Open the review' })).toHaveAttribute('href', `#/a/${g.SLUG}/reviews/rev-1`);
   await expect(page.locator('.page-head .meta-line')).toContainText('last synchronized');
   await expect(page.locator('.page-head .meta-line')).toContainText('not reviewed: excluded by a trigger condition');
@@ -830,10 +830,7 @@ test.describe('review', () => {
     await expect(page.locator('.finding .code-block')).toContainText(f.replacement);
     await expect(page.locator('.finding-head .badge.mono')).toHaveText(f.rules);
     // The golden finding was posted inline as comment 55 on the pull request.
-    await expect(page.locator('.finding').getByRole('link', { name: 'Thread on GitHub' })).toHaveAttribute(
-      'href',
-      `${g.reviewDetail.review.pull.url}#discussion_r${f.forgeCommentId}`,
-    );
+    await expect(page.locator('.finding').getByRole('link', { name: 'Thread on GitHub' })).toHaveAttribute('href', f.threadUrl);
     const r = g.reviewDetail.review;
     const fact = (name: string) => page.locator('.page-head .facts > div').filter({ has: page.getByRole('term').getByText(name, { exact: true }) }).getByRole('definition');
     await expect(fact('Scope')).toHaveText(new RegExp(`^${r.scope}\\s\\(${r.scopeReason}\\)$`));
@@ -1091,7 +1088,7 @@ test('pull detail says what its unfinished review job waits on, and nothing of o
   const j = g.job;
   const notice = page.locator('.job-notice');
   await expect(notice).toContainText(`A review is waiting to run again: attempt ${j.attempt} of ${j.maxAttempts} failed, the next was due`);
-  await expect(notice).toContainText(`GitHub did not answer. ${j.lastError}`);
+  await expect(notice).toContainText(`The forge did not answer. ${j.lastError}`);
   await expect(notice.getByRole('link', { name: 'Open the queue' })).toHaveAttribute('href', `#/a/${g.SLUG}/queue`);
 
   const pull = /\/pulls\/alpha\/one\/7$/;
@@ -1307,7 +1304,7 @@ test('your settings fit a phone: no control runs past the screen', async ({ page
 test('queue, usage, follow-ups and admin console pages render their fixtures', async ({ page }) => {
   const seen = await g.mockApi(page, g.defaultApi());
   await page.goto(`/${T}/queue`);
-  await expect(page.locator('tbody tr')).toContainText(`GitHub did not answer. ${g.job.lastError}`);
+  await expect(page.locator('tbody tr')).toContainText(`The forge did not answer. ${g.job.lastError}`);
   await expect(page.locator('tbody tr')).toContainText(`${g.job.attempt}/${g.job.maxAttempts}`);
 
   await page.goto(`/${T}/usage`);
@@ -1323,11 +1320,15 @@ test('queue, usage, follow-ups and admin console pages render their fixtures', a
   await expect(page.locator('.followup')).toContainText(`${g.followup.repository}#${g.followup.number}`);
   // The golden follow-up was asked in a thread, and answered there.
   const fu = g.followup;
-  await expect(page.locator('.followup').getByRole('link', { name: 'The question on GitHub' })).toHaveAttribute('href', `${fu.pullUrl}#discussion_r${fu.commentId}`);
-  await expect(page.locator('.followup').getByRole('link', { name: "kritique's reply" })).toHaveAttribute('href', `${fu.pullUrl}#discussion_r${fu.replyCommentId}`);
-  await g.mockApi(page, [[/\/followups$/, g.pageOf([{ ...fu, inline: false, status: 'ignored', reason: 'not a maintainer', replyCommentId: null }])], ...g.defaultApi()]);
+  await expect(page.locator('.followup').getByRole('link', { name: 'The question on GitHub' })).toHaveAttribute('href', fu.commentUrl);
+  await expect(page.locator('.followup').getByRole('link', { name: "kritique's reply" })).toHaveAttribute('href', fu.replyUrl);
+  const onConversation = `${fu.pullUrl}#issuecomment-${fu.commentId}`;
+  await g.mockApi(page, [
+    [/\/followups$/, g.pageOf([{ ...fu, inline: false, status: 'ignored', reason: 'not a maintainer', replyCommentId: null, commentUrl: onConversation, replyUrl: '' }])],
+    ...g.defaultApi(),
+  ]);
   await page.reload();
-  await expect(page.locator('.followup').getByRole('link', { name: 'The question on GitHub' })).toHaveAttribute('href', `${fu.pullUrl}#issuecomment-${fu.commentId}`);
+  await expect(page.locator('.followup').getByRole('link', { name: 'The question on GitHub' })).toHaveAttribute('href', onConversation);
   await expect(page.locator('.followup').getByRole('link', { name: "kritique's reply" })).toHaveCount(0);
   await expect(page.locator('.followup-reason')).toHaveText('not a maintainer');
 
@@ -1501,4 +1502,33 @@ test.describe('pulls load more', () => {
     await expect(page.locator('.pull-rows .pull-row')).toHaveCount(2);
     await expect(page.locator('.pull-rows')).toContainText('More widgets');
   });
+});
+
+test('a Forgejo account names its forge and links the URLs the server built', async ({ page }) => {
+  const slug = 'forgejo/alpha';
+  const url = 'https://code.example/alpha/one/pulls/7';
+  const fu = { ...g.followup, pullUrl: url, commentUrl: `${url}#issuecomment-99`, replyUrl: `${url}#issuecomment-100` };
+  const f = { ...g.accountFinding, threadUrl: `${url}#issuecomment-55`, pull: { ...g.accountFinding.pull, url } };
+  const pd = { ...g.pullDetail, pull: { ...g.pullDetail.pull, url }, followups: [fu] };
+  const onForgejo = g.defaultApi().map(([re, body]): [RegExp, unknown] => [new RegExp(re.source.replace('github\\/alpha', 'forgejo\\/alpha')), body]);
+  await g.mockApi(page, [
+    [/\/api\/v1\/me$/, { ...g.me, accounts: [slug] }],
+    [/\/followups$/, g.pageOf([fu])],
+    [/\/findings$/, g.pageOf([f])],
+    [/\/pulls\/alpha\/one\/7$/, pd],
+    ...onForgejo,
+  ]);
+
+  await page.goto(`/#/a/${slug}/followups`);
+  await expect(page.locator('.followup').getByRole('link', { name: 'The question on Forgejo' })).toHaveAttribute('href', fu.commentUrl);
+  await expect(page.locator('.followup').getByRole('link', { name: "kritique's reply" })).toHaveAttribute('href', fu.replyUrl);
+
+  await page.goto(`/#/a/${slug}/findings`);
+  const row = page.locator('.finding-row').first();
+  await expect(row.getByTitle('Reactions to its comment on Forgejo')).toBeVisible();
+  await expect(row.getByRole('link', { name: 'Thread on Forgejo' })).toHaveAttribute('href', f.threadUrl);
+
+  await page.goto(`/#/a/${slug}/pulls/alpha/one/7`);
+  await expect(page.getByRole('link', { name: 'View on Forgejo' })).toHaveAttribute('href', url);
+  await expect(page.getByText('on GitHub')).toHaveCount(0);
 });

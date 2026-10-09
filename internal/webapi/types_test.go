@@ -44,7 +44,7 @@ var goldenJob = Job{
 var goldenPullRef = PullRef{Repository: "alpha/one", Number: 7, Title: "Add widgets", URL: "https://git.example/alpha/one/pulls/7"}
 
 var goldenSummary = AccountSummary{
-	Slug: "github/alpha", Connection: "alpha-bot", Repositories: 3, Reviews7d: 9,
+	Slug: "github/alpha", Forge: configfile.ForgeGitHub, Connection: "alpha-bot", Repositories: 3, Reviews7d: 9,
 	Usage: MonthUsage{
 		Tokens: 5000, CostUSD: 1.5, TokensPerMonth: 1000000, ReviewsToday: 2, ReviewsPerDay: 50,
 		Reviews: 12, ReviewCostUSD: 1.2, MedianReviewCostUSD: new(0.08),
@@ -102,7 +102,8 @@ var goldenPull = Pull{
 
 var goldenFollowup = Followup{
 	ID: "fu-1", CommentID: 99, Repository: "alpha/one", Number: 7, PullURL: goldenPullRef.URL, Author: "bob", Inline: true, Path: "a.go", Line: 4,
-	Status: store.FollowupAnswered, Reason: "", ReplyCommentID: new(int64(100)), Model: "acme/large", CreatedAt: t0,
+	Status: store.FollowupAnswered, Reason: "", ReplyCommentID: new(int64(100)),
+	CommentURL: goldenPullRef.URL + "#discussion_r99", ReplyURL: goldenPullRef.URL + "#discussion_r100", Model: "acme/large", CreatedAt: t0,
 }
 
 var goldenTools = []ToolDef{{Name: "grep", Description: "search", InputSchema: json.RawMessage(`{"type":"object"}`)}}
@@ -120,7 +121,7 @@ var goldens = map[string]any{
 	"account_detail": AccountDetail{
 		Slug: "github/alpha",
 		Connection: Connection{
-			Name: "alpha-bot", Forge: configfile.ForgeGitHub, Accounts: []string{"alpha"},
+			Name: "alpha-bot", Forge: configfile.ForgeGitHub, WebURL: configfile.GitHubWebURL, Accounts: []string{"alpha"},
 			Credentials: CredentialsSet{ClientID: true, PrivateKey: true, WebhookSecret: true},
 			HookPath:    "/hooks/alpha-bot", LastWebhookAt: &t0,
 		},
@@ -164,7 +165,7 @@ var goldens = map[string]any{
 		Findings: []Finding{{
 			ID: "f-1", Path: "a.go", Line: 3, EndLine: 5, Severity: review.SeverityBlocking, Title: "nil deref",
 			Explanation: "x may be nil", SuggestedFix: "check x", Replacement: "if x != nil {}", AgentPrompt: "fix it",
-			Fingerprint: "fp", PostedInline: true, ForgeCommentID: new(int64(55)), CreatedAt: t0, ReactionsUp: 2, ReactionsDown: 1,
+			Fingerprint: "fp", PostedInline: true, ForgeCommentID: new(int64(55)), ThreadURL: goldenPullRef.URL + "#discussion_r55", CreatedAt: t0, ReactionsUp: 2, ReactionsDown: 1,
 			Rules: []string{"wrap-errors"}, Status: store.FindingOpen,
 		}},
 		RunnerRun: &RunnerRun{
@@ -197,7 +198,7 @@ var goldens = map[string]any{
 		Finding: Finding{
 			ID: "f-1", Path: "a.go", Line: 3, EndLine: 5, Severity: review.SeverityBlocking, Title: "nil deref",
 			Explanation: "x may be nil", SuggestedFix: "check x", Replacement: "", AgentPrompt: "", Fingerprint: "fp",
-			PostedInline: true, ForgeCommentID: new(int64(55)), CreatedAt: t0, ReactionsUp: 2, ReactionsDown: 1,
+			PostedInline: true, ForgeCommentID: new(int64(55)), ThreadURL: goldenPullRef.URL + "#discussion_r55", CreatedAt: t0, ReactionsUp: 2, ReactionsDown: 1,
 			Rules: []string{"wrap-errors"}, Status: store.FindingAddressed,
 		},
 		ReviewID: "rev-1", Pull: goldenPullRef, FirstSeenAt: t0, LastSeenAt: t1,

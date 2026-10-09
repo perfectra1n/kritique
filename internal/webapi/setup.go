@@ -2,6 +2,7 @@ package webapi
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
@@ -24,10 +25,14 @@ func (s *Server) getSetup(w http.ResponseWriter, r *http.Request) error {
 // setupStatus is f's distance from reviewing, for the dashboard at webURL.
 func setupStatus(f *configfile.File, webURL string) SetupStatus {
 	base := strings.TrimSuffix(webURL, "/")
-	out := SetupStatus{WebURL: base, HooksURL: base + "/hooks/", Connections: []string{}}
+	out := SetupStatus{WebURL: base, HooksURL: base + "/hooks/", Connections: []string{}, Forges: []configfile.Forge{}}
 	for _, in := range f.Connections {
 		out.Connections = append(out.Connections, in.Name)
+		if !slices.Contains(out.Forges, in.Forge) {
+			out.Forges = append(out.Forges, in.Forge)
+		}
 	}
+	slices.Sort(out.Forges)
 	if ref := f.Defaults.Review.Model; ref != nil {
 		out.ReviewModel = string(*ref)
 	}

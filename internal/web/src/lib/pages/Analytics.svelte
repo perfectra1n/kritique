@@ -5,6 +5,7 @@
   import { href } from '../router.svelte';
   import { hookURL } from '../session.svelte';
   import { unsignedWebhooks } from '../setup';
+  import { forgeName } from '../forge';
   import { Resource, live } from '../resource.svelte';
   import { accountApi, repoRoute } from '../links';
   import { day } from '../dates';
@@ -91,17 +92,22 @@
     <SectionTabs section="analytics" {slug} current="account" />
     {#if detail.data && (unsignedWebhooks(detail.data.connection) || !detail.data.connection.lastWebhookAt)}
       {@const inst = detail.data.connection}
+      {@const github = inst.forge === 'github'}
+      {@const forge = forgeName(inst.forge)}
       <section class="panel" aria-labelledby="an-connection">
         <header class="panel-head"><h2 id="an-connection">Connection</h2></header>
         {#if unsignedWebhooks(inst)}
           <p class="notice" role="note">
-            GitHub sends <span class="mono">{inst.name}</span>'s webhooks with no signature, so kritique refuses them, only polls for
-            new pull requests and cannot answer mentions. Set the GitHub App's webhook secret to the one kritique holds.
+            {forge} sends <span class="mono">{inst.name}</span>'s webhooks with no signature, so kritique
+            refuses them, only polls for new pull requests and cannot answer mentions.
+            {#if github}Set the GitHub App's webhook secret to the one kritique holds.{:else}Set the webhook's secret on {forge} to the one
+              kritique holds.{/if}
           </p>
         {:else}
           <p class="notice" role="note">
             No webhook has reached <span class="mono">{inst.name}</span>, so kritique only polls it for new pull requests and
-            cannot answer mentions. Point the GitHub App's webhook at <span class="mono">{hookURL(inst.hookPath)}</span>.
+            cannot answer mentions. Point the {github ? "GitHub App's webhook" : `webhook on ${forge}`} at
+            <span class="mono">{hookURL(inst.hookPath)}</span>.
           </p>
         {/if}
         <p class="small muted panel-body last-poll">

@@ -2,7 +2,8 @@
   import { getJSON } from '../api.svelte';
   import { href } from '../router.svelte';
   import { Resource, live, pollJobs } from '../resource.svelte';
-  import { repoRoute, rerunPath, accountApi, threadUrl } from '../links';
+  import { repoRoute, rerunPath, accountApi } from '../links';
+  import { forgeName, slugForge } from '../forge';
   import { isAdmin } from '../session.svelte';
   import ActionButton from '../components/ActionButton.svelte';
   import { jobCauseText, rerunBody, shortSha, skipText, SEVERITIES } from '../format';
@@ -88,7 +89,7 @@
             {/if}
             {#each p.labels as l (l.name)}<span class="label-chip" style:--label={labelColor(l.color)}>{l.name}</span>{/each}
             {#if forgeUrl}
-              <a class="external" href={forgeUrl} target="_blank" rel="noopener noreferrer">View on GitHub <Icon path={mdiOpenInNew} size={12} /></a>
+              <a class="external" href={forgeUrl} target="_blank" rel="noopener noreferrer">View on {forgeName(slugForge(slug))} <Icon path={mdiOpenInNew} size={12} /></a>
             {/if}
           </p>
           {#if p.state !== 'open'}
@@ -162,8 +163,8 @@
                         <a href={href({ name: 'review', slug, id: r.id, finding: f.id })}>{f.title}</a>
                         <span class="mono small muted">{f.path}:{f.line}</span>
                         {#if f.status !== 'open'}<Pill tone={f.status === 'addressed' ? 'ok' : 'muted'} label={f.status} title={f.dismissReason || undefined} />{/if}
-                        {#if threadUrl(p.url, f.forgeCommentId)}
-                          <a class="external small" href={threadUrl(p.url, f.forgeCommentId)} target="_blank" rel="noopener noreferrer">
+                        {#if safeHref(f.threadUrl)}
+                          <a class="external small" href={safeHref(f.threadUrl)} target="_blank" rel="noopener noreferrer">
                             Thread <Icon path={mdiOpenInNew} size={11} />
                           </a>
                         {/if}

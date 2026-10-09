@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/store"
 	"github.com/perfectra1n/kritique/internal/transcript"
 )
@@ -129,7 +130,7 @@ func (s *Server) getPull(w http.ResponseWriter, r *http.Request, t *accountScope
 		if err != nil {
 			return err
 		}
-		d = PullDetail{Pull: pull(p), Reviews: make([]Review, len(reviews)), Followups: followupList(followups)}
+		d = PullDetail{Pull: pull(p), Reviews: make([]Review, len(reviews)), Followups: followupList(followups, t.account.Forge)}
 		if job != nil {
 			d.Job = new(jobItem(*job))
 		}
@@ -160,13 +161,20 @@ func reviewItem(v store.ReviewRow) Review {
 	return out
 }
 
-func followupList(rows []store.FollowupRow) []Followup {
+// followupList is rows as the API shows them, of pull requests on forge.
+func followupList(rows []store.FollowupRow, forge configfile.Forge) []Followup {
 	out := make([]Followup, len(rows))
 	for i, f := range rows {
 		out[i] = Followup{
 			ID: f.ID, CommentID: f.CommentID, Repository: f.Repository, Number: f.Number, PullURL: f.PullURL, Author: f.Author, Inline: f.Inline,
 			Path: f.Path, Line: f.Line, Status: f.Status, Reason: f.Reason, ReplyCommentID: f.ReplyCommentID, Model: f.Model,
-			CreatedAt: f.CreatedAt,
+			CreatedAt:  f.CreatedAt,
+			CommentURL: commentURL(forge, f.PullURL, f.CommentID, f.Inline),
+		}
+		if f.ReplyCommentID != nil {
+			// A limited follow-up's notice goes on the conversation, not
+			// in the thread it was asked in.
+			out[i].ReplyURL = commentURL(forge, f.PullURL, *f.ReplyCommentID, f.Inline && f.Status != store.FollowupLimited)
 		}
 	}
 	return out
@@ -190,7 +198,7 @@ func (s *Server) listFollowups(w http.ResponseWriter, r *http.Request, t *accoun
 	}); err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, newPage(followupList(rows), next))
+	writeJSON(w, http.StatusOK, newPage(followupList(rows, t.account.Forge), next))
 	return nil
 }
 

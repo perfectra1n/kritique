@@ -59,21 +59,22 @@ type MonthUsage struct {
 	MedianReviewCostUSD *float64 `json:"medianReviewCostUsd"`
 }
 
-// AccountSummary is one row of the account list. Connection names the
-// connection serving it. Attention and the three times are the account's
+// AccountSummary is one row of the account list. Forge is the forge the
+// account is on, and Connection names the connection serving it. Attention and the three times are the account's
 // health: what wants a look, when the connection's webhook last delivered,
 // verified and unsigned, and when the account was last polled, each null
 // for never.
 type AccountSummary struct {
-	Slug                  string     `json:"slug"`
-	Connection            string     `json:"connection"`
-	Repositories          int        `json:"repositories"`
-	Reviews7d             int        `json:"reviews7d"`
-	Usage                 MonthUsage `json:"usage"`
-	Attention             Attention  `json:"attention"`
-	LastWebhookAt         *time.Time `json:"lastWebhookAt"`
-	LastUnsignedWebhookAt *time.Time `json:"lastUnsignedWebhookAt"`
-	LastPolledAt          *time.Time `json:"lastPolledAt"`
+	Slug                  string           `json:"slug"`
+	Forge                 configfile.Forge `json:"forge"`
+	Connection            string           `json:"connection"`
+	Repositories          int              `json:"repositories"`
+	Reviews7d             int              `json:"reviews7d"`
+	Usage                 MonthUsage       `json:"usage"`
+	Attention             Attention        `json:"attention"`
+	LastWebhookAt         *time.Time       `json:"lastWebhookAt"`
+	LastUnsignedWebhookAt *time.Time       `json:"lastUnsignedWebhookAt"`
+	LastPolledAt          *time.Time       `json:"lastPolledAt"`
 }
 
 // AdminAccount is one account as an admin sees it: Live is false for an
@@ -104,11 +105,14 @@ type CredentialsSet struct {
 	WebhookSecret bool `json:"webhookSecret"`
 }
 
-// Connection is one GitHub App and the accounts it serves. HookPath is
-// where its webhook arrives, under the dashboard's URL.
+// Connection is one connection to a forge, such as a GitHub App, and the
+// accounts it serves. WebURL is the forge's web address, with no trailing
+// slash, where its accounts are; HookPath is where its webhook arrives,
+// under the dashboard's URL.
 type Connection struct {
 	Name        string           `json:"name"`
 	Forge       configfile.Forge `json:"forge"`
+	WebURL      string           `json:"webUrl"`
 	Accounts    []string         `json:"accounts"`
 	Credentials CredentialsSet   `json:"credentials"`
 	HookPath    string           `json:"hookPath"`
@@ -117,7 +121,7 @@ type Connection struct {
 	// kritique only polls it.
 	LastWebhookAt *time.Time `json:"lastWebhookAt"`
 	// LastUnsignedWebhookAt is when one last arrived with no signature, to
-	// the minute, which a GitHub App with no webhook secret sends; null when
+	// the minute, which a forge sends for a webhook with no secret; null when
 	// none has.
 	LastUnsignedWebhookAt *time.Time `json:"lastUnsignedWebhookAt"`
 }

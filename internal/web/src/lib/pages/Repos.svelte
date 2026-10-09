@@ -4,6 +4,7 @@
   import { Paged, live } from '../resource.svelte';
   import { indexTone } from '../format';
   import { repoRoute, accountApi, reindexPath, turnedOnPath } from '../links';
+  import { forgeName, slugForge } from '../forge';
   import { getJSON, sendJSON } from '../api.svelte';
   import { describe, sendEach, toastTally } from '../manage';
   import { isAdmin } from '../session.svelte';
@@ -21,6 +22,9 @@
   import type { IndexRunStatus } from '../types';
 
   let { slug }: { slug: string } = $props();
+  const forge = $derived(forgeName(slugForge(slug)));
+  // Only a GitHub App lists the repositories it reaches on demand.
+  const resyncs = $derived(slugForge(slug) === 'github');
   let filter = $state('');
   // Which repositories the list shows: by default those kritique can run,
   // neither archived nor forks but the forks turned on; or the forks, or
@@ -106,7 +110,7 @@
     try {
       const d = await getJSON<AccountDetail>(accountApi(slug));
       const r = await sendJSON<RegisterResult>('POST', `/api/v1/admin/connections/${encodeURIComponent(d.connection.name)}/repositories`);
-      toast(r?.added ? `Resynced from GitHub: ${plural(r.added)} added` : 'Resynced from GitHub');
+      toast(r?.added ? `Resynced from ${forge}: ${plural(r.added)} added` : `Resynced from ${forge}`);
       void paged.load();
     } catch (err) {
       toast(`Resync failed: ${describe(err)}`, 'danger');
@@ -145,8 +149,8 @@
           <option value="archived">Archived</option>
         </select>
       </label>
-      {#if isAdmin()}
-        <button class="btn btn-small" disabled={busy} onclick={resync} title="List the repositories the App reaches again">Resync from GitHub</button>
+      {#if isAdmin() && resyncs}
+        <button class="btn btn-small" disabled={busy} onclick={resync} title="List the repositories the App reaches again">Resync from {forge}</button>
       {/if}
       {#if manage && selected.length}
         <div class="bulk-actions" role="group" aria-label="Selected repositories">
@@ -161,7 +165,7 @@
     {#if kind === 'forks'}
       <p class="small muted">A fork is only reviewed and indexed once turned on here.</p>
     {:else if kind === 'archived'}
-      <p class="small muted">An archived repository is never reviewed or indexed. Unarchive it on GitHub, then resync, to turn it on.</p>
+      <p class="small muted">An archived repository is never reviewed or indexed. Unarchive it on {forge}{resyncs ? ', then resync,' : ''} to turn it on.</p>
     {/if}
     <StateView {res} retry={() => res.load()} isEmpty={(d) => d.items.length === 0} {empty}>
       {#snippet children()}
@@ -213,7 +217,7 @@
                     <td class="mono"><a href={href(repoRoute(slug, repo.fullName))}>{repo.fullName}</a> <RepoTraits r={repo} /></td>
                     <td>
                       {#if manage}
-                        <span class="toggle" title={repo.archived ? 'Archived on GitHub: unarchive it there first' : undefined}>
+                        <span class="toggle" title={repo.archived ? `Archived on ${forge}: unarchive it there first` : undefined}>
                           <Switch.Root
                             class="switch"
                             aria-label={`Review and index ${repo.fullName}`}
