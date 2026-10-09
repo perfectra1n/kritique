@@ -22,6 +22,8 @@ imagePullSecrets: []
 nameOverride: ""
 # -- Override the full release name.
 fullnameOverride: ""
+# -- The cluster's DNS domain, which the gateway's in-cluster URL that runner Jobs are handed ends in.
+clusterDomain: cluster.local
 
 # kritique runs as one Deployment of `kritique serve`: webhooks, the dashboard,
 # the job queues, runner Jobs, the gateway and, on the replica holding the

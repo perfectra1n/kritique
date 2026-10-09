@@ -371,6 +371,16 @@ tests:
             name: KRITIQUE_GATEWAY_URL
             value: http://RELEASE-NAME-kritique-gateway.NAMESPACE.svc.cluster.local:9090
 
+  - it: builds the gateway URL on clusterDomain
+    set:
+      clusterDomain: newcluster.local
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: KRITIQUE_GATEWAY_URL
+            value: http://RELEASE-NAME-kritique-gateway.NAMESPACE.svc.newcluster.local:8082
+
   - it: fails without config.webUrl
     set:
       config.webUrl: ""

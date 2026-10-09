@@ -7,6 +7,12 @@
       "title": "affinity",
       "type": "object"
     },
+    "clusterDomain": {
+      "default": "cluster.local",
+      "description": "The cluster's DNS domain, which the gateway's in-cluster URL that runner Jobs are handed ends in.",
+      "title": "clusterDomain",
+      "type": "string"
+    },
     "config": {
       "description": "How kritique runs and what it reviews with, as the KRITIQUE_* variables\n(docs/configuration.md) keyed by their names without the prefix, in\ncamelCase: `pollInterval` is KRITIQUE_POLL_INTERVAL, `authOidcIssuer` is\nKRITIQUE_AUTH_OIDC_ISSUER. The keys below are every variable that can be\nset; a key left empty sets nothing and kritique's own default applies,\nwhich each description names. A value is a plain value, rendered\nthrough `tpl`, or, for a secret, a map with the variable's `valueFrom`\n(a Secret key). The variables that stand in for the configuration\nfile's sections (auth*, apps*, providers*, embedding*, and the review,\nconfidence and trigger settings reviewModel, reviewFallback,\nreviewEffort, reviewApprove, reviewFixes, reviewIncremental,\nreviewDiagram, reviewCost, confidenceModel, confidenceFallback,\nconfidenceEffort, confidenceThreshold, confidenceGate, confidenceRisk,\ntriggerSettle and triggerLimit) win over the file. The variables the chart derives from its other values\n(the addresses, the database, the config file, the runner image,\nServiceAccount, TTL, resources and tools) cannot be set here; the chart\nrefuses them, as it refuses a KRITIQUE_* variable under `env`.",
       "properties": {

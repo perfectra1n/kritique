@@ -172,6 +172,7 @@ Kubernetes: `>=1.25.0-0`
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Affinity rules for pod scheduling. |
+| clusterDomain | string | `"cluster.local"` | The cluster's DNS domain, which the gateway's in-cluster URL that runner Jobs are handed ends in. |
 | config.appsAccounts | string | `""` | The users and organizations the app serves, comma-separated; set it to declare the app here. |
 | config.appsClientId | string | `""` | The GitHub App's client id, inline or from a Secret. |
 | config.appsName | string | `""` | The app's name, which is its webhook path, `/hooks/<name>`; `github` unless set. |
