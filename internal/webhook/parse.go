@@ -197,12 +197,16 @@ func Parse(forge configfile.Forge, header http.Header, body []byte) (Event, erro
 	switch forge {
 	case configfile.ForgeGitHub:
 		return parseGitHub(header.Get("X-GitHub-Event"), header.Get("X-GitHub-Delivery"), body)
+	case configfile.ForgeForgejo, configfile.ForgeGitea:
+		// Gitea sends the X-Gitea-* headers, and Forgejo sends them beside
+		// its own X-Forgejo-* ones, with the same payloads.
+		return parseForgejo(header.Get("X-Gitea-Event"), header.Get("X-Gitea-Delivery"), body)
 	}
 	return Event{}, fmt.Errorf("webhook: unsupported forge %q", forge)
 }
 
-// unwrapFormPayload returns the JSON document from a webhook body. GitHub can
-// deliver application/x-www-form-urlencoded, which wraps the JSON in a
+// unwrapFormPayload returns the JSON document from a webhook body. GitHub,
+// Forgejo and Gitea can deliver application/x-www-form-urlencoded, which wraps the JSON in a
 // `payload=` form field. Signature verification runs over the original
 // body upstream, so unwrapping here never affects authentication.
 func unwrapFormPayload(header http.Header, body []byte) []byte {

@@ -33,7 +33,12 @@ func Verify(forge configfile.Forge, secret string, header http.Header, body []by
 	switch forge {
 	case configfile.ForgeGitHub:
 		// X-Hub-Signature-256: "sha256=" + hex(HMAC-SHA256(body, secret)).
-		return verifyHMAC(header.Get("X-Hub-Signature-256"), secret, body)
+		return verifyHMAC(header.Get("X-Hub-Signature-256"), "sha256=", secret, body)
+	case configfile.ForgeForgejo, configfile.ForgeGitea:
+		// X-Gitea-Signature: hex(HMAC-SHA256(body, secret)), no prefix.
+		// Forgejo sends it beside its own X-Forgejo-Signature, the same
+		// digest, so one header serves both.
+		return verifyHMAC(header.Get("X-Gitea-Signature"), "", secret, body)
 	default:
 		return fmt.Errorf("webhook: unsupported forge %q", forge)
 	}
@@ -46,18 +51,21 @@ func Delivered(forge configfile.Forge, header http.Header) bool {
 	switch forge {
 	case configfile.ForgeGitHub:
 		return header.Get("X-GitHub-Delivery") != "" && header.Get("X-GitHub-Event") != ""
+	case configfile.ForgeForgejo, configfile.ForgeGitea:
+		return header.Get("X-Gitea-Delivery") != "" && header.Get("X-Gitea-Event") != ""
 	default:
 		return false
 	}
 }
 
-// verifyHMAC checks a "sha256=" + hex HMAC-SHA256 signature header. The
-// comparison is constant-time (hmac.Equal).
-func verifyHMAC(provided, secret string, body []byte) error {
+// verifyHMAC checks a hex HMAC-SHA256 signature header after prefix, such
+// as "sha256=", which it must carry. The comparison is constant-time
+// (hmac.Equal).
+func verifyHMAC(provided, prefix, secret string, body []byte) error {
 	if provided == "" {
 		return ErrMissingSignature
 	}
-	digest, ok := strings.CutPrefix(provided, "sha256=")
+	digest, ok := strings.CutPrefix(provided, prefix)
 	if !ok {
 		return ErrSignatureMismatch
 	}

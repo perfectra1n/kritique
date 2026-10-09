@@ -50,6 +50,12 @@ func TestVerify(t *testing.T) {
 		{"github tampered body", configfile.ForgeGitHub, secret, http.Header{"X-Hub-Signature-256": {"sha256=" + sig}}, []byte("Goodbye"), ErrSignatureMismatch},
 		{"github bad hex", configfile.ForgeGitHub, secret, http.Header{"X-Hub-Signature-256": {"sha256=zz"}}, body, ErrSignatureMismatch},
 		{"no secret configured", configfile.ForgeGitHub, "", http.Header{"X-Hub-Signature-256": {"sha256=" + sig}}, body, ErrNoSecret},
+		{"forgejo valid", configfile.ForgeForgejo, secret, http.Header{"X-Gitea-Signature": {sig}}, body, nil},
+		{"forgejo with prefix rejected", configfile.ForgeForgejo, secret, http.Header{"X-Gitea-Signature": {"sha256=" + sig}}, body, ErrSignatureMismatch},
+		{"forgejo wrong secret", configfile.ForgeForgejo, secret, http.Header{"X-Gitea-Signature": {hmacSHA256Hex("x")}}, body, ErrSignatureMismatch},
+		{"forgejo github header alone", configfile.ForgeForgejo, secret, http.Header{"X-Hub-Signature-256": {"sha256=" + sig}}, body, ErrMissingSignature},
+		{"gitea valid", configfile.ForgeGitea, secret, http.Header{"X-Gitea-Signature": {sig}}, body, nil},
+		{"gitea tampered body", configfile.ForgeGitea, secret, http.Header{"X-Gitea-Signature": {sig}}, []byte("Goodbye"), ErrSignatureMismatch},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -80,7 +86,15 @@ func TestDelivered(t *testing.T) {
 			}
 		})
 	}
-	if Delivered("gitea", http.Header{"X-Github-Delivery": {"d-1"}, "X-Github-Event": {"ping"}}) {
+	if Delivered("bitbucket", http.Header{"X-Github-Delivery": {"d-1"}, "X-Github-Event": {"ping"}}) {
 		t.Fatal("an unsupported forge delivers nothing")
+	}
+	for _, forge := range []configfile.Forge{configfile.ForgeForgejo, configfile.ForgeGitea} {
+		if !Delivered(forge, http.Header{"X-Gitea-Delivery": {"d-1"}, "X-Gitea-Event": {"push"}}) {
+			t.Fatalf("%s delivery not recognized", forge)
+		}
+		if Delivered(forge, http.Header{"X-Github-Delivery": {"d-1"}, "X-Github-Event": {"ping"}}) {
+			t.Fatalf("%s takes a GitHub delivery as its own", forge)
+		}
 	}
 }
