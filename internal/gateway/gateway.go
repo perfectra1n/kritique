@@ -126,16 +126,19 @@ type runCall struct {
 
 // role is the usage role c's run spends as.
 func (c runCall) role() string {
-	if c.grant.FollowupCommentID != 0 {
+	switch {
+	case c.grant.TaskRunID != "":
+		return store.RoleTask
+	case c.grant.FollowupCommentID != 0:
 		return store.RoleFollowUp
 	}
 	return store.RoleReview
 }
 
-// usageReview is the review c's spend is charged to: a follow-up's is
-// charged to none.
+// usageReview is the review c's spend is charged to: a follow-up's or a
+// task's is charged to none.
 func (c runCall) usageReview() string {
-	if c.grant.FollowupCommentID != 0 {
+	if c.grant.FollowupCommentID != 0 || c.grant.TaskRunID != "" {
 		return ""
 	}
 	return c.grant.ReviewID
@@ -245,6 +248,9 @@ func (g *Server) chat(w http.ResponseWriter, r *http.Request) {
 	if id := c.grant.FollowupCommentID; id != 0 {
 		req.Session = "followup-" + strconv.FormatInt(id, 10)
 	}
+	if id := c.grant.TaskRunID; id != "" {
+		req.Session = "task-" + id
+	}
 	if part > 0 {
 		// Each part of a split review is a conversation of its own.
 		req.Session += "/" + strconv.Itoa(part)
@@ -305,7 +311,7 @@ func (g *Server) chat(w http.ResponseWriter, r *http.Request) {
 	req.Model = served.Ref.Model()
 	adapter.Recorder{Store: g.Store, Metrics: g.Metrics}.Record(ctx, c.logger, store.ModelCall{
 		AccountID: c.grant.AccountID, ReviewID: c.grant.ReviewID, RunnerRunID: c.grant.RunID, FollowupCommentID: c.grant.FollowupCommentID,
-		Carries: c.grant.Continues, Kind: store.ModelCallAgentStep, Part: part, Duration: took,
+		TaskRunID: c.grant.TaskRunID, Carries: c.grant.Continues, Kind: store.ModelCallAgentStep, Part: part, Duration: took,
 	}, req, resp, err, adapter.Mask(c.file, served.Provider, c.token))
 	if err != nil {
 		// The provider's error goes to a pod that reads untrusted content;
