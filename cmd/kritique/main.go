@@ -309,6 +309,11 @@ func startWorker(
 	river.AddWorker(workers, &worker.Index{
 		Base: base, Executor: exec, Embedders: embedders,
 	})
+	river.AddWorker(workers, &worker.TaskDispatch{Base: base})
+	river.AddWorker(workers, &worker.Task{
+		Base: base, Steppers: steppers, Embedders: embedders, Executor: exec,
+		GatewayURL: cfg.GatewayURL, GatewayTokenTTL: cfg.GatewayTokenTTL,
+	})
 	queue, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{
 		Logger: logger,
 		// Review and index workers set their own timeouts from the
@@ -325,6 +330,7 @@ func startWorker(
 			jobs.QueueReview:   {MaxWorkers: cfg.ReviewWorkers},
 			jobs.QueueFollowUp: {MaxWorkers: cfg.ReviewWorkers},
 			jobs.QueueIndex:    {MaxWorkers: cfg.IndexWorkers},
+			jobs.QueueTask:     {MaxWorkers: cfg.ReviewWorkers},
 		},
 		Workers: workers,
 	})

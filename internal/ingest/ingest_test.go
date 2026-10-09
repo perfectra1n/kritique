@@ -62,6 +62,9 @@ const prBody = `{"action":"opened","pull_request":{"number":1,"user":{"login":"x
   "base":{"ref":"main","sha":"2","repo":{"full_name":"onedr0p/home-ops"}}},
   "repository":{"full_name":"onedr0p/home-ops","default_branch":"main","owner":{"login":"onedr0p"}}}`
 
+const releaseBody = `{"action":"published","release":{"tag_name":"v1"},
+  "repository":{"full_name":"onedr0p/home-ops","owner":{"login":"onedr0p"}},"sender":{"login":"devin"}}`
+
 func setup(t *testing.T, disp Dispatcher) *httptest.Server {
 	t.Helper()
 	t.Setenv("TEST_PEM", "pem")
@@ -115,6 +118,10 @@ func TestHandler(t *testing.T) {
 		{"unparsable", "/hooks/bot-ross", "pull_request", "s3cret", "{nope", Outcome{}, nil, http.StatusBadRequest, false, true},
 		{"ping", "/hooks/bot-ross", "ping", "s3cret", `{"zen":"x"}`, Outcome{}, nil, http.StatusNoContent, false, true},
 		{"unknown event ignored", "/hooks/bot-ross", "workflow_run", "s3cret", `{}`, Outcome{}, nil, http.StatusAccepted, false, true},
+		// A kind reviews ignore still reaches the dispatcher for tasks when
+		// it concerns a repository.
+		{"unmodeled repository event dispatched", "/hooks/bot-ross", "release", "s3cret", releaseBody, Outcome{Status: Ignored}, nil,
+			http.StatusAccepted, true, true},
 		{"undeclared account ignored", "/hooks/bot-ross", "pull_request", "s3cret",
 			strings.ReplaceAll(prBody, `"owner":{"login":"onedr0p"}`, `"owner":{"login":"stranger"}`), Outcome{}, nil, http.StatusAccepted, false, true},
 		{"dispatched", "/hooks/bot-ross", "pull_request", "s3cret", prBody, Outcome{Status: Enqueued}, nil, http.StatusAccepted, true, true},
@@ -138,7 +145,8 @@ func TestHandler(t *testing.T) {
 			}
 			if tt.dispatched {
 				req := disp.got[0]
-				if !strings.EqualFold(req.Account.Name, req.Event.Account) || req.Event.Kind != webhook.KindPullRequest {
+				if !strings.EqualFold(req.Account.Name, req.Event.Account) || req.Connection == nil || req.Connection.Name != "bot-ross" ||
+					(req.Event.Kind != webhook.KindPullRequest && req.Event.RawEvent != "release") {
 					t.Fatalf("request = %+v", req)
 				}
 			}

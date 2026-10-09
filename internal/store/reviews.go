@@ -131,11 +131,12 @@ const (
 	RunnerKindReview   RunnerKind = "review"
 	RunnerKindIndex    RunnerKind = "index"
 	RunnerKindFollowUp RunnerKind = "followup"
+	RunnerKindTask     RunnerKind = "task"
 )
 
 // InsertRunnerRun records a runner run of kind for its parent, a review or
 // an index generation, started by River job jobID, and returns its id. A
-// follow-up's run has no parent: parentID is "".
+// follow-up's or a task's run has no parent: parentID is "".
 func InsertRunnerRun(ctx context.Context, tx pgx.Tx, accountID string, kind RunnerKind, parentID string, jobID int64) (string, error) {
 	parent := "review_id"
 	if kind == RunnerKindIndex {

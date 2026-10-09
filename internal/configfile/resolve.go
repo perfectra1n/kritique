@@ -95,6 +95,8 @@ func (f *File) Settings(a *Account, fullName string) Settings {
 		// forge's: offered on another forge it could only fail.
 		s.Agent.Commands = slices.DeleteFunc(slices.Clone(s.Agent.Commands), func(c string) bool { return c == ghCommand })
 	}
+	s.Tasks = enabledTasks(s.Tasks)
+	s.TaskBounds = s.taskBounds.Resolve()
 	return s
 }
 
@@ -209,6 +211,8 @@ func (s *Settings) apply(o *Overrides) {
 	s.trigger(o)
 	s.Agent = s.Agent.overlay(o.Agent)
 	s.Review = s.Review.overlay(o)
+	s.Tasks = WithTasks(s.Tasks, o.Tasks)
+	s.taskBounds = s.taskBounds.overlay(o.TaskBounds)
 }
 
 // trigger lays one scope's trigger keys over s.

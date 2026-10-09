@@ -102,8 +102,14 @@ func TestParseForgejoComments(t *testing.T) {
 		t.Fatalf("comment = %+v", c)
 	}
 	issue := strings.Replace(pull, `"is_pull":true`, `"is_pull":false`, 1)
-	if ev, err := Parse(configfile.ForgeGitea, gitea("issue_comment"), []byte(issue)); err != nil || ev.Kind != KindIgnored {
-		t.Fatalf("an issue's comment = %+v, %v; want it ignored", ev, err)
+	// A plain issue's comment is offered to tasks, under an issue subject
+	// so it is never taken for a review follow-up.
+	if ev, err := Parse(configfile.ForgeGitea, gitea("issue_comment"), []byte(issue)); err != nil ||
+		ev.Kind != KindComment || ev.Subject == nil || ev.Subject.Kind != SubjectIssue || ev.Subject.Number != 3 {
+		t.Fatalf("an issue's comment = %+v, %v; want a comment on issue 3", ev, err)
+	}
+	if ev.Subject == nil || ev.Subject.Kind != SubjectPull {
+		t.Fatalf("a pull request's comment subject = %+v; want the pull request", ev.Subject)
 	}
 	if _, err := Parse(configfile.ForgeForgejo, gitea("issue_comment"), []byte("{")); err == nil {
 		t.Fatal("a broken payload must be an error")
@@ -120,16 +126,18 @@ func TestParseForgejoOther(t *testing.T) {
 		{"push", "push", `{"ref":"refs/heads/main","after":"ccc333",` + repo + `}`, KindPush, ""},
 		{"repository created", "repository", `{"action":"created",` + repo + `}`, KindRepository, "created"},
 		{"repository deleted", "repository", `{"action":"deleted",` + repo + `}`, KindRepository, "deleted"},
-		{"an issue", "issues", `{"action":"opened",` + repo + `}`, KindIgnored, "issues"},
-		{"a review approving", "pull_request_approved", `{"action":"reviewed",` + repo + `}`, KindIgnored, "pull_request_approved"},
-		{"a review commenting", "pull_request_comment", `{"action":"reviewed",` + repo + `}`, KindIgnored, "pull_request_comment"},
-		{"a release", "release", `{"action":"published",` + repo + `}`, KindIgnored, "release"},
+		{"an issue", "issues", `{"action":"opened","issue":{"number":4,"pull_request":null},` + repo + `}`, KindIssue, "opened"},
+		{"an issue's labels", "issues", `{"action":"label_updated","issue":{"number":4},` + repo + `}`, KindIssue, "labeled"},
+		// An ignored event keeps the payload's action; its name is RawEvent.
+		{"a review approving", "pull_request_approved", `{"action":"reviewed",` + repo + `}`, KindIgnored, "reviewed"},
+		{"a review commenting", "pull_request_comment", `{"action":"reviewed",` + repo + `}`, KindIgnored, "reviewed"},
+		{"a release", "release", `{"action":"published",` + repo + `}`, KindIgnored, "published"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ev, err := Parse(configfile.ForgeForgejo, gitea(tt.event), []byte(tt.body))
-			if err != nil || ev.Kind != tt.kind || ev.Action != tt.action {
-				t.Fatalf("event = %+v, %v; want kind %s action %q", ev, err, tt.kind, tt.action)
+			if err != nil || ev.Kind != tt.kind || ev.Action != tt.action || ev.RawEvent != tt.event {
+				t.Fatalf("event = %+v, %v; want kind %s action %q raw event %q", ev, err, tt.kind, tt.action, tt.event)
 			}
 		})
 	}

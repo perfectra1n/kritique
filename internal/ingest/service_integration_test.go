@@ -70,7 +70,7 @@ func request(f *configfile.File, ev webhook.Event) Request {
 		owner, _, _ = strings.Cut(ev.Repository.FullName, "/")
 	}
 	account, _ := f.Account(in.Forge, owner)
-	return Request{File: f, Account: account, Event: ev}
+	return Request{File: f, Account: account, Connection: in, Event: ev}
 }
 
 func repo(name string) *webhook.Repository {
@@ -1110,5 +1110,58 @@ func TestDispatchLabelChange(t *testing.T) {
 				t.Fatalf("labeled = %+v; want the head settled", out)
 			}
 		})
+	}
+}
+
+// TestDispatchTaskEvent checks a delivery a task could run on is stored
+// once, however often it is delivered, with a dispatch job for it, and
+// that a delivery no task could run on, or one with tasks off, is not.
+func TestDispatchTaskEvent(t *testing.T) {
+	_, st, base := setupService(t)
+	ctx := t.Context()
+	t.Setenv("TEST_PEM", "pem")
+	t.Setenv("TEST_SECRET", "s3cret")
+	f := configfiletest.Load(t, `taskBounds: { enabled: true, repository: false }
+tasks: [{ name: welcome, on: [{ issue: [opened] }] }]
+`+configYAML)
+	queue, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(st, queue)
+	delivery := "task-" + time.Now().Format(time.RFC3339Nano)
+	issue := func(action string) webhook.Event {
+		return webhook.Event{
+			Kind: webhook.KindIssue, Action: action, Forge: configfile.ForgeGitHub, RawEvent: "issues", Sender: "devin",
+			Delivery: delivery + action, Raw: json.RawMessage(`{"action":"` + action + `"}`), Repository: repo("onedr0p/home-ops"),
+			Subject: &webhook.Subject{Kind: webhook.SubjectIssue, Number: 12}, Issue: &webhook.Issue{Number: 12, State: "open"},
+		}
+	}
+	// A redelivery finds the event stored and queues nothing more.
+	for _, want := range []string{Enqueued, Ignored} {
+		out, err := svc.Dispatch(ctx, request(f, issue("opened")))
+		if err != nil || out.Status != want {
+			t.Fatalf("out = %+v, %v; want %s", out, err, want)
+		}
+	}
+	if out, err := svc.Dispatch(ctx, request(f, issue("closed"))); err != nil || out.Status != Ignored {
+		t.Fatalf("an event no task runs on = %+v, %v", out, err)
+	}
+	if out, err := svc.Dispatch(ctx, request(base, issue("edited"))); err != nil || out.Status != Ignored {
+		t.Fatalf("an event with tasks off = %+v, %v", out, err)
+	}
+	account, _ := f.Account(configfile.ForgeGitHub, "onedr0p")
+	var events, jobs int
+	if err := st.WithAccount(ctx, account.ID(), func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM task_events WHERE delivery LIKE $1 || '%'`, delivery).Scan(&events); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM river_job WHERE kind = 'task_dispatch'
+			AND args->>'event_id' IN (SELECT id::text FROM task_events WHERE delivery LIKE $1 || '%')`, delivery).Scan(&jobs)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || jobs != 1 {
+		t.Fatalf("task events %d, dispatch jobs %d; want one of each", events, jobs)
 	}
 }

@@ -281,13 +281,21 @@ the root, `owner/*`, `owner/name`, then the repository's `.kritique.yaml`.
 | (new)                                            | `review.approve`, `review.diagram`, `review.cost`                                                                                                       |
 | (new)                                            | `confidence.*`: `model`, `fallback`, `effort`, `threshold`, `gate`, `risk`, `instructions` ([Confidence](confidence.md))                                |
 | (new)                                            | `skills.paths`, `skills.scope`                                                                                                                           |
-| `tasks`, `allow.tasks`                           | see the TODO below                                                                                                                                       |
+| `tasks`, `allow.tasks`                           | `tasks` and `taskBounds`: see below                                                                                                                      |
 
-> **TODO (tasks):** the configuration keys for event-driven tasks, which
-> replaced the old `tasks` list and `allow.tasks` bounds (`enabled`,
-> `events`, `actions`, `maxRunsPerSubjectPerHour`): where they live now,
-> each old key's new name, and what a repository's `.kritique.yaml` may
-> set.
+Event tasks keep their shape but move with the rest of the layout
+([Event tasks](tasks.md#changes-from-earlier-kritique) has the full list
+and an example):
+
+| Old                                                                   | New                                                                                                   |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `defaults.tasks`, `tenants[].tasks`, `repositories[].tasks`           | `tasks` at the root, or under a `repositories` entry (`owner/*`, `owner/name`); merged by name, `enabled: false` turns an inherited one off |
+| `allow.tasks.*`                                                       | `taskBounds.*` at any scope; `repositoryTasks` becomes `repository`                                   |
+| `if: 'expr'` (on a task, an action or a rule)                         | `when: [{ name?, expr }]`; any one holding is enough                                                  |
+| `agent.maxSteps`, `maxToolOutputBytes`, `maxTokens`                   | `agent.steps`, `output`, `tokens`                                                                     |
+| a repository task's model held to `allow.models`                      | any model of a provider the account may use                                                           |
+| agent limits, modes and commands held to `allow.agent`/`modes`/`commands` | held to the admin's own `agent` settings and `agent.commands`; any mode                          |
+| tasks written in the dashboard                                        | removed: tasks come from the file and `.kritique.yaml`                                                |
 
 ### Providers and the embedder
 
@@ -347,7 +355,7 @@ Repositories with their own file need the same renames:
 | `review.inlineComments`                                         | `comments.inline`                                                                               |
 | `review.minSeverity`                                            | removed                                                                                         |
 | `review.context`                                                | `context`, added to the admin's                                                                 |
-| `tasks`                                                         | **TODO (tasks)**                                                                                |
+| `tasks`                                                         | `tasks`, within the admin's `taskBounds` (see [Event tasks](tasks.md))                          |
 | (new)                                                           | `review.effort`, `review.approve`, `review.diagram`, `confidence.*`, `skills`                   |
 
 [`kritique.schema.json`](kritique.schema.json) validates the new file in

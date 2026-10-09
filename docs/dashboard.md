@@ -39,6 +39,7 @@ An account's tabs are its sections:
 | Analytics     | the account's reviews over time, its findings and its spend ([analytics](#analytics))                            |
 | Pull requests | its pull requests and their reviews, the run queue and the follow-up questions ([pull requests](#pull-requests)) |
 | Rules         | what its reviews check ([rules](#rules))                                                                         |
+| Tasks         | its [event task](tasks.md) runs, and each repository's resolved tasks ([tasks](#tasks))                          |
 | Settings      | its [repositories](#repositories), and for an admin its audit log                                                |
 
 The command palette, `Ctrl`/`⌘` `K`, opens any page of the instance or of
@@ -95,6 +96,22 @@ read it), the paths it applies to, and the repositories that read it. A
 written rule also has the findings that cite it, counted as the Findings
 list counts them, and how many of those were addressed, so a noisy rule
 shows as many findings and few addressed. The page only lists them.
+
+### Tasks
+
+The Tasks view lists the account's [event task](tasks.md) runs, each with
+its task, trigger, subject and status, the fields the model answered with,
+the actions it proposed, those applied and those dropped with the reason,
+and a link to its transcript.
+
+Each repository's resolved tasks are listed with their triggers, mode and
+action kinds, where each comes from (the configuration file or the
+repository's `.kritique.yaml`) and a note for everything the
+[bounds](tasks.md#bounds) clipped. They are resolved from the
+`.kritique.yaml` the last task event read at the default branch's tip, or,
+before any, the one the last review read, and the page says which. The
+view only lists tasks: they are written in the configuration file and
+`.kritique.yaml`.
 
 ### Your settings
 

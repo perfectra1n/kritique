@@ -94,6 +94,17 @@ var Policies = []Policy{
 	{Key: "agent.timeout", Scopes: everyScope},
 	{Key: "agent.commands", Scopes: everyScope},
 	{Key: "agent.commandTimeout", Scopes: everyScope},
+	{Key: "tasks", Scopes: everyScope},
+	{Key: "taskBounds.enabled", Scopes: everyScope},
+	{Key: "taskBounds.events", Scopes: everyScope},
+	{Key: "taskBounds.actions", Scopes: everyScope},
+	{Key: "taskBounds.context", Scopes: everyScope},
+	{Key: "taskBounds.tools", Scopes: everyScope},
+	{Key: "taskBounds.systemPrompt", Scopes: everyScope},
+	{Key: "taskBounds.repository", Scopes: everyScope},
+	{Key: "taskBounds.maxTasks", Scopes: everyScope},
+	{Key: "taskBounds.maxRunsPerSubjectPerHour", Scopes: everyScope},
+	{Key: "taskBounds.maxFields", Scopes: everyScope},
 	{Key: "limits", Scopes: accountScopes},
 }
 

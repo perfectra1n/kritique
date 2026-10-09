@@ -1,0 +1,37 @@
+{
+  "enabled": true,
+  "source": "defaultBranch",
+  "commit": "c0ffee",
+  "resolvedAt": "2026-09-01T12:01:30Z",
+  "found": true,
+  "ignored": "repoconfig: tasks[1]: name \"Bad\" must be lowercase letters, digits and dashes, at most 63, starting with a letter or digit",
+  "tasks": [
+    {
+      "name": "welcome",
+      "source": "file",
+      "triggers": ["pull_request.opened"],
+      "when": [],
+      "mode": "single",
+      "actions": ["comment"]
+    },
+    {
+      "name": "triage",
+      "source": "repository",
+      "triggers": ["issue.opened", "issue.reopened"],
+      "when": [
+        {
+          "expr": "!(\"triaged\" in subject.labels)"
+        }
+      ],
+      "mode": "agentic",
+      "actions": ["comment", "labels"]
+    }
+  ],
+  "notes": [
+    {
+      "task": "triage",
+      "what": "actions.state",
+      "reason": "the action is not allowed"
+    }
+  ]
+}

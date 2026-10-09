@@ -18,6 +18,7 @@ import (
 	"github.com/perfectra1n/kritique/internal/repoconfig"
 	"github.com/perfectra1n/kritique/internal/review"
 	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/tasks"
 	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
@@ -104,6 +105,12 @@ var goldenFollowup = Followup{
 	ID: "fu-1", CommentID: 99, Repository: "alpha/one", Number: 7, PullURL: goldenPullRef.URL, Author: "bob", Inline: true, Path: "a.go", Line: 4,
 	Status: store.FollowupAnswered, Reason: "", ReplyCommentID: new(int64(100)),
 	CommentURL: goldenPullRef.URL + "#discussion_r99", ReplyURL: goldenPullRef.URL + "#discussion_r100", Model: "acme/large", CreatedAt: t0,
+}
+
+var goldenTaskRun = TaskRun{
+	ID: "tr-1", Repository: "alpha/one", Task: "triage", SubjectKind: "issue", SubjectNumber: 12, Trigger: "issue.opened",
+	Mode: "single", Status: store.TaskSucceeded, Reason: "", Model: "acme/large", ConfigSHA: "def456", CommentID: new(int64(77)),
+	Error: "", DroppedCount: 1, CreatedAt: t0, StartedAt: &t0, FinishedAt: &t1, DurationMs: new(int64(90000)),
 }
 
 var goldenTools = []ToolDef{{Name: "grep", Description: "search", InputSchema: json.RawMessage(`{"type":"object"}`)}}
@@ -254,6 +261,38 @@ var goldens = map[string]any{
 	"instance_queue": InstanceQueue{
 		Jobs:  []InstanceJob{{Job: goldenJob, Account: "github/alpha"}},
 		Slots: []ModelSlots{{Account: "github/alpha", Model: "openrouter/acme-large", Held: 2, Slots: 2}},
+	},
+	"task_run": goldenTaskRun,
+	"task_run_detail": TaskRunDetail{
+		Run: goldenTaskRun,
+		Event: &TaskEvent{
+			Forge: "github", Event: "issue", RawEvent: "issues", Action: "opened", Sender: "ada", Delivery: "d-1", ReceivedAt: t0,
+		},
+		Fields: map[string]json.RawMessage{"priority": json.RawMessage(`"high"`)},
+		Proposed: &TaskAnswer{
+			Summary: "A crash report.", Comment: "Thanks!", AddLabels: []string{"bug", "wontfix"}, RemoveLabels: []string{"needs-triage"},
+			State: "", Assignees: []string{}, Reviewers: []string{}, Inline: []TaskInline{},
+		},
+		Applied: &TaskApplied{
+			AddLabels: []string{"bug"}, RemoveLabels: []string{"needs-triage"}, State: "", Assignees: []string{}, Reviewers: []string{},
+			Inline: []TaskInline{{Path: "a.go", Line: 3, EndLine: 5, Body: "here"}}, Comment: "sticky",
+		},
+		Dropped:    []TaskDrop{{Action: "labels.add", Value: "wontfix", Reason: "it is not a label the task lets the model add"}},
+		Notes:      []string{"context.related: the index is not built yet"},
+		ModelCalls: 1, CostUSD: 0.02, Tokens: TokenCounts{Input: 300, Output: 40},
+	},
+	"repo_tasks": RepoTasks{
+		Enabled: true, Source: TasksSourceDefaultBranch, Commit: "c0ffee", ResolvedAt: &t1, Found: true,
+		Ignored: `repoconfig: tasks[1]: name "Bad" must be lowercase letters, digits and dashes, at most 63, starting with a letter or digit`,
+		Tasks: []TaskDef{
+			{Name: "welcome", Source: TaskFromFile, Triggers: []string{"pull_request.opened"}, When: []tasks.When{}, Mode: tasks.ModeSingle, Actions: []string{tasks.ActionComment}},
+			{
+				Name: "triage", Source: TaskFromRepository, Triggers: []string{"issue.opened", "issue.reopened"},
+				When: []tasks.When{{Expr: `!("triaged" in subject.labels)`}}, Mode: tasks.ModeAgentic,
+				Actions: []string{tasks.ActionComment, tasks.ActionLabels},
+			},
+		},
+		Notes: []TaskNote{{Task: "triage", What: "actions.state", Reason: "the action is not allowed"}},
 	},
 	"event": Event{Kind: store.EventReview, Account: "alpha", ID: "rev-1", ReviewID: new("rev-1")},
 	"error": ErrorBody{Code: CodeNotFound, Message: "account not found"},

@@ -17,6 +17,7 @@ const (
 	QueueReview   = "review"
 	QueueFollowUp = "followup"
 	QueueIndex    = "index"
+	QueueTask     = "task"
 )
 
 // TriggerManual is the Trigger a human-requested re-run carries. It is the
@@ -191,4 +192,45 @@ func (a IndexArgs) InsertOpts() river.InsertOpts {
 		Queue: QueueIndex, Priority: priority, MaxAttempts: indexAttempts,
 		UniqueOpts: river.UniqueOpts{ByArgs: true, ByState: LiveStates},
 	}
+}
+
+// taskAttempts bounds a task job's tries: a task writes to the forge, so a
+// run that keeps failing stops rather than retrying for days.
+const taskAttempts = 5
+
+// TaskDispatchArgs resolves the tasks one delivery may run, stored as the
+// task event EventID, and enqueues a TaskArgs for each that matches: ingest
+// stays cheap, since resolving reads the repository's .kritique.yaml
+// through the forge.
+type TaskDispatchArgs struct {
+	AccountID    string `json:"account_id"`
+	RepositoryID string `json:"repository_id"`
+	EventID      string `json:"event_id" river:"unique"`
+}
+
+// Kind implements river.JobArgs.
+func (TaskDispatchArgs) Kind() string { return "task_dispatch" }
+
+// InsertOpts implements river.JobArgsWithInsertOpts.
+func (TaskDispatchArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{Queue: QueueTask, MaxAttempts: taskAttempts, UniqueOpts: river.UniqueOpts{ByArgs: true}}
+}
+
+// TaskArgs runs one task on one task event, with the task as the
+// repository's .kritique.yaml at ConfigSHA, the default branch tip it was
+// matched at, defines it.
+type TaskArgs struct {
+	AccountID    string `json:"account_id"`
+	RepositoryID string `json:"repository_id"`
+	EventID      string `json:"event_id"   river:"unique"`
+	Task         string `json:"task"       river:"unique"`
+	ConfigSHA    string `json:"config_sha"`
+}
+
+// Kind implements river.JobArgs.
+func (TaskArgs) Kind() string { return "task" }
+
+// InsertOpts implements river.JobArgsWithInsertOpts.
+func (TaskArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{Queue: QueueTask, MaxAttempts: taskAttempts, UniqueOpts: river.UniqueOpts{ByArgs: true}}
 }

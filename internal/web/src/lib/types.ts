@@ -83,8 +83,8 @@ export type JobState =
   | 'discarded';
 // Why a job's last attempt failed, where the server can tell; '' otherwise.
 export type JobCause = 'forge_unavailable';
-export type EventKind = 'review' | 'runner_run' | 'index_run' | 'followup' | 'model_call';
-export type TranscriptKind = 'agent_step' | 'followup' | 'confidence' | 'merge';
+export type EventKind = 'review' | 'runner_run' | 'index_run' | 'followup' | 'model_call' | 'task_run';
+export type TranscriptKind = 'agent_step' | 'followup' | 'confidence' | 'merge' | 'task';
 export type MessageRole = 'user' | 'assistant';
 
 // reviews are the ones that completed this month, reviewCostUsd what they
@@ -849,6 +849,133 @@ export interface ModelSlots {
 export interface InstanceQueue {
   jobs: InstanceJob[];
   slots: ModelSlots[];
+}
+
+// Event tasks (internal/webapi/types_tasks.go).
+export type TaskRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped';
+export type TaskMode = 'single' | 'agentic';
+
+// One task run as lists show it. subjectKind is '' for an event with no
+// issue or pull request; durationMs is null until it finishes.
+export interface TaskRun {
+  id: string;
+  repository: string;
+  task: string;
+  subjectKind: '' | 'issue' | 'pull';
+  subjectNumber: number;
+  trigger: string;
+  mode: TaskMode;
+  status: TaskRunStatus;
+  reason: string;
+  model: string;
+  configSha: string;
+  commentId: number | null;
+  error: string;
+  droppedCount: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+}
+
+// The delivery a task run ran on.
+export interface TaskEvent {
+  forge: string;
+  event: string;
+  rawEvent: string;
+  action: string;
+  sender: string;
+  delivery: string;
+  receivedAt: string;
+}
+
+export interface TaskInline {
+  path: string;
+  line: number;
+  endLine: number;
+  body: string;
+}
+
+// What the model proposed.
+export interface TaskAnswer {
+  summary: string;
+  comment: string;
+  addLabels: string[];
+  removeLabels: string[];
+  state: string;
+  assignees: string[];
+  reviewers: string[];
+  inline: TaskInline[];
+}
+
+// What the forge accepted; comment is the report comment's mode, '' when
+// none was posted.
+export interface TaskApplied {
+  addLabels: string[];
+  removeLabels: string[];
+  state: string;
+  assignees: string[];
+  reviewers: string[];
+  inline: TaskInline[];
+  comment: string;
+}
+
+// An action a run left out, and why.
+export interface TaskDrop {
+  action: string;
+  value: string;
+  reason: string;
+}
+
+// One task run with its event and records: event is null once retention
+// swept it, proposed and applied until the model answered. notes say what
+// the run's context left out.
+export interface TaskRunDetail {
+  run: TaskRun;
+  event: TaskEvent | null;
+  fields: Record<string, unknown>;
+  proposed: TaskAnswer | null;
+  applied: TaskApplied | null;
+  dropped: TaskDrop[];
+  notes: string[];
+  modelCalls: number;
+  costUsd: number;
+  tokens: TokenCounts;
+}
+
+// One resolved task and where it is defined: the admin's configuration
+// file, or the repository's .kritique.yaml.
+export interface TaskDef {
+  name: string;
+  source: 'file' | 'repository';
+  triggers: string[];
+  when: { name?: string; expr: string }[];
+  mode: TaskMode;
+  actions: string[];
+}
+
+// Something the admin's task bounds left out of a task, and why.
+export interface TaskNote {
+  task: string;
+  what: string;
+  reason: string;
+}
+
+// The tasks that run for one repository. enabled is the admin's
+// taskBounds.enabled. source is which .kritique.yaml they were resolved
+// from: the one a task dispatch last read at the default branch tip, the
+// one the last review read before any dispatch, or '' for neither; commit
+// is its commit, resolvedAt when a dispatch read it, found whether the
+// commit had the file. ignored is why the file was ignored as a whole.
+export interface RepoTasks {
+  enabled: boolean;
+  source: '' | 'defaultBranch' | 'lastReview';
+  commit: string;
+  resolvedAt: string | null;
+  found: boolean;
+  ignored?: string;
+  tasks: TaskDef[];
+  notes: TaskNote[];
 }
 
 // One server-sent event's data; the SSE event name is its kind, plus

@@ -13,6 +13,7 @@ import (
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/jobs"
 	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/taskrun"
 	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
@@ -97,24 +98,93 @@ func (s *Service) RecordUnsigned(ctx context.Context, connectionID string) error
 	return nil
 }
 
-// Dispatch implements Dispatcher.
+// Dispatch implements Dispatcher. A delivery is offered to tasks too,
+// whatever the review pipeline made of it; the outcome is the review
+// pipeline's unless it queued nothing and tasks did.
 func (s *Service) Dispatch(ctx context.Context, req Request) (Outcome, error) {
+	var out Outcome
+	var err error
 	switch req.Event.Kind {
 	case webhook.KindPullRequest:
-		return s.pullRequest(ctx, req)
+		out, err = s.pullRequest(ctx, req)
 	case webhook.KindComment:
-		return s.comment(ctx, req)
+		out, err = s.comment(ctx, req)
 	case webhook.KindThread:
-		return s.thread(ctx, req)
+		out, err = s.thread(ctx, req)
 	case webhook.KindPush:
-		return s.push(ctx, req)
+		out, err = s.push(ctx, req)
 	case webhook.KindInstallation:
-		return s.installation(ctx, req)
+		out, err = s.installation(ctx, req)
 	case webhook.KindRepository:
-		return s.repository(ctx, req)
+		out, err = s.repository(ctx, req)
 	default:
-		return Outcome{Status: Ignored, Reason: string(req.Event.Kind)}, nil
+		out = Outcome{Status: Ignored, Reason: string(req.Event.Kind)}
 	}
+	if err != nil {
+		return out, err
+	}
+	queued, err := s.tasks(ctx, req)
+	if err != nil {
+		return out, err
+	}
+	if queued && out.Status != Enqueued {
+		out = Outcome{Status: Enqueued, Job: jobTaskDispatch}
+	}
+	return out, nil
+}
+
+// jobTaskDispatch is Outcome.Job for a delivery handed to tasks.
+const jobTaskDispatch = "task_dispatch"
+
+// tasks stores a delivery some task could run on and enqueues the job that
+// resolves which do. Only a forge's own delivery is offered: the poller's
+// synthetic events carry no event name. Resolving the repository's tasks
+// reads its .kritique.yaml through the forge, so it is the job's to do, as
+// is the loop guard, which needs the connection's bot login; here only the
+// admin's settings are consulted (see taskrun.Candidate). Tasks have
+// their own switch, taskBounds.enabled, apart from whether the repository
+// is reviewed.
+func (s *Service) tasks(ctx context.Context, req Request) (bool, error) {
+	ev := req.Event
+	if ev.Repository == nil || ev.RawEvent == "" || req.Connection == nil {
+		return false, nil
+	}
+	settings := req.File.Settings(req.Account, ev.Repository.FullName)
+	in := taskrun.Input(ev)
+	if !taskrun.Candidate(in, settings.Tasks, settings.TaskBounds) {
+		return false, nil
+	}
+	var payload json.RawMessage
+	if in.Raw != nil {
+		payload = ev.Raw
+	}
+	var subjectKind string
+	var subjectNumber int
+	if in.Subject != nil {
+		subjectKind, subjectNumber = in.Subject.Kind, in.Subject.Number
+	}
+	queued := false
+	err := s.store.WithAccount(ctx, req.Account.ID(), func(tx pgx.Tx) error {
+		rid, err := ensureRepository(ctx, tx, req, ev.Repository)
+		if err != nil {
+			return err
+		}
+		id, err := store.InsertTaskEvent(ctx, tx, store.TaskEvent{
+			AccountID: req.Account.ID(), ConnectionID: req.Connection.ID(), RepositoryID: rid, Forge: in.Forge, Event: in.Event,
+			RawEvent: ev.RawEvent, Action: ev.Action, Sender: ev.Sender, Delivery: ev.Delivery, SubjectKind: subjectKind,
+			SubjectNumber: subjectNumber, Payload: payload,
+		})
+		if err != nil || id == "" {
+			return err
+		}
+		dispatch := jobs.TaskDispatchArgs{AccountID: req.Account.ID(), RepositoryID: rid, EventID: id}
+		if _, err := s.queue.InsertTx(ctx, tx, dispatch, nil); err != nil {
+			return fmt.Errorf("ingest: enqueue task dispatch: %w", err)
+		}
+		queued = true
+		return nil
+	})
+	return queued, err
 }
 
 func (s *Service) pullRequest(ctx context.Context, req Request) (Outcome, error) {
@@ -293,6 +363,11 @@ func (s *Service) comment(ctx context.Context, req Request) (Outcome, error) {
 	}
 	if ev.Action != "created" {
 		return Outcome{Status: Ignored, Reason: reasonAction}, nil
+	}
+	// Only pull request comments are review follow-ups. An event without a
+	// subject (the poller's, a test's) is a pull request comment.
+	if ev.Subject != nil && ev.Subject.Kind != webhook.SubjectPull {
+		return Outcome{Status: Ignored, Reason: ev.Subject.Kind}, nil
 	}
 	// The cheap gate: a bot never triggers a follow-up, and a comment with
 	// no mention at all is not one. The worker checks the mention against

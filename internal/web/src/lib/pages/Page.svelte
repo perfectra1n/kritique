@@ -18,6 +18,8 @@
   import Rules from './Rules.svelte';
   import Usage from './Usage.svelte';
   import Followups from './Followups.svelte';
+  import TaskRuns from './TaskRuns.svelte';
+  import TaskRun from './TaskRun.svelte';
   import Admin from './admin/Admin.svelte';
   import SettingsNav from './SettingsNav.svelte';
   import { sectionOf } from '../sections';
@@ -29,7 +31,7 @@
 
   function keyOf(r: Route): string {
     if (r.name === 'review') return JSON.stringify({ n: r.name, s: r.slug, id: r.id });
-    if (r.name === 'pulls' || r.name === 'findings') return JSON.stringify({ n: r.name, s: r.slug });
+    if (r.name === 'pulls' || r.name === 'findings' || r.name === 'tasks') return JSON.stringify({ n: r.name, s: r.slug });
     return JSON.stringify(r);
   }
   const key = $derived(keyOf(route));
@@ -69,6 +71,10 @@
     <Usage slug={route.slug} />
   {:else if route.name === 'followups'}
     <Followups slug={route.slug} />
+  {:else if route.name === 'tasks'}
+    <TaskRuns slug={route.slug} filter={route.filter} />
+  {:else if route.name === 'taskRun'}
+    <TaskRun slug={route.slug} id={route.id} />
   {:else if route.name === 'admin'}
     <Admin slug={route.slug} section={route.section} />
   {/if}

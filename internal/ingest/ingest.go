@@ -21,7 +21,10 @@ import (
 type Request struct {
 	File    *configfile.File
 	Account *configfile.Account
-	Event   webhook.Event
+	// Connection is the connection the delivery came through, nil for an
+	// event the poller made.
+	Connection *configfile.Connection
+	Event      webhook.Event
 }
 
 // Outcome is what the dispatcher did with a request, for the response and
@@ -141,7 +144,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unparsable payload", http.StatusBadRequest)
 		return
 	}
-	logger = logger.With("delivery", ev.Delivery, "kind", ev.Kind, "action", ev.Action)
+	logger = logger.With("delivery", ev.Delivery, "event", ev.RawEvent, "kind", ev.Kind, "action", ev.Action)
 
 	var account *configfile.Account
 	if ev.Account != "" && in.Serves(ev.Account) {
@@ -152,15 +155,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.Metrics.Webhook(name, "ping")
 		w.WriteHeader(http.StatusNoContent)
 		return
-	case ev.Kind == webhook.KindIgnored:
+	case ev.Kind == webhook.KindIgnored && ev.Repository == nil:
+		// A kind the review pipeline ignores still reaches the dispatcher
+		// when it concerns a repository, whose tasks may run on it.
 		logger.Debug("webhook ignored")
 		h.Metrics.Webhook(name, Ignored)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	case account == nil:
 		// A public App can be installed by anyone; only the declared
-		// accounts are served. Accepted, so the forge does not retry.
-		logger.Warn("webhook for an undeclared account ignored", "account", ev.Account)
+		// accounts are served. Accepted, so the forge does not retry. A kind
+		// kritique would not act on for anyone is noise at Warn.
+		level := slog.LevelWarn
+		if ev.Kind == webhook.KindIgnored {
+			level = slog.LevelDebug
+		}
+		logger.Log(r.Context(), level, "webhook for an undeclared account ignored", "account", ev.Account)
 		h.Metrics.Webhook(name, "undeclared_account")
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -172,7 +182,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// comment or thread event that rolled back with it would be lost.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), dispatchTimeout)
 	defer cancel()
-	out, err := h.disp.Dispatch(ctx, Request{File: file, Account: account, Event: ev})
+	out, err := h.disp.Dispatch(ctx, Request{File: file, Account: account, Connection: in, Event: ev})
 	if err != nil {
 		logger.Error("webhook dispatch failed", "error", err)
 		h.Metrics.Webhook(name, "error")

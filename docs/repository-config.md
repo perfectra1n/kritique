@@ -5,7 +5,8 @@ kritique reviews it. It is read from the merge-base commit, never the pull
 request's own tree, so a pull request cannot use its own copy to weaken the
 review applied to it. kritique reads it before the review starts, and applies
 it to follow-ups (from the pull request's merge base) and to indexing (from
-the commit indexed) too.
+the commit indexed) too. Its [`tasks`](#tasks) alone are read from the tip
+of the default branch.
 
 The file holds nothing secret: no field takes a credential, a URL, a host
 or a secret reference, and a model it names is a `<provider>/<model>` of a
@@ -52,22 +53,23 @@ skills:
     migrations: { paths: ["db/migrations/**"] }
 ```
 
-| Key                                                          | What it sets                                                       | Against the admin's value                       |
-| ------------------------------------------------------------ | ------------------------------------------------------------------ | ----------------------------------------------- |
-| `enabled`                                                    | `false` stops reviews, follow-ups and indexing                     | can only turn the repository off                |
-| [`review.model`, `review.fallback`](#models)                 | the models the review and follow-ups run on                        | replaces                                        |
-| [`review.effort`](#models)                                   | how hard they reason                                               | replaces                                        |
-| `review.fixes`                                               | `true` requires a suggested fix on every finding                   | can only turn it on                             |
-| [`review.approve`](#approvals)                               | `true` approves a pull request the review allows                   | replaces, either way                            |
-| [`review.diagram`](#flow-diagrams)                           | `true` draws the change's flow in the summary                      | replaces, either way                            |
-| [`confidence.*`](#confidence)                                | the score that judges a review, and the models that give it        | replaces; `risk` may only be lowered            |
-| [`trigger.include`, `trigger.exclude`](#trigger-conditions)  | which pull requests are reviewed                                   | judged beside the admin's lists                 |
-| `comments.inline`                                            | `false` posts the summary alone, without inline comments           | replaces                                        |
-| [`comments.summary`, `comments.finding`](#comment-templates) | templates for the summary and inline comments                      | replaces                                        |
-| [`ignore`](#ignored-paths)                                   | paths the review and the index leave out                           | added                                           |
-| [`rules`](#rules)                                            | checks the review makes                                            | added after; one under an admin's id is dropped |
-| [`context`](#context)                                        | files that explain the code                                        | added after                                     |
-| [`skills`](#skills)                                          | where the repository's Agent Skills live, and when each is offered | `paths` replaces; `scope` adds up               |
+| Key                                                          | What it sets                                                       | Against the admin's value                                                                     |
+| ------------------------------------------------------------ | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `enabled`                                                    | `false` stops reviews, follow-ups and indexing                     | can only turn the repository off                                                              |
+| [`review.model`, `review.fallback`](#models)                 | the models the review and follow-ups run on                        | replaces                                                                                      |
+| [`review.effort`](#models)                                   | how hard they reason                                               | replaces                                                                                      |
+| `review.fixes`                                               | `true` requires a suggested fix on every finding                   | can only turn it on                                                                           |
+| [`review.approve`](#approvals)                               | `true` approves a pull request the review allows                   | replaces, either way                                                                          |
+| [`review.diagram`](#flow-diagrams)                           | `true` draws the change's flow in the summary                      | replaces, either way                                                                          |
+| [`confidence.*`](#confidence)                                | the score that judges a review, and the models that give it        | replaces; `risk` may only be lowered                                                          |
+| [`trigger.include`, `trigger.exclude`](#trigger-conditions)  | which pull requests are reviewed                                   | judged beside the admin's lists                                                               |
+| `comments.inline`                                            | `false` posts the summary alone, without inline comments           | replaces                                                                                      |
+| [`comments.summary`, `comments.finding`](#comment-templates) | templates for the summary and inline comments                      | replaces                                                                                      |
+| [`ignore`](#ignored-paths)                                   | paths the review and the index leave out                           | added                                                                                         |
+| [`rules`](#rules)                                            | checks the review makes                                            | added after; one under an admin's id is dropped                                               |
+| [`context`](#context)                                        | files that explain the code                                        | added after                                                                                   |
+| [`skills`](#skills)                                          | where the repository's Agent Skills live, and when each is offered | `paths` replaces; `scope` adds up                                                             |
+| [`tasks`](#tasks)                                            | event tasks: prompts run when a forge event fires                  | added after; clipped to the admin's `taskBounds`; one under an admin's task's name is dropped |
 
 A value the file may not take, such as a model of an undeclared provider,
 is dropped: the admin's value applies for that field, a note in the
@@ -237,6 +239,41 @@ Rules, context and skills compared:
 | A rule           | whole, wherever it applies                      | yes, by id        |
 | A `context` file | a pointer, with the configuration's description | no                |
 | A skill          | its own description, until the review reads it  | no                |
+
+### Tasks
+
+`tasks` declares [event tasks](tasks.md): when a forge event fires, such as
+a new issue, run a prompt with the context the task names, and apply what
+the model's answer asks for, within what the task declares.
+
+```yaml
+tasks:
+  - name: pr-area
+    on: [{ pull_request: [opened, ready_for_review] }]
+    when: [{ expr: "!subject.draft" }]
+    mode: single
+    promptInline: "Pick the area/ labels that fit pull request #{{ .Subject.Number }}."
+    actions:
+      labels: { propose: { add: ["area/*"] } }
+```
+
+- **Off until an admin turns them on**, with `taskBounds.enabled`, and
+  only while `taskBounds.repository` lets a repository define tasks.
+- **Read at the default branch's tip**, with every file they name, not
+  the merge base: an issue has none, and only someone who can push to the
+  default branch should change what a task does.
+- **Added after the admin's**, and clipped to the admin's
+  [`taskBounds`](tasks.md#bounds): an event, action, context source, tool
+  or field out of bounds is dropped with a note. A task named like an
+  admin's is dropped.
+- **Held to the admin's settings**: its models to a provider the account
+  may use, its `agent` limits to the admin's, and its commands to the
+  admin's `agent.commands`.
+- **A bad `tasks` block** makes the whole file fail to parse, as any other
+  bad key does.
+
+[Event tasks](tasks.md) is the reference for every key, with tested
+recipes for issue triage, area labels and release summaries.
 
 ### Agent files
 

@@ -3314,3 +3314,26 @@ func TestRetriedJobEndsItsEarlierReview(t *testing.T) {
 		t.Fatalf("statuses = %v, want the first attempt failed and the others running", got)
 	}
 }
+
+// ReadGitToken, RepoLabels, AddLabels, RemoveLabel, SetState, AddAssignees,
+// RequestReviewers and SearchIssues are no-op stubs: these tests never run
+// a task, but localForge must still satisfy forge.Client.
+func (l *localForge) ReadGitToken(context.Context, string, string) (string, error) { return "", nil }
+
+func (l *localForge) RepoLabels(context.Context, string, string) ([]string, error) { return nil, nil }
+
+func (l *localForge) AddLabels(context.Context, string, string, int, []string) error { return nil }
+
+func (l *localForge) RemoveLabel(context.Context, string, string, int, string) error { return nil }
+
+func (l *localForge) SetState(context.Context, string, string, int, bool) error { return nil }
+
+func (l *localForge) AddAssignees(context.Context, string, string, int, []string) error { return nil }
+
+func (l *localForge) RequestReviewers(context.Context, string, string, int, []string) error {
+	return nil
+}
+
+func (l *localForge) SearchIssues(context.Context, string, string, string, int) ([]forge.Issue, error) {
+	return nil, nil
+}

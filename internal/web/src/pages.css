@@ -578,7 +578,8 @@ table.data tbody tr:hover {
 .panel > .table-card table.data thead th {
   border-radius: 0;
 }
-.pull-row {
+.pull-row,
+.task-run-row {
   cursor: pointer;
 }
 table.data th.pick,
@@ -587,11 +588,13 @@ table.data td.pick {
   padding-right: 0;
 }
 .pull-row.selected td,
-.finding-row.selected td {
+.finding-row.selected td,
+.task-run-row.selected td {
   background: var(--mark-wash);
 }
 .pull-row.selected td:first-child,
-.finding-row.selected td:first-child {
+.finding-row.selected td:first-child,
+.task-run-row.selected td:first-child {
   box-shadow: inset 3px 0 0 var(--edge);
 }
 table.data td.pull-main {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 func TestUpstreamStatus(t *testing.T) {
@@ -96,5 +97,28 @@ func TestStepPart(t *testing.T) {
 		if got != tt.want || (err != nil) != tt.err {
 			t.Fatalf("stepPart(%q) = %d, %v; want %d, error %v", tt.header, got, err, tt.want, tt.err)
 		}
+	}
+}
+
+// TestRunCallRole checks a run's spend is charged by what it works on: a
+// review's to its review, a follow-up's and a task's to none, each under
+// its own role.
+func TestRunCallRole(t *testing.T) {
+	tests := []struct {
+		name         string
+		grant        store.GatewayGrant
+		role, review string
+	}{
+		{"review", store.GatewayGrant{ReviewID: "r"}, store.RoleReview, "r"},
+		{"follow-up", store.GatewayGrant{ReviewID: "r", FollowupCommentID: 7}, store.RoleFollowUp, ""},
+		{"task", store.GatewayGrant{TaskRunID: "t"}, store.RoleTask, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := runCall{grant: tt.grant}
+			if c.role() != tt.role || c.usageReview() != tt.review {
+				t.Fatalf("role %q review %q, want %q %q", c.role(), c.usageReview(), tt.role, tt.review)
+			}
+		})
 	}
 }

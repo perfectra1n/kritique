@@ -29,6 +29,7 @@ import (
 	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/prfilter"
 	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/tasks"
 	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
@@ -123,6 +124,9 @@ type File struct {
 	// Skills replace the directories the admin has skills looked for in,
 	// and add to the admin's scopes.
 	Skills configfile.SkillsSpec `yaml:"skills,omitempty"`
+	// Tasks are the repository's own event tasks, run after the admin's
+	// within the admin's task bounds.
+	Tasks []tasks.Task `yaml:"tasks,omitempty"`
 }
 
 // Parse decodes data as .kritique.yaml. Unknown fields, invalid glob patterns
@@ -161,6 +165,9 @@ func Parse(data []byte) (File, error) {
 	}
 	if err := configfile.CheckSkills(skillPaths, f.Skills.Scope); err != nil {
 		return File{}, fmt.Errorf("repoconfig: %w", err)
+	}
+	if err := checkTasks(f.Tasks); err != nil {
+		return File{}, err
 	}
 	for _, p := range f.Referenced() {
 		if err := validateRefPath(p); err != nil {

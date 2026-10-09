@@ -32,6 +32,12 @@ func parseForgejo(event, delivery string, body []byte) (Event, error) {
 			ev.Action = a
 		}
 		return ev, err
+	case evIssues:
+		ev, err := parseIssueEvent(delivery, body)
+		if a, ok := forgejoActions[ev.Action]; ok {
+			ev.Action = a
+		}
+		return ev, err
 	case evIssueComment:
 		return parseForgejoComment(delivery, body)
 	case evPush:
@@ -41,7 +47,7 @@ func parseForgejo(event, delivery string, body []byte) (Event, error) {
 		// repositoryActions shares with GitHub, and no changes.
 		return parseRepository(delivery, body)
 	default:
-		// issues, the review events, and the rest kritique does not act on.
+		// The review events, and the rest kritique does not act on.
 		return Event{Kind: KindIgnored, Delivery: delivery, Action: event}, nil
 	}
 }
@@ -68,13 +74,14 @@ func parseForgejoComment(delivery string, body []byte) (Event, error) {
 	if err := json.Unmarshal(body, &p); err != nil {
 		return Event{}, fmt.Errorf("webhook: issue_comment payload: %w", err)
 	}
-	// Comments on plain issues are not review follow-ups.
-	if !p.IsPull {
-		return Event{Kind: KindIgnored, Action: evIssueComment, Delivery: delivery}, nil
+	subject := &Subject{Kind: SubjectIssue, Number: p.Issue.Number}
+	if p.IsPull {
+		subject.Kind = SubjectPull
 	}
 	return Event{
 		Kind: KindComment, Action: p.Action, Delivery: delivery,
 		Repository: p.Repository.event(), Account: p.Repository.Owner.Login,
+		Subject: subject,
 		Comment: &Comment{
 			ID: p.Comment.ID, Number: p.Issue.Number, Author: p.Comment.User.Login,
 			AuthorIsBot: p.Comment.User.isBot(), Body: p.Comment.Body,

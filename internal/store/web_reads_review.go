@@ -153,6 +153,9 @@ type AgentRunRow struct {
 	// Parts are how the parts of a split review ended, in part order;
 	// empty when the review was not split.
 	Parts []AgentPart
+	// Notes say what a task run's context left out, empty for any other
+	// run.
+	Notes []string
 }
 
 // AgentPart is how the agent of one part of a split review ended: the
@@ -172,11 +175,11 @@ func FindAgentRun(ctx context.Context, tx pgx.Tx, runnerRunID string) (AgentRunR
 	var result, calls, timeline, sources, parts []byte
 	err := tx.QueryRow(ctx, `SELECT a.stop_reason, a.result, a.steps, a.tool_calls, a.timeline, a.sources, a.input_tokens,
 		a.cache_read_tokens, a.cache_write_tokens, a.output_tokens, a.cost_usd::float8, a.model, a.error, a.created_at,
-		a.skills_offered, a.skills_opened, a.commands_offered, a.commands_run, c.review_id::text, a.parts
+		a.skills_offered, a.skills_opened, a.commands_offered, a.commands_run, c.review_id::text, a.parts, a.notes
 		FROM agent_runs a LEFT JOIN runner_runs c ON c.id = a.continued_from WHERE a.runner_run_id = $1`, runnerRunID).
 		Scan(&a.StopReason, &result, &a.Steps, &calls, &timeline, &sources, &a.Usage.Input, &a.Usage.CacheRead,
 			&a.Usage.CacheWrite, &a.Usage.Output, &a.CostUSD, &a.Model, &a.Error, &a.CreatedAt, &a.SkillsOffered, &a.SkillsOpened,
-			&a.CommandsOffered, &a.CommandsRun, &a.CarriedReviewID, &parts)
+			&a.CommandsOffered, &a.CommandsRun, &a.CarriedReviewID, &parts, &a.Notes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return a, ErrNotFound
 	}

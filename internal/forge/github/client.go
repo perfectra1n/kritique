@@ -99,6 +99,13 @@ func (c *Client) GitToken(ctx context.Context, repo string) (string, error) {
 	return c.tokens.ReadOnly(ctx, repo)
 }
 
+// ReadGitToken implements forge.Client with GitToken's token: one minted
+// for repo alone that can only read its contents and metadata. owner is
+// the installation's.
+func (c *Client) ReadGitToken(ctx context.Context, _, repo string) (string, error) {
+	return c.GitToken(ctx, repo)
+}
+
 // BranchTip implements forge.Client.
 func (c *Client) BranchTip(ctx context.Context, owner, repo, branch string) (string, string, error) {
 	if branch == "" {
@@ -161,10 +168,22 @@ func (c *Client) Issue(ctx context.Context, owner, repo string, number int) (for
 	if err != nil {
 		return forge.Issue{}, fmt.Errorf("github: issue %d of %s/%s: %w", number, owner, repo, err)
 	}
-	return forge.Issue{
-		Number: issue.GetNumber(), Title: issue.GetTitle(), Body: issue.GetBody(), URL: issue.GetHTMLURL(),
-		PullRequest: issue.PullRequestLinks != nil,
-	}, nil
+	return issueFrom(issue), nil
+}
+
+func issueFrom(iss *gh.Issue) forge.Issue {
+	out := forge.Issue{
+		Number: iss.GetNumber(), Title: iss.GetTitle(), Body: iss.GetBody(), URL: iss.GetHTMLURL(),
+		PullRequest: iss.PullRequestLinks != nil, State: iss.GetState(), Author: iss.GetUser().GetLogin(),
+		Draft: iss.GetDraft(),
+	}
+	for _, l := range iss.Labels {
+		out.Labels = append(out.Labels, l.GetName())
+	}
+	for _, a := range iss.Assignees {
+		out.Assignees = append(out.Assignees, a.GetLogin())
+	}
+	return out
 }
 
 // BotLogin implements forge.Client. An App's comments are authored by the
@@ -542,4 +561,122 @@ func (c *Client) SetStatus(ctx context.Context, owner, repo, sha string, state f
 		return fmt.Errorf("github: status on %s: %w", sha, err)
 	}
 	return nil
+}
+
+// RepoLabels implements forge.Client.
+func (c *Client) RepoLabels(ctx context.Context, owner, repo string) ([]string, error) {
+	var out []string
+	for l, err := range c.api.Issues.ListLabelsIter(ctx, owner, repo, &gh.ListOptions{PerPage: 100}) {
+		if err != nil {
+			return nil, fmt.Errorf("github: labels of %s/%s: %w", owner, repo, err)
+		}
+		out = append(out, l.GetName())
+	}
+	return out, nil
+}
+
+// AddLabels implements forge.Client.
+func (c *Client) AddLabels(ctx context.Context, owner, repo string, number int, labels []string) error {
+	if len(labels) == 0 {
+		return nil
+	}
+	if _, _, err := c.api.Issues.AddLabelsToIssue(ctx, owner, repo, number, labels); err != nil {
+		return fmt.Errorf("github: add labels to %s/%s#%d: %w", owner, repo, number, err)
+	}
+	return nil
+}
+
+// RemoveLabel implements forge.Client. A label not currently applied is not
+// an error.
+func (c *Client) RemoveLabel(ctx context.Context, owner, repo string, number int, label string) error {
+	resp, err := c.api.Issues.RemoveLabelForIssue(ctx, owner, repo, number, label)
+	if resp != nil && resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("github: remove label %q from %s/%s#%d: %w", label, owner, repo, number, err)
+	}
+	return nil
+}
+
+// SetState implements forge.Client.
+func (c *Client) SetState(ctx context.Context, owner, repo string, number int, open bool) error {
+	state := "closed"
+	if open {
+		state = "open"
+	}
+	if _, _, err := c.api.Issues.Update(ctx, owner, repo, number, gh.UpdateIssueRequest{State: new(state)}); err != nil {
+		return fmt.Errorf("github: set state of %s/%s#%d: %w", owner, repo, number, err)
+	}
+	return nil
+}
+
+// AddAssignees implements forge.Client.
+func (c *Client) AddAssignees(ctx context.Context, owner, repo string, number int, logins []string) error {
+	if len(logins) == 0 {
+		return nil
+	}
+	if _, _, err := c.api.Issues.AddAssignees(ctx, owner, repo, number, logins); err != nil {
+		return fmt.Errorf("github: add assignees to %s/%s#%d: %w", owner, repo, number, err)
+	}
+	return nil
+}
+
+// RequestReviewers implements forge.Client.
+func (c *Client) RequestReviewers(ctx context.Context, owner, repo string, number int, logins []string) error {
+	if len(logins) == 0 {
+		return nil
+	}
+	if _, _, err := c.api.PullRequests.RequestReviewers(ctx, owner, repo, number, gh.ReviewersRequest{Reviewers: logins}); err != nil {
+		return fmt.Errorf("github: request reviewers on %s/%s#%d: %w", owner, repo, number, err)
+	}
+	return nil
+}
+
+// SearchIssues implements forge.Client. The query is free text, often
+// rendered from an issue's title, so every qualifier-shaped term (one with
+// a colon) is dropped before the search is scoped to the repository: a
+// planted "repo:" would otherwise widen it, since GitHub ORs repo
+// qualifiers. GitHub requires one of is:issue and is:pull-request, so
+// issues and pull requests are searched apart and interleaved, and a
+// result from another repository is dropped all the same.
+func (c *Client) SearchIssues(ctx context.Context, owner, repo, query string, limit int) ([]forge.Issue, error) {
+	var terms []string
+	for t := range strings.FieldsSeq(query) {
+		if !strings.Contains(t, ":") {
+			terms = append(terms, t)
+		}
+	}
+	if len(terms) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	var found [2][]forge.Issue
+	for i, kind := range []string{"is:issue", "is:pull-request"} {
+		q := fmt.Sprintf("repo:%s/%s %s %s", owner, repo, kind, strings.Join(terms, " "))
+		//nolint:modernize // embedlit's elision is array/slice/map-only per the spec; it doesn't compile for a struct field
+		opts := &gh.SearchOptions{ListOptions: gh.ListOptions{PerPage: limit}}
+		result, _, err := c.api.Search.Issues(ctx, q, opts)
+		if err != nil {
+			return nil, fmt.Errorf("github: search %q in %s/%s: %w", query, owner, repo, err)
+		}
+		for _, iss := range result.Issues {
+			if inRepository(iss, owner, repo) {
+				found[i] = append(found[i], issueFrom(iss))
+			}
+		}
+	}
+	out := make([]forge.Issue, 0, limit)
+	for i := 0; len(out) < limit && i < max(len(found[0]), len(found[1])); i++ {
+		for _, f := range found {
+			if i < len(f) && len(out) < limit {
+				out = append(out, f[i])
+			}
+		}
+	}
+	return out, nil
+}
+
+// inRepository reports whether iss, a search result, is in owner/repo.
+func inRepository(iss *gh.Issue, owner, repo string) bool {
+	return strings.HasSuffix(strings.ToLower(iss.GetRepositoryURL()), strings.ToLower("/repos/"+owner+"/"+repo))
 }
