@@ -20,6 +20,7 @@ const stateOpen = "open"
 // Event names as GitHub puts them in the X-GitHub-Event header.
 const (
 	evPullRequest   = "pull_request"
+	evIssues        = "issues"
 	evIssueComment  = "issue_comment"
 	evReviewComment = "pull_request_review_comment"
 	evReviewThread  = "pull_request_review_thread"
@@ -27,13 +28,22 @@ const (
 	evRepository    = "repository"
 )
 
+// Subject kinds: what an issue, pull request or comment event is about.
+const (
+	SubjectIssue = "issue"
+	SubjectPull  = "pull"
+)
+
 // Kind is what a webhook is about, after the forge-specific shape is gone.
 type Kind string
 
 // Event kinds kritique acts on. Anything else parses to KindIgnored.
 const (
-	KindPing         Kind = "ping"
-	KindPullRequest  Kind = "pull_request"
+	KindPing        Kind = "ping"
+	KindPullRequest Kind = "pull_request"
+	// KindIssue is a plain issue opened, edited, labeled, closed and so on;
+	// a pull request's changes arrive as KindPullRequest.
+	KindIssue        Kind = "issue"
 	KindComment      Kind = "comment"
 	KindThread       Kind = "thread"
 	KindPush         Kind = "push"
@@ -62,11 +72,44 @@ type Event struct {
 	// or the installation account for installation events.
 	Account string
 
+	// Forge is the forge the delivery came from.
+	Forge configfile.Forge
+	// RawEvent is the forge's event header verbatim, such as X-GitHub-Event.
+	RawEvent string
+	// Raw is the verified JSON body, unwrapped from a form payload; nil when
+	// the body is not JSON.
+	Raw json.RawMessage
+	// Sender is the login of the user who caused the event, when the
+	// payload names one.
+	Sender string
+	// Subject is the issue or pull request the event concerns, for
+	// KindIssue, KindPullRequest, KindComment and KindThread.
+	Subject *Subject
+
 	PullRequest  *PullRequest
+	Issue        *Issue
 	Comment      *Comment
 	Thread       *Thread
 	Push         *Push
 	Installation *Installation
+}
+
+// Subject names an issue or pull request by its number.
+type Subject struct {
+	Kind   string // SubjectIssue or SubjectPull
+	Number int
+}
+
+// Issue is a plain issue, never a pull request.
+type Issue struct {
+	Number    int
+	Title     string
+	Body      string
+	State     string // open or closed
+	Author    string
+	Labels    []string
+	Assignees []string
+	URL       string
 }
 
 // Repository identifies a repository as the forge names it.
@@ -141,11 +184,12 @@ func (p *PullRequest) LabelVars() []any {
 	return labels
 }
 
-// Comment is a comment on a pull request: a top-level conversation comment
-// or a reply on an inline finding.
+// Comment is a comment on an issue or pull request: a top-level
+// conversation comment or a reply on an inline finding. The event's Subject
+// says which; only pull request comments are review follow-ups.
 type Comment struct {
 	ID          int64
-	Number      int // the pull request
+	Number      int // the issue or pull request
 	Author      string
 	AuthorIsBot bool
 	Body        string
@@ -194,11 +238,61 @@ func Parse(forge configfile.Forge, header http.Header, body []byte) (Event, erro
 		return Event{}, fmt.Errorf("webhook: payload of %d bytes exceeds %d", len(body), MaxBody)
 	}
 	body = unwrapFormPayload(header, body)
+	var (
+		ev  Event
+		err error
+	)
 	switch forge {
 	case configfile.ForgeGitHub:
-		return parseGitHub(header.Get("X-GitHub-Event"), header.Get("X-GitHub-Delivery"), body)
+		event := header.Get("X-GitHub-Event")
+		ev, err = parseGitHub(event, header.Get("X-GitHub-Delivery"), body)
+		ev, err = withEnvelope(ev, err, event, body)
+	default:
+		return Event{}, fmt.Errorf("webhook: unsupported forge %q", forge)
 	}
-	return Event{}, fmt.Errorf("webhook: unsupported forge %q", forge)
+	if err != nil {
+		return Event{}, err
+	}
+	ev.Forge = forge
+	if json.Valid(body) {
+		ev.Raw = json.RawMessage(body)
+	}
+	return ev, nil
+}
+
+// envelope is what every GitHub-shaped payload shares: enough to say who
+// did what where, whatever the event.
+type envelope struct {
+	Action     string `json:"action"`
+	Sender     ghUser `json:"sender"`
+	Repository ghRepo `json:"repository"`
+}
+
+// withEnvelope stamps the raw event name and the payload's sender on a
+// parsed event. An event kritique does not model also gets the payload's
+// action and repository, so a task on the raw delivery can still route it.
+// A body that is not JSON leaves an ignored event bare rather than failing
+// the delivery.
+func withEnvelope(ev Event, err error, event string, body []byte) (Event, error) {
+	if err != nil {
+		return Event{}, err
+	}
+	ev.RawEvent = event
+	var env envelope
+	if json.Unmarshal(body, &env) != nil {
+		return ev, nil
+	}
+	ev.Sender = env.Sender.Login
+	if ev.Kind == KindIgnored || ev.Kind == KindPing {
+		ev.Action = env.Action
+		if ev.Repository == nil {
+			ev.Repository = env.Repository.event()
+		}
+		if ev.Account == "" {
+			ev.Account = env.Repository.Owner.Login
+		}
+	}
+	return ev, nil
 }
 
 // unwrapFormPayload returns the JSON document from a webhook body. GitHub can
@@ -308,6 +402,8 @@ func parseGitHub(event, delivery string, body []byte) (Event, error) {
 		return Event{Kind: KindPing, Delivery: delivery}, nil
 	case evPullRequest:
 		return parsePullRequestEvent(delivery, body)
+	case evIssues:
+		return parseIssueEvent(delivery, body)
 	case evIssueComment:
 		return parseIssueComment(delivery, body)
 	case evReviewComment:
@@ -321,7 +417,7 @@ func parseGitHub(event, delivery string, body []byte) (Event, error) {
 	case evRepository:
 		return parseRepository(delivery, body)
 	default:
-		return Event{Kind: KindIgnored, Delivery: delivery, Action: event}, nil
+		return Event{Kind: KindIgnored, Delivery: delivery}, nil
 	}
 }
 
@@ -337,8 +433,61 @@ func parsePullRequestEvent(delivery string, body []byte) (Event, error) {
 	return Event{
 		Kind: KindPullRequest, Action: p.Action, Delivery: delivery,
 		Repository: p.Repository.event(), Account: p.Repository.Owner.Login,
+		Subject:     &Subject{Kind: SubjectPull, Number: p.PullRequest.Number},
 		PullRequest: p.PullRequest.event(),
 	}, nil
+}
+
+// parseIssueEvent decodes an "issues" event. An issue that is really a
+// pull request is ignored: its changes also arrive as pull_request events,
+// which are what kritique models.
+func parseIssueEvent(delivery string, body []byte) (Event, error) {
+	var p struct {
+		Action     string `json:"action"`
+		Repository ghRepo `json:"repository"`
+		Issue      struct {
+			Number int    `json:"number"`
+			Title  string `json:"title"`
+			Body   string `json:"body"`
+			State  string `json:"state"`
+			URL    string `json:"html_url"`
+			User   ghUser `json:"user"`
+			Labels []struct {
+				Name string `json:"name"`
+			} `json:"labels"`
+			Assignees   []ghUser        `json:"assignees"`
+			PullRequest json.RawMessage `json:"pull_request"`
+		} `json:"issue"`
+	}
+	if err := json.Unmarshal(body, &p); err != nil {
+		return Event{}, fmt.Errorf("webhook: issues payload: %w", err)
+	}
+	if isPull(p.Issue.PullRequest) {
+		return Event{Kind: KindIgnored, Delivery: delivery}, nil
+	}
+	is := &Issue{
+		Number: p.Issue.Number, Title: p.Issue.Title, Body: p.Issue.Body,
+		State: cmp.Or(p.Issue.State, stateOpen), Author: p.Issue.User.Login, URL: p.Issue.URL,
+	}
+	for _, l := range p.Issue.Labels {
+		is.Labels = append(is.Labels, l.Name)
+	}
+	for _, a := range p.Issue.Assignees {
+		is.Assignees = append(is.Assignees, a.Login)
+	}
+	return Event{
+		Kind: KindIssue, Action: p.Action, Delivery: delivery,
+		Repository: p.Repository.event(), Account: p.Repository.Owner.Login,
+		Subject: &Subject{Kind: SubjectIssue, Number: is.Number},
+		Issue:   is,
+	}, nil
+}
+
+// isPull reports whether an issue's pull_request field marks it as a pull
+// request: GitHub omits the field on plain issues; another forge may send
+// null.
+func isPull(field json.RawMessage) bool {
+	return len(field) > 0 && string(field) != "null"
 }
 
 func parseIssueComment(delivery string, body []byte) (Event, error) {
@@ -358,13 +507,14 @@ func parseIssueComment(delivery string, body []byte) (Event, error) {
 	if err := json.Unmarshal(body, &p); err != nil {
 		return Event{}, fmt.Errorf("webhook: issue_comment payload: %w", err)
 	}
-	// Comments on plain issues are not review follow-ups.
-	if len(p.Issue.PullRequest) == 0 {
-		return Event{Kind: KindIgnored, Action: evIssueComment, Delivery: delivery}, nil
+	subject := &Subject{Kind: SubjectIssue, Number: p.Issue.Number}
+	if isPull(p.Issue.PullRequest) {
+		subject.Kind = SubjectPull
 	}
 	return Event{
 		Kind: KindComment, Action: p.Action, Delivery: delivery,
 		Repository: p.Repository.event(), Account: p.Repository.Owner.Login,
+		Subject: subject,
 		Comment: &Comment{
 			ID: p.Comment.ID, Number: p.Issue.Number, Author: p.Comment.User.Login,
 			AuthorIsBot: p.Comment.User.isBot(), Body: p.Comment.Body,
@@ -391,6 +541,7 @@ func parseReviewComment(delivery string, body []byte) (Event, error) {
 	return Event{
 		Kind: KindComment, Action: p.Action, Delivery: delivery,
 		Repository: p.Repository.event(), Account: p.Repository.Owner.Login,
+		Subject: &Subject{Kind: SubjectPull, Number: p.PullRequest.Number},
 		Comment: &Comment{
 			ID: p.Comment.ID, Number: p.PullRequest.Number, Author: p.Comment.User.Login,
 			AuthorIsBot: p.Comment.User.isBot(), Body: p.Comment.Body,
@@ -425,7 +576,7 @@ func parseReviewThread(delivery string, body []byte) (Event, error) {
 	}
 	resolved, ok := threadActions[p.Action]
 	if !ok {
-		return Event{Kind: KindIgnored, Action: evReviewThread, Delivery: delivery}, nil
+		return Event{Kind: KindIgnored, Delivery: delivery}, nil
 	}
 	thread := &Thread{Number: p.PullRequest.Number, Resolved: resolved, Sender: p.Sender.Login, SenderIsBot: p.Sender.isBot()}
 	for _, c := range p.Thread.Comments {
@@ -440,7 +591,8 @@ func parseReviewThread(delivery string, body []byte) (Event, error) {
 	return Event{
 		Kind: KindThread, Action: p.Action, Delivery: delivery,
 		Repository: p.Repository.event(), Account: p.Repository.Owner.Login,
-		Thread: thread,
+		Subject: &Subject{Kind: SubjectPull, Number: p.PullRequest.Number},
+		Thread:  thread,
 	}, nil
 }
 
@@ -489,7 +641,7 @@ func parseRepository(delivery string, body []byte) (Event, error) {
 		return Event{}, fmt.Errorf("webhook: repository payload: %w", err)
 	}
 	if !repositoryActions[p.Action] {
-		return Event{Kind: KindIgnored, Action: evRepository, Delivery: delivery}, nil
+		return Event{Kind: KindIgnored, Delivery: delivery}, nil
 	}
 	ev := Event{
 		Kind: KindRepository, Action: p.Action, Delivery: delivery,
