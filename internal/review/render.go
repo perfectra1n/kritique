@@ -198,6 +198,23 @@ func RenderInline(ctx context.Context, t Templates, f Finding) (string, []string
 	return marker + out, notes
 }
 
+// PlainSuggestions turns each suggestion fence in body into a plain code
+// fence, for a forge that offers no one-click suggestion: Forgejo and
+// Gitea show "```suggestion" as a code block labelled with a language
+// that does not exist, so the replacement reads as plain code instead.
+func PlainSuggestions(body string) string {
+	lines := strings.Split(body, "\n")
+	for i, l := range lines {
+		indent := len(l) - len(strings.TrimLeft(l, " "))
+		rest := l[indent:]
+		fence := len(rest) - len(strings.TrimLeft(rest, "`"))
+		if fence >= 3 && strings.TrimSpace(rest[fence:]) == "suggestion" {
+			lines[i] = l[:indent+fence]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func fallbackNote(which string, err error) string {
 	why := "failed to render"
 	switch {

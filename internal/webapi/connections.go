@@ -46,15 +46,15 @@ func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// connectionApp is the running connection r names and its App; only a
-// GitHub connection has one.
+// connectionApp is the running GitHub connection r names and its App. A
+// Forgejo or Gitea connection has no App, and so no installations.
 func (s *Server) connectionApp(r *http.Request) (*configfile.Connection, *github.App, error) {
 	in, ok := s.current.Get().Connection(r.PathValue("name"))
 	if !ok {
 		return nil, nil, errNotFound("connection")
 	}
 	if in.Forge != configfile.ForgeGitHub {
-		return nil, nil, errBadRequest(CodeBadRequest, "connection "+in.Name+" is not a GitHub App")
+		return nil, nil, errBadRequest(CodeBadRequest, "connection "+in.Name+" is a "+string(in.Forge)+" bot, not a GitHub App")
 	}
 	app, err := s.apps.get(in, s.githubAPI)
 	if err != nil {
@@ -91,7 +91,7 @@ func (c *appCache) get(in *configfile.Connection, apiBase string) (*github.App, 
 	return app, nil
 }
 
-// errForge is the forge failing or refusing a call the admin asked for.
+// errForge is GitHub failing or refusing a call the admin asked for.
 func errForge(err error) error {
 	return errStatus(http.StatusBadGateway, CodeForgeError, err.Error())
 }

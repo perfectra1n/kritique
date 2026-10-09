@@ -226,7 +226,7 @@ func serve(
 	} else {
 		logger.Warn("no owner DSN configured; this replica can never migrate or apply configuration")
 	}
-	if err := startPublic(ctx, g, st, cfg, current, inserter, svc, m, public, logger); err != nil {
+	if err := startPublic(ctx, g, st, cfg, current, inserter, svc, apps, m, public, logger); err != nil {
 		return err
 	}
 	return startWorker(ctx, g, st, cfg, current, exec, forges, m, logger)
@@ -254,7 +254,7 @@ func loadConfig(path string) (*configfile.File, error) {
 // starting page.
 func startPublic(
 	ctx context.Context, g *errgroup.Group, st *store.Store, cfg *config.Config, current *configfile.Current,
-	inserter *river.Client[pgx.Tx], svc *ingest.Service, m *metrics.Metrics, public *server.Switch, logger *slog.Logger,
+	inserter *river.Client[pgx.Tx], svc *ingest.Service, apps *worker.Apps, m *metrics.Metrics, public *server.Switch, logger *slog.Logger,
 ) error {
 	hooks := ingest.NewHandler(current, svc, logger.With("listener", "hooks"))
 	hooks.Metrics = m
@@ -268,6 +268,7 @@ func startPublic(
 	api := webapi.New(webapi.Config{
 		Store: st, Current: current, Auth: authHandler, UI: web.FS(),
 		WebURL: cfg.WebURLParsed(), Version: version, Logger: webLogger, Actions: webapi.JobActions{Queue: inserter}, Env: cfg.Env(),
+		Reach: apps.Reach,
 	})
 	g.Go(func() error { return api.Run(server.Lingering(ctx, linger)) })
 	public.Set(server.Public(cfg.WebBasePath(), hooks, api.Handler()))

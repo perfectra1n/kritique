@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -221,7 +222,7 @@ func TestIssue(t *testing.T) {
 	f.reply("GET /api/v3/repos/o/r/issues/14", 404, `{"message":"Not Found"}`)
 	got, err := c.Issue(t.Context(), "o", "r", 12)
 	want := forge.Issue{Number: 12, Title: "Widgets leak", Body: "Steps.", URL: "https://github.com/o/r/issues/12"}
-	if err != nil || got != want {
+	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("Issue = %+v, %v; want %+v", got, err, want)
 	}
 	if got, err := c.Issue(t.Context(), "o", "r", 13); err != nil || !got.PullRequest {

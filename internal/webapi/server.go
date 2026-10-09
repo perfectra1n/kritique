@@ -50,6 +50,10 @@ type Config struct {
 	// GitHubAPI is the GitHub API the connections' Apps call, "" for
 	// api.github.com; tests point it at a server of their own.
 	GitHubAPI string
+	// Reach lists, by lowercased account login, the repositories a Forgejo
+	// or Gitea connection reaches, as the poller's does; nil leaves their
+	// repositories to the leader's sync.
+	Reach func(ctx context.Context, in *configfile.Connection) (map[string][]store.ReachedRepository, error)
 }
 
 // Server serves the dashboard.
@@ -68,6 +72,7 @@ type Server struct {
 	env       []config.EnvVar
 	githubAPI string
 	apps      appCache
+	reach     func(ctx context.Context, in *configfile.Connection) (map[string][]store.ReachedRepository, error)
 }
 
 // New builds a Server from cfg.
@@ -84,7 +89,7 @@ func New(cfg Config) *Server {
 		store: cfg.Store, current: cfg.Current, auth: cfg.Auth, actions: cfg.Actions, version: cfg.Version,
 		webURL: cfg.WebURL, ui: cfg.UI, basePath: strings.TrimRight(cfg.WebURL.Path, "/"),
 		logger: cfg.Logger, now: cfg.Now, hub: h, env: cfg.Env,
-		githubAPI: cfg.GitHubAPI,
+		githubAPI: cfg.GitHubAPI, reach: cfg.Reach,
 	}
 }
 

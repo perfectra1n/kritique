@@ -45,6 +45,9 @@ func setupStatus(f *configfile.File, webURL string) SetupStatus {
 // indexes them before any webhook names them, and disables the ones an
 // account's listing no longer has, as the leader's sync does.
 func (s *Server) registerReached(w http.ResponseWriter, r *http.Request) error {
+	if in, ok := s.current.Get().Connection(r.PathValue("name")); ok && in.Forge.SelfHosted() {
+		return s.registerReachedSelfHosted(w, r, in)
+	}
 	in, app, err := s.connectionApp(r)
 	if err != nil {
 		return err
@@ -66,6 +69,35 @@ func (s *Server) registerReached(w http.ResponseWriter, r *http.Request) error {
 			repos = append(repos, store.ReachedRepository{
 				FullName: x.FullName, DefaultBranch: x.DefaultBranch, Traits: &configfile.RepoTraits{Archived: x.Archived, Fork: x.Fork},
 			})
+		}
+		added, _, err := s.store.RegisterRepositories(r.Context(), acct.ID(), repos, listedAt)
+		if err != nil {
+			return err
+		}
+		res.Added += added
+	}
+	writeJSON(w, http.StatusOK, res)
+	return nil
+}
+
+// registerReachedSelfHosted is registerReached for a Forgejo or Gitea
+// connection, through Reach.
+func (s *Server) registerReachedSelfHosted(w http.ResponseWriter, r *http.Request, in *configfile.Connection) error {
+	if s.reach == nil {
+		return errBadRequest(CodeBadRequest, "this replica cannot list a "+string(in.Forge)+" connection's repositories")
+	}
+	listedAt := s.now()
+	reach, err := s.reach(r.Context(), in)
+	if err != nil {
+		return errForge(err)
+	}
+	f := s.current.Get()
+	var res RegisterResult
+	for _, name := range in.Accounts {
+		acct, ok := f.Account(in.Forge, name)
+		repos := reach[strings.ToLower(name)]
+		if !ok || len(repos) == 0 {
+			continue
 		}
 		added, _, err := s.store.RegisterRepositories(r.Context(), acct.ID(), repos, listedAt)
 		if err != nil {

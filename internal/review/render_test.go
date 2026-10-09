@@ -607,3 +607,17 @@ func TestCallLimitsMatchTheDocs(t *testing.T) {
 		})
 	}
 }
+
+func TestPlainSuggestions(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"text\n```suggestion\nx := 1\n```\n", "text\n```\nx := 1\n```\n"},
+		{"  ````suggestion  \nx\n````", "  ````\nx\n````"},
+		{"```go\nx\n```", "```go\nx\n```"},
+		{"```suggestions\nx\n```", "```suggestions\nx\n```"},
+		{"a ```suggestion in prose", "a ```suggestion in prose"},
+	} {
+		if got := PlainSuggestions(tt.in); got != tt.want {
+			t.Errorf("PlainSuggestions(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

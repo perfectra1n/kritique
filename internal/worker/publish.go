@@ -415,6 +415,10 @@ func (p *publishPhase) writeBack(
 			templates.Inline = ""
 			notes = append(notes, inlineNotes...)
 		}
+		if p.account.Forge != configfile.ForgeGitHub {
+			// A one-click suggestion is GitHub's alone.
+			body = review.PlainSuggestions(body)
+		}
 		c := forge.InlineComment{Path: f.Path, Line: f.Line, Body: body}
 		if f.EndLine > 0 {
 			c.StartLine, c.Line = f.Line, f.EndLine

@@ -90,8 +90,16 @@ func (f *File) Settings(a *Account, fullName string) Settings {
 		s.apply(&r.Overrides)
 	}
 	s.Limits.Concurrency = cmp.Or(s.Limits.Concurrency, DefaultConcurrency)
+	if a.Forge != ForgeGitHub && slices.Contains(s.Agent.Commands, ghCommand) {
+		// gh talks to GitHub alone, and the run's token is the account's
+		// forge's: offered on another forge it could only fail.
+		s.Agent.Commands = slices.DeleteFunc(slices.Clone(s.Agent.Commands), func(c string) bool { return c == ghCommand })
+	}
 	return s
 }
+
+// ghCommand is GitHub's CLI, which only an account on GitHub is offered.
+const ghCommand = "gh"
 
 // Runs reports whether repository fullName of account a, known as t, is
 // reviewed, polled and indexed. An archived repository never is: it is

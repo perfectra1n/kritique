@@ -10,8 +10,8 @@ import (
 	"github.com/perfectra1n/kritique/internal/egress"
 )
 
-// GitHubHost is the forge every connection and GitHub sign-in talks to, and
-// GitHubAPIHost its API, which a runner's gh calls.
+// GitHubHost is the forge every GitHub connection and GitHub sign-in talks
+// to, and GitHubAPIHost its API, which a runner's gh calls.
 const (
 	GitHubHost    = "github.com"
 	GitHubAPIHost = "api.github.com"
@@ -30,11 +30,9 @@ func (f *File) validateEgress() error {
 		return fmt.Errorf("configfile: egress.deny%w", err)
 	}
 	rules := f.EgressRules()
-	if len(f.Connections) > 0 {
-		for _, host := range []string{GitHubHost, GitHubAPIHost} {
-			if !rules.Allows(host) {
-				return fmt.Errorf("configfile: egress.deny: %s is denied, which every app needs", host)
-			}
+	for _, host := range f.forgeHosts() {
+		if !rules.Allows(host) {
+			return fmt.Errorf("configfile: egress.deny: %s is denied, which an app needs", host)
 		}
 	}
 	for _, host := range slices.Sorted(maps.Keys(f.Egress.credentials)) {
@@ -97,19 +95,37 @@ func checkHost(h string) error {
 	return nil
 }
 
+// forgeHosts are the hosts the connections' forges live on, which runners
+// fetch from: GitHub and its API, which gh reads, once a GitHub connection
+// exists, and each Forgejo or Gitea connection's host.
+func (f *File) forgeHosts() []string {
+	var hosts []string
+	add := func(h string) {
+		if h != "" && !slices.Contains(hosts, h) {
+			hosts = append(hosts, h)
+		}
+	}
+	for i := range f.Connections {
+		add(f.Connections[i].Host())
+		if f.Connections[i].Forge == ForgeGitHub {
+			add(GitHubAPIHost)
+		}
+	}
+	return hosts
+}
+
 // EgressRules is what the gateway allows for this file: the configured
-// entries and, once any connection exists, GitHub and its API, since
-// runners fetch from the one and gh reads the other, the denied entries,
-// plus the credentials as Authorization header values. Provider endpoints
-// are not among them: a runner reaches its model through the gateway's
-// model endpoint, and the worker calls the provider.
+// entries and every connection's forge host (see forgeHosts), the denied
+// entries, plus the credentials as Authorization header values. A forge
+// host on a private address is reached only when an allow entry covers
+// the address too, as any host is. Provider endpoints are not among them:
+// a runner reaches its model through the gateway's model endpoint, and the
+// worker calls the provider.
 func (f *File) EgressRules() egress.Rules {
 	allow := egress.List{Hosts: slices.Clone(f.Egress.allow.Hosts), Prefixes: f.Egress.allow.Prefixes}
-	if len(f.Connections) > 0 {
-		for _, h := range []string{GitHubHost, GitHubAPIHost} {
-			if !slices.Contains(allow.Hosts, h) {
-				allow.Hosts = append(allow.Hosts, h)
-			}
+	for _, h := range f.forgeHosts() {
+		if !slices.Contains(allow.Hosts, h) {
+			allow.Hosts = append(allow.Hosts, h)
 		}
 	}
 	creds := make(map[string]string, len(f.Egress.credentials))

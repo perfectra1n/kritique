@@ -41,10 +41,18 @@ const (
 // Forge identifies which forge a connection talks to.
 type Forge string
 
-// ForgeGitHub is github.com, the one forge kritique supports. Forge stays a
-// type, and the code that switches on it keeps its switch, so another forge
-// has a place.
-const ForgeGitHub Forge = "github"
+// Forges a connection talks to. ForgeGitHub is github.com, through a
+// GitHub App. ForgeForgejo and ForgeGitea are a self-hosted instance at the
+// connection's URL, through a token: Gitea speaks the REST API, webhooks
+// and OAuth Forgejo does, so the two share one client, yet stay apart so
+// that an account is keyed by the forge it lives on. Each value is stored
+// as an account's and a connection's forge, and is part of an account's
+// id, so a value must never change.
+const (
+	ForgeGitHub  Forge = "github"
+	ForgeForgejo Forge = "forgejo"
+	ForgeGitea   Forge = "gitea"
+)
 
 // SecretRef names the environment variable a secret value lives in. Values are resolved at load and never written back to
 // disk or the database.
@@ -429,7 +437,8 @@ var DefaultIgnore = []string{
 
 // GitHubApp is a GitHub App credential owned by a connection. The client
 // id is not secret, but admins often keep it next to the key, so it may
-// be given inline or by reference.
+// be given inline or by reference. WebhookSecret is every forge's: a
+// Forgejo or Gitea connection sets it alone of the three.
 type GitHubApp struct {
 	ClientID      ValueOrRef `yaml:"clientId"`
 	PrivateKey    SecretRef  `yaml:"privateKey"`
@@ -446,14 +455,15 @@ func (a GitHubApp) ClientIDValue() string { return a.clientID }
 // PrivateKeyValue returns the resolved private key PEM.
 func (a GitHubApp) PrivateKeyValue() Secret { return a.privateKey }
 
-// Connection is one GitHub App serving the accounts it lists, an entry of
-// the configuration's apps, which are keyed by name. The name is the hook
-// path, /hooks/{name}.
+// Connection is one GitHub App, or one Forgejo or Gitea bot account,
+// serving the accounts it lists, an entry of the configuration's apps,
+// which are keyed by name. The name is the hook path, /hooks/{name}.
 type Connection struct {
 	// Name is the entry's key under apps.
 	Name string `yaml:"-"`
-	// Forge is always ForgeGitHub; the file does not name it.
-	Forge Forge `yaml:"-"`
+	// Forge is the forge the connection talks to, ForgeGitHub when the
+	// entry names none.
+	Forge Forge `yaml:"forge,omitempty"`
 	// Accounts are the users and organizations the connection serves: a
 	// webhook for any other account is ignored, and a repository belongs to
 	// the connection serving its owner. A public GitHub App installed on
@@ -462,6 +472,20 @@ type Connection struct {
 	Accounts []string `yaml:"accounts"`
 
 	App GitHubApp `yaml:",inline"`
+
+	// URL is a Forgejo or Gitea instance's base URL, such as
+	// https://forgejo.example.com, which its API is under at /api/v1.
+	URL string `yaml:"url,omitempty"`
+	// Token is the Forgejo or Gitea bot account's API token, which posts
+	// the reviews: it needs write access to issues and repositories.
+	Token SecretRef `yaml:"token,omitempty"`
+	// GitToken is a Forgejo or Gitea token runners fetch the repository
+	// with in place of Token: a runner reads untrusted content and runs
+	// commands an agent chose, so a token that can only read belongs here.
+	// Without one, runners are handed Token.
+	GitToken SecretRef `yaml:"gitToken,omitempty"`
+
+	token, gitToken Secret
 }
 
 // WebhookSecretValue returns the resolved webhook secret.
@@ -652,7 +676,7 @@ func (r Review) Referenced() []string {
 	return out
 }
 
-// Account is a forge account, github/<name>, and the unit of isolation. It
+// Account is a forge account, <forge>/<name>, and the unit of isolation. It
 // exists because a connection serves it. Its entry under the
 // configuration's accounts holds what is its alone, its limits and
 // providers, and its owner/* and owner/name entries under repositories its

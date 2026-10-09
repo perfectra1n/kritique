@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/url"
 	"os"
 	"path"
 	"regexp"
@@ -320,14 +321,30 @@ func (a *Account) resolve(s *secrets) error {
 
 func (i *Connection) resolve(where string, s *secrets) error {
 	var err error
+	if i.App.webhookSecret, err = s.read(i.App.WebhookSecret); err != nil {
+		return fmt.Errorf("configfile: %s.webhookSecret: %w", where, err)
+	}
+	if i.Forge != ForgeGitHub && !i.Forge.SelfHosted() {
+		return nil // validate names the forge
+	}
+	if i.Forge.SelfHosted() {
+		// The keys of the other forge are refused by validate; reading them
+		// here would name a missing variable instead.
+		if i.token, err = s.read(i.Token); err != nil {
+			return fmt.Errorf("configfile: %s.token: %w", where, err)
+		}
+		if !i.GitToken.empty() {
+			if i.gitToken, err = s.read(i.GitToken); err != nil {
+				return fmt.Errorf("configfile: %s.gitToken: %w", where, err)
+			}
+		}
+		return nil
+	}
 	if i.App.clientID, err = i.App.ClientID.resolve(s); err != nil {
 		return fmt.Errorf("configfile: %s.clientId: %w", where, err)
 	}
 	if i.App.privateKey, err = s.read(i.App.PrivateKey); err != nil {
 		return fmt.Errorf("configfile: %s.privateKey: %w", where, err)
-	}
-	if i.App.webhookSecret, err = s.read(i.App.WebhookSecret); err != nil {
-		return fmt.Errorf("configfile: %s.webhookSecret: %w", where, err)
 	}
 	return nil
 }
@@ -622,19 +639,59 @@ func CheckRepoPath(p string) error {
 }
 
 func (i *Connection) validate(where string) error {
+	if i.App.webhookSecret.Value() == "" {
+		return fmt.Errorf("configfile: %s.webhookSecret is required", where)
+	}
 	switch i.Forge {
 	case ForgeGitHub:
+		for _, k := range []struct {
+			key string
+			set bool
+		}{{"url", i.URL != ""}, {"token", !i.Token.empty()}, {"gitToken", !i.GitToken.empty()}} {
+			if k.set {
+				return fmt.Errorf("configfile: %s.%s is for a forgejo or gitea app; a github app takes clientId and privateKey", where, k.key)
+			}
+		}
 		if i.App.clientID == "" {
 			return fmt.Errorf("configfile: %s.clientId is required", where)
 		}
 		if i.App.privateKey.Value() == "" {
 			return fmt.Errorf("configfile: %s.privateKey is required", where)
 		}
-		if i.App.webhookSecret.Value() == "" {
-			return fmt.Errorf("configfile: %s.webhookSecret is required", where)
+	case ForgeForgejo, ForgeGitea:
+		if i.App.ClientID != (ValueOrRef{}) || !i.App.PrivateKey.empty() {
+			return fmt.Errorf("configfile: %s: a %s app takes url, token and gitToken, not clientId or privateKey", where, i.Forge)
+		}
+		if err := checkForgeURL(i.URL); err != nil {
+			return fmt.Errorf("configfile: %s.url: %w", where, err)
+		}
+		if i.token.Value() == "" {
+			return fmt.Errorf("configfile: %s.token is required", where)
+		}
+		if !i.GitToken.empty() && i.gitToken.Value() == "" {
+			return fmt.Errorf("configfile: %s.gitToken resolved to an empty value", where)
 		}
 	default:
-		return fmt.Errorf("configfile: %s.forge must be %s, got %q", where, ForgeGitHub, i.Forge)
+		return fmt.Errorf("configfile: %s.forge must be %s, %s or %s, got %q", where, ForgeGitHub, ForgeForgejo, ForgeGitea, i.Forge)
+	}
+	return nil
+}
+
+// checkForgeURL accepts a Forgejo or Gitea base URL: http or https, with a
+// host, and nothing past its path, which an instance served under a
+// subpath has.
+func checkForgeURL(raw string) error {
+	if raw == "" {
+		return errors.New("is required")
+	}
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%q is not a URL: %w", raw, err)
+	case u.Scheme != "https" && u.Scheme != "http", u.Host == "":
+		return fmt.Errorf("%q must be an http or https URL with a host", raw)
+	case u.User != nil, u.RawQuery != "", u.Fragment != "":
+		return fmt.Errorf("%q must not carry credentials, a query or a fragment", raw)
 	}
 	return nil
 }

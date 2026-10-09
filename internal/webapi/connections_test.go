@@ -5,8 +5,12 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 )
 
@@ -37,5 +41,22 @@ func TestAppCacheSharesAnAppPerConnection(t *testing.T) {
 	other, err := c.get(globex, "")
 	if err != nil || other == first {
 		t.Fatalf("another connection shares the App (%v)", err)
+	}
+}
+
+// TestConnectionAppRefusesForgejo: a Forgejo or Gitea connection has no
+// GitHub App, so no installations to list or remove.
+func TestConnectionAppRefusesForgejo(t *testing.T) {
+	t.Setenv("TEST_SECRET", "whsec")
+	t.Setenv("TEST_TOKEN", "tok")
+	f := configfiletest.Load(t, `apps:
+  home: { forge: forgejo, url: https://git.example.com, accounts: [me], token: { env: TEST_TOKEN }, webhookSecret: { env: TEST_SECRET } }
+`)
+	s := &Server{current: configfile.NewCurrent(f)}
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/connections/home/installations", nil)
+	r.SetPathValue("name", "home")
+	_, _, err := s.connectionApp(r)
+	if apiErr, ok := errors.AsType[*apiError](err); !ok || apiErr.status != http.StatusBadRequest {
+		t.Fatalf("connectionApp = %v, want a bad request", err)
 	}
 }

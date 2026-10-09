@@ -33,7 +33,7 @@ the App is installed on.
 | Metadata               | read-only                    | required by GitHub                                                                                  |
 | Pull requests          | read and write               | reviews, inline comments and replies, and conversation comments                                     |
 | Issues                 | read-only, or read and write | conversation comments, which GitHub delivers as issue comments; with write, reactions               |
-| Commit statuses        | read and write               | the `Kritique / Review` status                                                                       |
+| Commit statuses        | read and write               | the `kritique/review` status                                                                         |
 | Members (organization) | read-only                    | only for signing in with GitHub through this App, whose role mapping reads a person's organizations |
 
 - **Contents: read and write** has one use: GitHub lets an App resolve a
