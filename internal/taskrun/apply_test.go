@@ -187,7 +187,7 @@ func TestPost(t *testing.T) {
 }
 
 func TestAnchor(t *testing.T) {
-	anchors := map[string]map[int]bool{"a.go": {3: true, 4: true, 5: true}, "b.go": {10: true}}
+	anchors := map[string]map[int]string{"a.go": {3: "", 4: "", 5: ""}, "b.go": {10: ""}}
 	in := []tasks.Inline{
 		{Path: "a.go", Line: 3, Body: "one line"},
 		{Path: "a.go", Line: 4, EndLine: 5, Body: "range"},

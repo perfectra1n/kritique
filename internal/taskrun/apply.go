@@ -21,12 +21,12 @@ const (
 // Anchor keeps the inline comments whose every line the pull request's diff
 // shows, as anchors (see review.Anchors) gives them: the forge refuses a
 // comment on any other line.
-func Anchor(inline []tasks.Inline, anchors map[string]map[int]bool) (kept []tasks.Inline, dropped []tasks.Drop) {
+func Anchor(inline []tasks.Inline, anchors map[string]map[int]string) (kept []tasks.Inline, dropped []tasks.Drop) {
 	for _, c := range inline {
 		end := max(c.EndLine, c.Line)
 		ok := c.Line > 0
 		for l := c.Line; ok && l <= end; l++ {
-			ok = anchors[c.Path][l]
+			_, ok = anchors[c.Path][l]
 		}
 		if ok {
 			kept = append(kept, c)
