@@ -142,7 +142,7 @@ func (s *Server) accountSummary(ctx context.Context, file *configfile.File, t *c
 		return AccountSummary{}, err
 	}
 	sum := AccountSummary{
-		Slug: t.Slug(), Repositories: stats.Repositories,
+		Slug: t.Slug(), Forge: t.Forge, Repositories: stats.Repositories,
 		Reviews7d: stats.Reviews7d, Usage: monthUsage(stats.Month, file.Settings(t, "").Limits),
 		Attention: attentionDTO(attention), LastPolledAt: polled,
 	}
@@ -177,7 +177,7 @@ func (s *Server) listAdminAccounts(w http.ResponseWriter, r *http.Request) error
 		out = append(out, AdminAccount{AccountSummary: sum, Live: true})
 	}
 	for _, a := range file.Unserved() {
-		out = append(out, AdminAccount{Slug: a.Slug(), Conflict: "no connection serves this account"})
+		out = append(out, AdminAccount{Slug: a.Slug(), Forge: a.Forge, Conflict: "no connection serves this account"})
 	}
 	writeJSON(w, http.StatusOK, out)
 	return nil
@@ -217,7 +217,7 @@ func (s *Server) getAccount(w http.ResponseWriter, r *http.Request, t *accountSc
 
 func connection(in *configfile.Connection) Connection {
 	return Connection{
-		Name: in.Name, Forge: in.Forge, Accounts: in.Accounts, HookPath: "/hooks/" + in.Name,
+		Name: in.Name, Forge: in.Forge, WebURL: in.WebURL(), Accounts: in.Accounts, HookPath: "/hooks/" + in.Name,
 		Credentials: CredentialsSet{
 			ClientID: in.App.ClientIDValue() != "", PrivateKey: in.App.PrivateKeyValue().Value() != "",
 			WebhookSecret: in.WebhookSecretValue().Value() != "",

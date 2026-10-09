@@ -1,7 +1,7 @@
 <script lang="ts">
-  // The running connections, and the accounts one's GitHub App is installed
-  // on: kritique serves only the accounts a connection lists, and an
-  // installation on any other can be removed.
+  // The running connections, each with its forge, and the accounts a GitHub
+  // connection's App is installed on: kritique serves only the accounts a
+  // connection lists, and an App's installation on any other can be removed.
   import { getJSON, sendJSON } from '../../api.svelte';
   import { Resource } from '../../resource.svelte';
   import { describe } from '../../manage';
@@ -11,6 +11,10 @@
   import Pill from '../../components/Pill.svelte';
   import WebhookState from '../../components/WebhookState.svelte';
   import Dialog from '../../components/Dialog.svelte';
+  import Icon from '../../Icon.svelte';
+  import { forgeIcon } from '../../icons';
+  import { forgeName } from '../../forge';
+  import { safeHref } from '../../markdown';
 
   const conns = new Resource(() => getJSON<Connection[]>('/api/v1/admin/connections'));
   $effect(() => {
@@ -53,14 +57,15 @@
 </script>
 
 <section class="panel" aria-labelledby="op-connections">
-  <header class="panel-head"><h2 id="op-connections">GitHub Apps</h2></header>
-  <StateView res={conns} retry={() => conns.load()} isEmpty={(d) => d.length === 0} empty="No GitHub Apps yet.">
+  <header class="panel-head"><h2 id="op-connections">Connections</h2></header>
+  <StateView res={conns} retry={() => conns.load()} isEmpty={(d) => d.length === 0} empty="No connections yet.">
     {#snippet children(list)}
       <div class="table-wrap">
         <table class="data">
           <thead>
             <tr>
-              <th scope="col">App</th>
+              <th scope="col">Connection</th>
+              <th scope="col">Forge</th>
               <th scope="col">Accounts</th>
               <th scope="col">Webhooks</th>
               <th scope="col"><span class="sr-only">Actions</span></th>
@@ -68,14 +73,24 @@
           </thead>
           <tbody>
             {#each list as c (c.name)}
+              {@const site = safeHref(c.webUrl)}
               <tr>
                 <td class="mono">{c.name}</td>
+                <td class="small">
+                  <span class="forge-mark">
+                    {#if forgeIcon[c.forge]}<Icon path={forgeIcon[c.forge]} size={14} />{/if}
+                    {forgeName(c.forge)}
+                  </span>
+                  {#if site}<a class="mono muted" href={site} target="_blank" rel="noopener noreferrer">{new URL(site).host}</a>{/if}
+                </td>
                 <td class="mono small">{c.accounts.join(', ')}</td>
                 <td>
                   <WebhookState of={c} />
                 </td>
                 <td>
-                  <button class="btn btn-small" aria-pressed={selected === c.name} onclick={() => show(c.name)}>Installations</button>
+                  {#if c.forge === 'github'}
+                    <button class="btn btn-small" aria-pressed={selected === c.name} onclick={() => show(c.name)}>Installations</button>
+                  {/if}
                 </td>
               </tr>
             {/each}

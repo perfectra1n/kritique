@@ -24,8 +24,8 @@ const (
 	CodeNoHead        ErrorCode = "no_head"
 	CodeNotCancelable ErrorCode = "not_cancelable"
 	CodeAlreadyQueued ErrorCode = "already_queued"
-	// CodeForgeError is GitHub failing or refusing a call an admin asked
-	// for; the message is GitHub's.
+	// CodeForgeError is the forge failing or refusing a call an admin
+	// asked for; the message is the forge's.
 	CodeForgeError ErrorCode = "forge_error"
 	// CodeInstallationServed refuses to uninstall an App from an account
 	// its connection serves.

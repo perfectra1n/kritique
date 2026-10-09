@@ -13,6 +13,6 @@ export const CONSOLE_SECTIONS: readonly SettingEntry[] = [
   { label: 'Setup', target: '#op-setup', keywords: 'checklist missing error refused reload' },
   { label: 'Accounts', target: '#op-accounts', keywords: 'served usage' },
   { label: 'Instance settings', target: '#op-instance', keywords: 'environment sources instance providers embedding' },
-  { label: 'GitHub Apps', target: '#op-connections', keywords: 'github app installations uninstall connections' },
+  { label: 'Connections', target: '#op-connections', keywords: 'github forgejo gitea apps installations uninstall connections' },
   { label: 'Admin audit log', target: '#op-audit', keywords: 'history' },
 ];

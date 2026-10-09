@@ -44,9 +44,10 @@ func (s *Server) listFindings(w http.ResponseWriter, r *http.Request, t *account
 	}
 	items := make([]AccountFinding, len(rows))
 	for i, a := range rows {
+		ref := pullRef(a.PullRequest)
 		items[i] = AccountFinding{
-			Finding: finding(a.FindingRow), ReviewID: a.ReviewID,
-			FirstSeenAt: a.FirstSeenAt, LastSeenAt: a.LastSeenAt, Pull: pullRef(a.PullRequest),
+			Finding: finding(a.FindingRow, t.account.Forge, ref.URL), ReviewID: a.ReviewID,
+			FirstSeenAt: a.FirstSeenAt, LastSeenAt: a.LastSeenAt, Pull: ref,
 		}
 	}
 	writeJSON(w, http.StatusOK, newPage(items, next))

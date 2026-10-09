@@ -104,7 +104,7 @@ test.describe('actions', () => {
         () =>
           sent.filter((s) => s.url.pathname.endsWith('/rerun')).length <= 1
             ? { status: 202, body: g.accepted }
-            : g.apiError(409, 'already_queued', 'review job #42 failed attempt 2 of 5 and will run again: GitHub did not answer'),
+            : g.apiError(409, 'already_queued', 'review job #42 failed attempt 2 of 5 and will run again: the forge did not answer'),
       ],
       ['POST', new RegExp(`${API}/reviews/rev-1/cancel$`), g.apiError(409, 'not_cancelable', 'the review is not running')],
       ['POST', new RegExp(`${API}/repos/alpha/one/reindex$`), g.apiError(409, 'already_queued', 'a reindex is already queued for this repository')],
@@ -136,7 +136,7 @@ test.describe('actions', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Re-run' }).click();
     await expect.poll(() => sent.filter((s) => s.url.pathname.endsWith('/rerun')).length).toBe(2);
     await expect(page.getByRole('status')).toContainText('already queued or running');
-    await expect(page.getByRole('status')).toContainText('review job #42 failed attempt 2 of 5 and will run again: GitHub did not answer');
+    await expect(page.getByRole('status')).toContainText('review job #42 failed attempt 2 of 5 and will run again: the forge did not answer');
 
     await page.goto(`/#/a/${S}/repos/alpha/one`);
     await page.getByRole('button', { name: 'Reindex' }).click();
@@ -192,7 +192,7 @@ test.describe('actions', () => {
 
 test.describe('configuration page', () => {
   test('shows what setup still lacks, each with what to set in the configuration', async ({ page }) => {
-    const fresh: T.SetupStatus = { ...g.setupStatus, connections: [], reviewModel: '', embedding: false };
+    const fresh: T.SetupStatus = { ...g.setupStatus, connections: [], forges: [], reviewModel: '', embedding: false };
     await setup(page, adminMe, [
       [/\/api\/v1\/admin\/setup$/, fresh],
       [/\/api\/v1\/admin\/accounts$/, []],
@@ -202,8 +202,8 @@ test.describe('configuration page', () => {
     const panel = page.locator('#op-setup').locator('../..');
     await expect(panel).toContainText('0 of 4 done');
     await expect(panel.getByRole('listitem')).toHaveText([
-      /A GitHub App is connected Declare the App under apps/,
-      /The App reaches a repository Install the App/,
+      /A forge is connected Declare a GitHub App, or a Forgejo or Gitea connection/,
+      /A connection reaches a repository Install the App on GitHub/,
       /A review model is set Set review.model/,
       /An embedder is set \(optional\) Set embedding/,
     ]);
@@ -260,6 +260,26 @@ test.describe('configuration page', () => {
     const row = page.locator('#op-connections').locator('../..').getByRole('row').filter({ hasText: conn.name });
     await expect(row).toContainText('unsigned');
     await expect(row).not.toContainText('receiving');
+  });
+
+  test('shows a Forgejo connection with its site, and no GitHub App to manage', async ({ page }) => {
+    const conn = g.golden<T.AccountDetail>('account_detail').connection;
+    const forgejo: T.Connection = { ...conn, name: 'acme-forgejo', forge: 'forgejo', webUrl: 'https://code.example', accounts: ['acme'] };
+    await setup(page, adminMe, [
+      [/\/api\/v1\/admin\/audit$/, g.pageOf([])],
+      [/\/api\/v1\/admin\/setup$/, { ...g.setupStatus, connections: [forgejo.name], forges: ['forgejo'] }],
+      [/\/api\/v1\/admin\/connections$/, [conn, forgejo]],
+    ]);
+    await page.goto('/#/admin');
+    await expect(page.locator('#op-setup').locator('../..').getByRole('listitem').first()).toHaveText('A forge is connected');
+    const panel = page.locator('#op-connections').locator('../..');
+    const row = panel.getByRole('row').filter({ hasText: forgejo.name });
+    await expect(row).toContainText('Forgejo');
+    await expect(row.getByRole('link', { name: 'code.example' })).toHaveAttribute('href', 'https://code.example/');
+    await expect(row.getByRole('button', { name: 'Installations' })).toHaveCount(0);
+    const github = panel.getByRole('row').filter({ hasText: conn.name });
+    await expect(github).toContainText('GitHub');
+    await expect(github.getByRole('button', { name: 'Installations' })).toHaveCount(1);
   });
 
   test('lists the instance settings read-only with their sources', async ({ page }) => {

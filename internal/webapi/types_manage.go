@@ -3,6 +3,8 @@ package webapi
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // The management API's JSON shapes; internal/web/src/lib/types.ts mirrors
@@ -36,8 +38,10 @@ type SetupStatus struct {
 	// webhook goes, its name appended.
 	WebURL   string `json:"webUrl"`
 	HooksURL string `json:"hooksUrl"`
-	// Connections are the running connections.
-	Connections []string `json:"connections"`
+	// Connections are the running connections, and Forges the forges they
+	// talk to, each once, in order.
+	Connections []string           `json:"connections"`
+	Forges      []configfile.Forge `json:"forges"`
 	// ReviewModel is defaults.models.review, which validation holds to a
 	// model an instance provider serves; "" when unset.
 	ReviewModel string `json:"reviewModel"`

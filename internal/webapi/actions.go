@@ -95,7 +95,7 @@ func queuedMessage(j *store.JobRow) string {
 	}
 	why := j.LastError
 	if jobCause(j.LastError) == CauseForgeUnavailable {
-		why = "GitHub did not answer"
+		why = "the forge did not answer"
 	}
 	if running {
 		return fmt.Sprintf("review job #%d is on attempt %d of %d, the one before failed: %s", j.ID, j.Attempt, j.MaxAttempts, why)

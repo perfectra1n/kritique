@@ -5,14 +5,15 @@
   import Collapsible from '../../components/Collapsible.svelte';
   import Icon from '../../Icon.svelte';
   import { mdiOpenInNew } from '../../icons';
-  import { threadUrl } from '../../links';
+  import { safeHref } from '../../markdown';
+  import { router } from '../../router.svelte';
+  import { forgeName, routeForge } from '../../forge';
   import Reactions from '../../components/Reactions.svelte';
   import Pill from '../../components/Pill.svelte';
 
-  // pullUrl is the pull request on the forge, where an inline finding's
-  // thread is.
-  let { f, pullUrl = '', compact = false, id }: { f: Finding; pullUrl?: string; compact?: boolean; id?: string } = $props();
-  const thread = $derived(pullUrl ? threadUrl(pullUrl, f.forgeCommentId) : undefined);
+  let { f, compact = false, id }: { f: Finding; compact?: boolean; id?: string } = $props();
+  const thread = $derived(safeHref(f.threadUrl));
+  const forge = $derived(forgeName(routeForge(router.route)));
   const where = $derived(f.endLine > f.line ? `${f.path}:${f.line}-${f.endLine}` : `${f.path}:${f.line}`);
 </script>
 
@@ -30,8 +31,8 @@
     {#if !compact}<span class="mono small muted">{where}</span>{/if}
     <Reactions up={f.reactionsUp} down={f.reactionsDown} />
     {#if thread}
-      <a class="external small finding-thread" href={thread} target="_blank" rel="noopener noreferrer">Thread on GitHub <Icon path={mdiOpenInNew} size={12} /></a>
-    {:else if f.postedInline}<span class="badge" title="Posted as an inline comment on GitHub">inline</span>{/if}
+      <a class="external small finding-thread" href={thread} target="_blank" rel="noopener noreferrer">Thread on {forge} <Icon path={mdiOpenInNew} size={12} /></a>
+    {:else if f.postedInline}<span class="badge" title={`Posted as an inline comment on ${forge}`}>inline</span>{/if}
   </header>
   {#if f.status === 'dismissed' && f.dismissReason}<p class="small muted">Dismissed: {f.dismissReason}</p>{/if}
   {#if f.explanation}<Markdown text={f.explanation} />{/if}

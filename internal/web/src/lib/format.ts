@@ -82,7 +82,7 @@ export const jobTone: Record<JobState, Tone> = {
 
 // jobCauseText says a job's cause in words, ahead of the error's own text.
 export const jobCauseText: Record<JobCause, string> = {
-  forge_unavailable: 'GitHub did not answer.',
+  forge_unavailable: 'The forge did not answer.',
 };
 
 // skipText says why a skipped review was.

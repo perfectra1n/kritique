@@ -70,7 +70,7 @@ export type SkipReason = '' | 'disabled' | 'filtered' | 'only_skipped_paths' | '
 export type Severity = 'blocking' | 'important' | 'nit';
 export type IndexRunStatus = 'running' | 'completed' | 'failed' | 'superseded';
 export type FollowupStatus = 'answered' | 'limited' | 'ignored' | 'failed';
-export type Forge = 'github';
+export type Forge = 'github' | 'forgejo' | 'gitea';
 export type UsageGroup = 'day' | 'model' | 'repo' | 'role';
 export type JobState =
   | 'available'
@@ -101,12 +101,14 @@ export interface MonthUsage {
   medianReviewCostUsd: number | null;
 }
 
-// connection names the connection serving the account. attention and the
+// forge is the forge the account is on, connection names the connection
+// serving it. attention and the
 // three times are its health: what wants a look, when the connection's
 // webhook last delivered, verified and unsigned, and when the account was
 // last polled, each null for never.
 export interface AccountSummary {
   slug: string;
+  forge: Forge;
   connection: string;
   repositories: number;
   reviews7d: number;
@@ -133,6 +135,8 @@ export interface CredentialsSet {
 export interface Connection {
   name: string;
   forge: Forge;
+  // webUrl is the forge's web address, no trailing slash; '' when unknown.
+  webUrl: string;
   accounts: string[];
   credentials: CredentialsSet;
   hookPath: string;
@@ -140,7 +144,7 @@ export interface Connection {
   // kritique; until then kritique only polls it.
   lastWebhookAt: string | null;
   // lastUnsignedWebhookAt is when one last arrived with no signature, which
-  // an App with no webhook secret sends; null when none has.
+  // a forge sends for a webhook with no secret; null when none has.
   lastUnsignedWebhookAt: string | null;
 }
 
@@ -416,6 +420,10 @@ export interface Followup {
   status: FollowupStatus;
   reason: string;
   replyCommentId: number | null;
+  // commentUrl is the mention on the forge, replyUrl kritique's answer to
+  // it, '' when it posted none.
+  commentUrl: string;
+  replyUrl: string;
   model: string;
   createdAt: string;
 }
@@ -471,6 +479,9 @@ export interface Finding {
   fingerprint: string;
   postedInline: boolean;
   forgeCommentId: number | null;
+  // threadUrl is its inline comment's thread on the forge, '' when there is
+  // none.
+  threadUrl: string;
   createdAt: string;
   reactionsUp: number;
   reactionsDown: number;
@@ -888,6 +899,8 @@ export interface SetupStatus {
   // Where each connection's webhook goes, its name appended.
   hooksUrl: string;
   connections: string[];
+  // forges are the forges the connections talk to, each once.
+  forges: Forge[];
   // review.model, '' when unset.
   reviewModel: string;
   embedding: boolean;

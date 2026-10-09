@@ -6,7 +6,7 @@ import { toast } from './toast.svelte';
 import type { ErrorCode, ManagementErrorCode } from './types';
 
 const hints: Partial<Record<ManagementErrorCode | ErrorCode, string>> = {
-  forge_error: 'GitHub refused or failed the request.',
+  forge_error: 'The forge refused or failed the request.',
   installation_served: 'The App serves this account.',
   already_queued: 'That is already queued or running; it will show up here when it finishes.',
   unauthenticated: 'Your session has ended; sign in again.',

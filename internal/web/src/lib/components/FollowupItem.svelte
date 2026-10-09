@@ -2,7 +2,9 @@
   import type { Followup } from '../types';
   import { followupTone } from '../format';
   import { href } from '../router.svelte';
-  import { pullRoute, commentUrl, threadUrl } from '../links';
+  import { pullRoute } from '../links';
+  import { safeHref } from '../markdown';
+  import { forgeName, slugForge } from '../forge';
   import Icon from '../Icon.svelte';
   import { mdiOpenInNew } from '../icons';
   import Pill from './Pill.svelte';
@@ -12,11 +14,9 @@
   let { slug, f, showPull = false }: { slug: string; f: Followup; showPull?: boolean } = $props();
   let open = $state(false);
   const id = $derived(`fu-${f.id}`);
-  // The question is where it was asked, in a thread or on the conversation,
-  // and so is its answer; the notice that a limit was reached always goes on
-  // the conversation.
-  const asked = $derived((f.inline ? threadUrl : commentUrl)(f.pullUrl, f.commentId));
-  const answered = $derived((f.inline && f.status !== 'limited' ? threadUrl : commentUrl)(f.pullUrl, f.replyCommentId));
+  const asked = $derived(safeHref(f.commentUrl));
+  const answered = $derived(safeHref(f.replyUrl));
+  const forge = $derived(forgeName(slugForge(slug)));
 </script>
 
 <li class="followup">
@@ -37,7 +37,7 @@
   {#if f.reason}<p class="small muted followup-reason">{f.reason}</p>{/if}
   <p class="small followup-links">
     {#if asked}
-      <a class="external" href={asked} target="_blank" rel="noopener noreferrer">The question on GitHub <Icon path={mdiOpenInNew} size={11} /></a>
+      <a class="external" href={asked} target="_blank" rel="noopener noreferrer">The question on {forge} <Icon path={mdiOpenInNew} size={11} /></a>
     {/if}
     {#if answered}
       <a class="external" href={answered} target="_blank" rel="noopener noreferrer">kritique's reply <Icon path={mdiOpenInNew} size={11} /></a>

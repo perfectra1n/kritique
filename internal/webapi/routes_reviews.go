@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/contextpack"
 	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/store"
@@ -77,7 +78,7 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request, t *accountSco
 		if err != nil {
 			return err
 		}
-		d = reviewDetail(rec, findings, usage)
+		d = reviewDetail(rec, t.account.Forge, findings, usage)
 		if rec.run == nil {
 			return nil
 		}
@@ -94,8 +95,9 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request, t *accountSco
 	return nil
 }
 
-func finding(f store.FindingRow) Finding {
-	return Finding{
+// finding is f as the API shows it, of a pull request at pullURL on forge.
+func finding(f store.FindingRow, forge configfile.Forge, pullURL string) Finding {
+	out := Finding{
 		ID: f.ID, Path: f.Path, Line: f.Line, EndLine: f.EndLine, Severity: f.Severity, Category: f.Category, Title: f.Title,
 		Explanation:  f.Explanation,
 		SuggestedFix: f.SuggestedFix, Replacement: f.Replacement, AgentPrompt: f.AgentPrompt, Fingerprint: f.Fingerprint,
@@ -103,9 +105,13 @@ func finding(f store.FindingRow) Finding {
 		ReactionsUp: f.ReactionsUp, ReactionsDown: f.ReactionsDown, Rules: f.Rules,
 		Status: f.Status, DismissReason: f.DismissReason,
 	}
+	if f.ForgeCommentID != nil {
+		out.ThreadURL = commentURL(forge, pullURL, *f.ForgeCommentID, true)
+	}
+	return out
 }
 
-func reviewDetail(rec reviewRecord, findings []store.FindingRow, usage []store.UsageRow) ReviewDetail {
+func reviewDetail(rec reviewRecord, forge configfile.Forge, findings []store.FindingRow, usage []store.UsageRow) ReviewDetail {
 	v := rec.review
 	d := ReviewDetail{
 		Review: ReviewInfo{
@@ -121,7 +127,7 @@ func reviewDetail(rec reviewRecord, findings []store.FindingRow, usage []store.U
 		d.Summary = &Summary{Headline: v.Summary.Headline, Take: v.Summary.Take, Praise: v.Summary.Praise, Diagram: v.Summary.Diagram}
 	}
 	for i, f := range findings {
-		d.Findings[i] = finding(f)
+		d.Findings[i] = finding(f, forge, v.URL)
 	}
 	for i, u := range usage {
 		d.Usage[i] = UsageRow{

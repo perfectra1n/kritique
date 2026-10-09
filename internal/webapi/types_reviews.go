@@ -54,7 +54,10 @@ type Finding struct {
 	Fingerprint    string          `json:"fingerprint"`
 	PostedInline   bool            `json:"postedInline"`
 	ForgeCommentID *int64          `json:"forgeCommentId"`
-	CreatedAt      time.Time       `json:"createdAt"`
+	// ThreadURL is its inline comment's thread on the forge, "" when
+	// kritique did not post one or lacks its id.
+	ThreadURL string    `json:"threadUrl"`
+	CreatedAt time.Time `json:"createdAt"`
 	// ReactionsUp and ReactionsDown count the 👍 and 👎 on its inline
 	// comment, as the poller last read them.
 	ReactionsUp   int `json:"reactionsUp"`

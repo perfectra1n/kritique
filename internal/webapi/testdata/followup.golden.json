@@ -11,6 +11,8 @@
   "status": "answered",
   "reason": "",
   "replyCommentId": 100,
+  "commentUrl": "https://git.example/alpha/one/pulls/7#discussion_r99",
+  "replyUrl": "https://git.example/alpha/one/pulls/7#discussion_r100",
   "model": "acme/large",
   "createdAt": "2026-09-01T12:00:00Z"
 }

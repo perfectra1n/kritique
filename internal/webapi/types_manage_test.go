@@ -3,6 +3,8 @@ package webapi
 import (
 	"encoding/json"
 	"maps"
+
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 var goldenUser = User{ID: "acct-1", DisplayName: "Ada", Email: "ada@example.com", AvatarURL: "https://img.example/a.png"}
@@ -18,7 +20,7 @@ func init() {
 		},
 		"setup_status": SetupStatus{
 			WebURL: "https://kritique.example", HooksURL: "https://kritique.example/hooks/", Connections: []string{"alpha-bot"},
-			ReviewModel: "openrouter/acme-large",
+			Forges: []configfile.Forge{configfile.ForgeGitHub}, ReviewModel: "openrouter/acme-large",
 		},
 		"register_result": RegisterResult{Added: 3},
 		"audit_event": AuditEvent{
