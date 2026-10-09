@@ -3,10 +3,13 @@ package github
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -216,16 +219,24 @@ func TestFileAt(t *testing.T) {
 
 func TestIssue(t *testing.T) {
 	f, c := newFakeAPI(t)
-	f.reply("GET /api/v3/repos/o/r/issues/12", 200, `{"number":12,"title":"Widgets leak","body":"Steps.","html_url":"https://github.com/o/r/issues/12"}`)
-	f.reply("GET /api/v3/repos/o/r/issues/13", 200, `{"number":13,"title":"A pull request","pull_request":{"url":"https://api.github.com/repos/o/r/pulls/13"}}`)
+	f.reply("GET /api/v3/repos/o/r/issues/12", 200, `{
+		"number":12,"title":"Widgets leak","body":"Steps.","state":"open",
+		"user":{"login":"u"},"labels":[{"name":"bug"}],"assignees":[{"login":"a"}],
+		"html_url":"https://github.com/o/r/issues/12"
+	}`)
+	f.reply("GET /api/v3/repos/o/r/issues/13", 200, `{"number":13,"title":"A pull request","state":"open",
+		"pull_request":{"url":"https://api.github.com/repos/o/r/pulls/13"},"draft":true}`)
 	f.reply("GET /api/v3/repos/o/r/issues/14", 404, `{"message":"Not Found"}`)
 	got, err := c.Issue(t.Context(), "o", "r", 12)
-	want := forge.Issue{Number: 12, Title: "Widgets leak", Body: "Steps.", URL: "https://github.com/o/r/issues/12"}
-	if err != nil || got != want {
+	want := forge.Issue{
+		Number: 12, Title: "Widgets leak", Body: "Steps.", URL: "https://github.com/o/r/issues/12",
+		State: "open", Author: "u", Labels: []string{"bug"}, Assignees: []string{"a"},
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("Issue = %+v, %v; want %+v", got, err, want)
 	}
-	if got, err := c.Issue(t.Context(), "o", "r", 13); err != nil || !got.PullRequest {
-		t.Fatalf("Issue of a pull request = %+v, %v; want PullRequest set", got, err)
+	if got, err := c.Issue(t.Context(), "o", "r", 13); err != nil || !got.PullRequest || !got.Draft {
+		t.Fatalf("Issue of a draft pull request = %+v, %v; want PullRequest and Draft set", got, err)
 	}
 	if _, err := c.Issue(t.Context(), "o", "r", 14); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Issue of an unknown number = %v, want fs.ErrNotExist", err)
@@ -589,5 +600,172 @@ func TestPullRequestReactions(t *testing.T) {
 	}
 	if err := c.UnreactToPullRequest(t.Context(), "o", "r", 7, id); err != nil || !f.saw("DELETE /api/v3/repos/o/r/issues/7/reactions/78") {
 		t.Fatalf("UnreactToPullRequest = %v, requests %v", err, f.requests)
+	}
+}
+
+func TestRepoLabelsPaginates(t *testing.T) {
+	f, c := newFakeAPI(t)
+	f.mux.HandleFunc("GET /api/v3/repos/o/r/labels", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("page") == "2" {
+			_, _ = w.Write([]byte(`[{"name":"c"}]`))
+			return
+		}
+		w.Header().Set("Link", `<`+"http://x"+r.URL.Path+`?page=2>; rel="next"`)
+		_, _ = w.Write([]byte(`[{"name":"a"},{"name":"b"}]`))
+	})
+	labels, err := c.RepoLabels(t.Context(), "o", "r")
+	if err != nil || !slices.Equal(labels, []string{"a", "b", "c"}) {
+		t.Fatalf("RepoLabels = %v, %v", labels, err)
+	}
+}
+
+func TestAddLabelsAndRemoveLabel(t *testing.T) {
+	f, c := newFakeAPI(t)
+	f.reply("POST /api/v3/repos/o/r/issues/7/labels", 200, `[{"name":"bug"}]`)
+	if err := c.AddLabels(t.Context(), "o", "r", 7, []string{"bug"}); err != nil {
+		t.Fatalf("AddLabels: %v", err)
+	}
+	body, _ := f.bodies["POST /api/v3/repos/o/r/issues/7/labels"].([]any)
+	if len(body) != 1 || body[0] != "bug" {
+		t.Fatalf("AddLabels body = %v, want a bare array", body)
+	}
+	before := len(f.requests)
+	if err := c.AddLabels(t.Context(), "o", "r", 7, nil); err != nil || len(f.requests) != before {
+		t.Fatalf("AddLabels with no labels must be a no-op: err=%v, requests before=%d after=%d", err, before, len(f.requests))
+	}
+
+	f.reply("DELETE /api/v3/repos/o/r/issues/7/labels/bug", 200, `[]`)
+	f.reply("DELETE /api/v3/repos/o/r/issues/7/labels/gone", 404, `{"message":"Label does not exist"}`)
+	f.reply("DELETE /api/v3/repos/o/r/issues/7/labels/boom", 500, `{"message":"boom"}`)
+	tests := []struct {
+		name    string
+		label   string
+		wantErr bool
+	}{
+		{"applied label removed", "bug", false},
+		{"label not applied is not an error", "gone", false},
+		{"server error is an error", "boom", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := c.RemoveLabel(t.Context(), "o", "r", 7, tt.label); (err != nil) != tt.wantErr {
+				t.Fatalf("RemoveLabel(%s) = %v, wantErr %v", tt.label, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSetState(t *testing.T) {
+	f, c := newFakeAPI(t)
+	f.reply("PATCH /api/v3/repos/o/r/issues/7", 200, `{"number":7}`)
+	tests := []struct {
+		name  string
+		open  bool
+		state string
+	}{
+		{"open", true, "open"},
+		{"closed", false, "closed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := c.SetState(t.Context(), "o", "r", 7, tt.open); err != nil {
+				t.Fatalf("SetState: %v", err)
+			}
+			body, _ := f.bodies["PATCH /api/v3/repos/o/r/issues/7"].(map[string]any)
+			if body["state"] != tt.state {
+				t.Fatalf("SetState(%v) body = %v, want state %q", tt.open, body, tt.state)
+			}
+		})
+	}
+}
+
+// TestAssigneesAndReviewers: each posts its logins, and none is no call.
+func TestAssigneesAndReviewers(t *testing.T) {
+	tests := []struct {
+		name, route, field string
+		call               func(c *Client, logins []string) error
+	}{
+		{"assignees", "POST /api/v3/repos/o/r/issues/7/assignees", "assignees", func(c *Client, logins []string) error {
+			return c.AddAssignees(t.Context(), "o", "r", 7, logins)
+		}},
+		{"reviewers", "POST /api/v3/repos/o/r/pulls/7/requested_reviewers", "reviewers", func(c *Client, logins []string) error {
+			return c.RequestReviewers(t.Context(), "o", "r", 7, logins)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, c := newFakeAPI(t)
+			f.reply(tt.route, 200, `{"number":7}`)
+			if err := tt.call(c, []string{"a"}); err != nil {
+				t.Fatalf("%s: %v", tt.name, err)
+			}
+			body, _ := f.bodies[tt.route].(map[string]any)
+			if got, _ := body[tt.field].([]any); len(got) != 1 || got[0] != "a" {
+				t.Fatalf("%s body = %v", tt.name, body)
+			}
+			before := len(f.requests)
+			if err := tt.call(c, nil); err != nil || len(f.requests) != before {
+				t.Fatalf("%s with no logins must be a no-op: err=%v", tt.name, err)
+			}
+		})
+	}
+}
+
+func TestSearchIssues(t *testing.T) {
+	item := func(repo string, n int) string {
+		return fmt.Sprintf(`{"number":%d,"title":"t%d","state":"open","user":{"login":"u"},"html_url":"https://x/%d",
+			"repository_url":"https://api.github.com/repos/%s"}`, n, n, n, repo)
+	}
+	tests := []struct {
+		name, query string
+		limit       int
+		wantQ       []string
+		want        []int
+	}{
+		{"issues and pull requests interleaved to the limit", "crash on start", 3,
+			[]string{"repo:o/r is:issue crash on start", "repo:o/r is:pull-request crash on start"}, []int{1, 10, 2}},
+		{"qualifiers are dropped", "crash repo:other/x is:closed -repo:o/r org:other", 5,
+			[]string{"repo:o/r is:issue crash", "repo:o/r is:pull-request crash"}, []int{1, 10, 2, 11}},
+		{"nothing left to search for", "repo:other/x", 5, nil, nil},
+		{"no limit, no search", "crash", 0, nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, c := newFakeAPI(t)
+			var gotQ []string
+			f.mux.HandleFunc("GET /api/v3/search/issues", func(w http.ResponseWriter, r *http.Request) {
+				q := r.URL.Query().Get("q")
+				gotQ = append(gotQ, q)
+				if got := r.URL.Query().Get("per_page"); got != strconv.Itoa(tt.limit) {
+					t.Errorf("per_page = %q", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if strings.Contains(q, "is:issue") {
+					_, _ = fmt.Fprintf(w, `{"items":[%s,%s,%s]}`, item("o/r", 1), item("other/x", 99), item("O/R", 2))
+					return
+				}
+				_, _ = fmt.Fprintf(w, `{"items":[%s,%s]}`, item("o/r", 10), item("o/r", 11))
+			})
+			iss, err := c.SearchIssues(t.Context(), "o", "r", tt.query, tt.limit)
+			if err != nil {
+				t.Fatalf("SearchIssues: %v", err)
+			}
+			var got []int
+			for _, i := range iss {
+				got = append(got, i.Number)
+			}
+			if !slices.Equal(gotQ, tt.wantQ) || !slices.Equal(got, tt.want) {
+				t.Fatalf("SearchIssues searched %q and found %v; want %q and %v", gotQ, got, tt.wantQ, tt.want)
+			}
+		})
+	}
+}
+
+func TestSearchIssuesRejected(t *testing.T) {
+	f, c := newFakeAPI(t)
+	f.reply("GET /api/v3/search/issues", 422, `{"message":"Validation Failed"}`)
+	if _, err := c.SearchIssues(t.Context(), "o", "r", "crash", 5); err == nil {
+		t.Fatal("SearchIssues succeeded on a 422")
 	}
 }

@@ -53,7 +53,7 @@ type Comment struct {
 }
 
 // Issue is an issue of a repository, as a pull request's description links
-// one it closes.
+// one it closes, or the issue or pull request a task reads and acts on.
 type Issue struct {
 	Number int
 	Title  string
@@ -63,6 +63,13 @@ type Issue struct {
 	// PullRequest is set when the number names a pull request, which the
 	// forge files among its issues.
 	PullRequest bool
+	State       string // "open" or "closed"
+	Author      string
+	Labels      []string
+	Assignees   []string
+	// Draft is whether a pull request is a draft, false for an issue and
+	// on a forge too old to report it.
+	Draft bool
 }
 
 // InlineComment is one finding attached to a line on the head side of the
@@ -141,6 +148,10 @@ const MaxFileBytes = 1 << 20
 // ErrFileTooLarge is FileAt refusing a file over MaxFileBytes.
 var ErrFileTooLarge = errors.New("forge: file is over the size limit")
 
+// ErrNoReadToken means the forge has no read-only credential to hand a
+// runner.
+var ErrNoReadToken = errors.New("forge: no read-only git token")
+
 // Client is one connection's access to its forge.
 type Client interface {
 	// MergeBase asks the forge for the merge-base of base (a branch) and
@@ -158,6 +169,11 @@ type Client interface {
 	// that can only read repo. It reaches a pod that reads untrusted
 	// content and runs commands an agent chose.
 	GitToken(ctx context.Context, repo string) (string, error)
+	// ReadGitToken is a credential that can only read owner/repo, for a
+	// runner whose agent a task drives over untrusted input: on GitHub an
+	// installation token minted for that repository alone with contents
+	// read. ErrNoReadToken when the forge has none.
+	ReadGitToken(ctx context.Context, owner, repo string) (string, error)
 	// BranchTip returns the commit a branch points at; an empty branch
 	// means the repository's default branch, whose name is also returned.
 	BranchTip(ctx context.Context, owner, repo, branch string) (sha, resolvedBranch string, err error)
@@ -248,6 +264,26 @@ type Client interface {
 	// PullRequest returns one pull request as it stands, open or closed. A
 	// missing one is fs.ErrNotExist.
 	PullRequest(ctx context.Context, owner, repo string, number int) (OpenPullRequest, error)
+
+	// RepoLabels lists the names of every label defined on the repository.
+	RepoLabels(ctx context.Context, owner, repo string) ([]string, error)
+	// AddLabels adds labels, by name, to an issue or pull request. A label
+	// already applied is not an error.
+	AddLabels(ctx context.Context, owner, repo string, number int, labels []string) error
+	// RemoveLabel removes one label, by name, from an issue or pull
+	// request. A label not currently applied is not an error.
+	RemoveLabel(ctx context.Context, owner, repo string, number int, label string) error
+	// SetState opens or closes an issue or pull request.
+	SetState(ctx context.Context, owner, repo string, number int, open bool) error
+	// AddAssignees adds logins as assignees of an issue or pull request,
+	// alongside any already assigned.
+	AddAssignees(ctx context.Context, owner, repo string, number int, logins []string) error
+	// RequestReviewers requests review from logins on a pull request.
+	RequestReviewers(ctx context.Context, owner, repo string, number int, logins []string) error
+	// SearchIssues searches issues and pull requests in one repository,
+	// returning at most limit results. The query is free text: a forge
+	// keeps the search inside owner/repo whatever qualifiers it holds.
+	SearchIssues(ctx context.Context, owner, repo, query string, limit int) ([]Issue, error)
 }
 
 // Reactions the bot leaves on a pull request it reviews and on a mention it

@@ -122,6 +122,35 @@ func TestReadOnlyToken(t *testing.T) {
 	}
 }
 
+// TestReadGitToken: a task runner's token is the same read-only mint as a
+// review runner's, for the named repository alone.
+func TestReadGitToken(t *testing.T) {
+	_, pemKey := testKeyPEM(t)
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"ghs_ro","expires_at":"` + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + `"}`))
+	}))
+	defer srv.Close()
+	app, err := NewApp("Iv1.abc", pemKey, srv.URL+"/api/v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewClient(app, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok, err := c.ReadGitToken(t.Context(), "o", "r"); err != nil || tok != "ghs_ro" {
+		t.Fatalf("ReadGitToken = %q, %v", tok, err)
+	}
+	want := `{"repositories":["r"],"permissions":{"contents":"read","metadata":"read"}}`
+	if len(bodies) != 1 || strings.TrimSpace(bodies[0]) != want {
+		t.Fatalf("mint requests = %q, want one of %s", bodies, want)
+	}
+}
+
 func TestInstallationsAndUninstall(t *testing.T) {
 	_, pemKey := testKeyPEM(t)
 	var deleted []string
