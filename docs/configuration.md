@@ -205,14 +205,14 @@ repository, and `repositories` holds the entries that change them for
 some: `owner/*` for every repository of an account, and `owner/name` for
 one. They come in five groups, with a few keys beside them:
 
-| Group        | Keys                                                                                | What they set                              |
-| ------------ | ----------------------------------------------------------------------------------- | ------------------------------------------ |
-| `review`     | `model`, `fallback`, `effort`, `fixes`, `approve`, `incremental`, `diagram`, `cost` | what a review runs on and what it says     |
-| `confidence` | `model`, `fallback`, `effort`, `threshold`, `gate`, `risk`, `instructions`          | how a review is judged                     |
-| `trigger`    | `include`, `exclude`, `settle`, `limit`                                             | which pull requests are reviewed, and when |
-| `comments`   | `inline`, `summary`, `finding`                                                      | what is posted                             |
-| `agent`      | `steps`, `output`, `tokens`, `prompt`, `timeout`, `commands`, `commandTimeout`      | the bounds of a review's tool loop         |
-| beside them  | `enabled`, `rules`, `context`, `skills`, `ignore`, and `limits` at the root alone   |                                            |
+| Group        | Keys                                                                                                     | What they set                              |
+| ------------ | -------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `review`     | `model`, `fallback`, `effort`, `fixes`, `approve`, `incremental`, `diagram`, `cost`                      | what a review runs on and what it says     |
+| `confidence` | `model`, `fallback`, `effort`, `threshold`, `gate`, `risk`, `instructions`                               | how a review is judged                     |
+| `trigger`    | `include`, `exclude`, `settle`, `limit`                                                                  | which pull requests are reviewed, and when |
+| `comments`   | `inline`, `summary`, `finding`                                                                           | what is posted                             |
+| `agent`      | `steps`, `output`, `tokens`, `prompt`, `timeout`, `commands`, `commandTimeout`                           | the bounds of a review's tool loop         |
+| beside them  | `enabled`, `rules`, `context`, `skills`, `ignore`, `tasks`, `taskBounds`, and `limits` at the root alone |                                            |
 
 `ignore` lists globs of the paths kritique never looks at: they are left out
 of a review's context and of the index, on top of kritique's own (vendored
@@ -260,15 +260,16 @@ The root and each entry take the keys a repository's own `.kritique.yaml`
 takes, which the [`.kritique.yaml` reference](repository-config.md)
 describes, and these, which are the admin's alone:
 
-| Key                       | What                                                                                                                                                                                                                                                                                |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `confidence.instructions` | guidance to the scorer on rating risk ([risk](confidence.md#risk))                                                                                                                                                                                                                  |
-| `review.cost`             | `true` ends the summary's footer with what the pull request's reviews have cost together, every model call charged to one of them. Off unless set: the comment is public, on a fork's pull request too, and the figure is the instance's spend                                      |
-| `review.incremental`      | how many files of the change may move since the last review before a re-review covers the whole pull request again; 25 unless set ([incremental reviews](#incremental-reviews))                                                                                                     |
-| `trigger.settle`          | how long a new head waits before its review starts, so a burst of pushes is reviewed once; no wait unless set                                                                                                                                                                       |
+| Key                       | What                                                                                                                                                                                                                                                                                 |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `confidence.instructions` | guidance to the scorer on rating risk ([risk](confidence.md#risk))                                                                                                                                                                                                                   |
+| `review.cost`             | `true` ends the summary's footer with what the pull request's reviews have cost together, every model call charged to one of them. Off unless set: the comment is public, on a fork's pull request too, and the figure is the instance's spend                                       |
+| `review.incremental`      | how many files of the change may move since the last review before a re-review covers the whole pull request again; 25 unless set ([incremental reviews](#incremental-reviews))                                                                                                      |
+| `trigger.settle`          | how long a new head waits before its review starts, so a burst of pushes is reviewed once; no wait unless set                                                                                                                                                                        |
 | `trigger.limit`           | how many automatic reviews a pull request gets before kritique pauses them, so a long-lived pull request stops spending on every push; unlimited unless set. The summary of the last one says so, and `@<app slug> review` and `resume` still work ([commands](reviews.md#commands)) |
-| `agent`                   | the bounds of a review's tool loop ([the agent](#the-agent))                                                                                                                                                                                                                        |
-| `limits`                  | at the root alone: every account's limits ([`accounts`](#accounts))                                                                                                                                                                                                                 |
+| `agent`                   | the bounds of a review's tool loop ([the agent](#the-agent))                                                                                                                                                                                                                         |
+| `taskBounds`              | what [event tasks](tasks.md) may do, and whether they run at all ([tasks](#tasks-and-taskbounds))                                                                                                                                                                                    |
+| `limits`                  | at the root alone: every account's limits ([`accounts`](#accounts))                                                                                                                                                                                                                  |
 | `enabled`                 | at the root and `owner/*` only: where repositories start ([which repositories run](#which-repositories-run)). A repository's `.kritique.yaml` can only set `enabled: false`, which turns its own repository off                                                                      |
 
 ### Precedence
@@ -277,7 +278,7 @@ A value applies in this order: kritique's default, the file's root,
 `owner/*`, `owner/name`, and the repository's `.kritique.yaml`. A narrower
 value replaces the broader one's, except:
 
-| Key                                  | Across the root, `owner/*` and `owner/name`                              | From a `.kritique.yaml`                                            |
+| Key                                  | Across the root, `owner/*` and `owner/name`                              | From a `.kritique.yaml`                                           |
 | ------------------------------------ | ------------------------------------------------------------------------ | ----------------------------------------------------------------- |
 | `ignore`                             | globs add up                                                             | globs add up                                                      |
 | `rules`                              | add up by id                                                             | added; a rule under an admin's id is dropped                      |
@@ -288,6 +289,8 @@ value replaces the broader one's, except:
 | `review.fixes`                       | replaces                                                                 | can only turn it on                                               |
 | `confidence.risk`                    | replaces                                                                 | can only lower it                                                 |
 | `enabled`                            | replaces                                                                 | can only turn it off                                              |
+| `tasks`                              | add up by name; `enabled: false` switches one off                        | added after; one under an admin's task's name is dropped          |
+| `taskBounds`                         | replaces key by key                                                      | the admin's alone                                                 |
 
 ### Confidence and risk
 
@@ -470,6 +473,33 @@ a new title.
   such as the upstream of a dependency on any host.
   [Runner tools](security.md#runner-tools) says what bounds a command and
   a fetch.
+
+### Tasks and `taskBounds`
+
+`tasks` declares [event tasks](tasks.md): a prompt run when a forge event
+fires, such as a new issue or a published release, whose answer may
+comment, label, assign or close within what the task declares.
+`taskBounds` turns them on and bounds them, key by key at every scope;
+tasks are off, the admin's own included, until `enabled: true`.
+
+```yaml
+taskBounds:
+  enabled: true
+  events: ["issue.*", "pull_request.*", "comment.*", "raw:release.*"]
+tasks:
+  - name: welcome
+    on: [{ pull_request: [opened] }]
+    mode: single
+    actions: { comment: {} }
+repositories:
+  org-1/*:
+    taskBounds: { repository: false }
+```
+
+The admin's tasks merge by name across the root, `owner/*` and
+`owner/name`, and are trusted; a repository's `.kritique.yaml` adds its own
+after them, clipped to `taskBounds` and held to the admin's models,
+`agent` limits and `agent.commands` ([bounds](tasks.md#bounds)).
 
 ### Environment variables
 

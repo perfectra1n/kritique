@@ -126,6 +126,7 @@ nav:
       - Configuration file: configuration.md
       - Models: models.md
       - Repository settings: repository-config.md
+      - Event tasks: tasks.md
       - Helm chart values: chart-values.md
   - Using kritique:
       - Reviews: reviews.md
@@ -133,3 +134,5 @@ nav:
       - Dashboard: dashboard.md
       - Metrics: metrics.md
   - Development: development.md
+  - Design decisions:
+      - "ADR-0001: Event tasks": adr/0001-event-tasks.md

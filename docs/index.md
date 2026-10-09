@@ -74,6 +74,12 @@ flowchart LR
   a repository keeps under `.agents/skills` and `.claude/skills`, by name and
   description, and reads one when it fits the pull request; they are read
   from the merge-base and grant no tool or command.
+- **Event tasks, opt-in.** An admin, or a repository, declares tasks that
+  run a prompt when a forge event fires, such as triaging a new issue,
+  labelling a pull request by area or summarizing a release. The model
+  answers with the fields and actions the task declares, and kritique checks
+  each label, comment, assignee or state change before applying it
+  ([event tasks](tasks.md)).
 - **Configuration in git.** One YAML file holds the whole configuration, read
   at startup, and a change rolls the pods; secrets stay in Secrets, which reach
   kritique as environment variables.
@@ -94,6 +100,8 @@ flowchart LR
   embedder, local models and OpenCode.
 - **[Repository settings](repository-config.md)**: what a repository's
   `.kritique.yaml` can change.
+- **[Event tasks](tasks.md)**: tasks that run when a forge event fires,
+  their bounds and tested recipes.
 - **[Helm chart values](chart-values.md)**: the chart's values, grouped.
 - **[Reviews](reviews.md)**: when a review runs, what it posts, and the
   commands that steer it.

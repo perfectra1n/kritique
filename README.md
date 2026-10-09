@@ -73,6 +73,12 @@ its own Kubernetes Job pod that holds no provider key or App key.
   a repository keeps under `.agents/skills` and `.claude/skills`, by name and
   description, and reads one when it fits the pull request; they are read
   from the merge-base and grant no tool or command.
+- **Event tasks, opt-in.** An admin, or a repository, declares tasks that
+  run a prompt when a forge event fires, such as triaging a new issue,
+  labelling a pull request by area or summarizing a release. The model
+  answers with the fields and actions the task declares, and kritique checks
+  each label, comment, assignee or state change before applying it. See
+  [event tasks](https://kritique.perfectra1n.github.io/tasks/).
 - **Configuration in git.** One YAML file holds the whole configuration,
   read at startup, and a change rolls the pods; secrets stay in Secrets,
   which reach kritique as environment variables.
@@ -122,6 +128,7 @@ runner holds, the gateway and the sandbox.
 | [Configuration](https://kritique.perfectra1n.github.io/configuration/)                  | the configuration file: sign-in, GitHub Apps, repository settings, accounts and egress      |
 | [Models](https://kritique.perfectra1n.github.io/models/)                                | providers and their keys, retries, fallback, the embedder, local models and OpenCode        |
 | [`.kritique.yaml` reference](https://kritique.perfectra1n.github.io/repository-config/) | what a repository's own file can change                                                     |
+| [Event tasks](https://kritique.perfectra1n.github.io/tasks/)                            | tasks that run a prompt when a forge event fires, their bounds and tested recipes           |
 | [Security](https://kritique.perfectra1n.github.io/security/)                            | hardening an install, what a runner holds, the egress gateway, runner tools and the sandbox |
 | [Chart values](charts/kritique/README.md)                                               | every value of the Helm chart                                                               |
 | [Reviews](https://kritique.perfectra1n.github.io/reviews/)                              | when a review runs, what it posts, and the commands that steer it                           |
