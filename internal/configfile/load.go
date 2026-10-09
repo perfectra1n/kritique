@@ -520,6 +520,12 @@ func (f *File) validateOverrides(where string, t *Account, r *Overrides) error {
 	if err := validateAgent(where, r.Agent); err != nil {
 		return err
 	}
+	if err := f.validateTasks(where, t, r.Tasks); err != nil {
+		return err
+	}
+	if err := validateTaskBounds(where+"taskBounds", r.TaskBounds); err != nil {
+		return err
+	}
 	return validateReview(where, r)
 }
 

@@ -24,6 +24,7 @@ import (
 	"github.com/perfectra1n/kritique/internal/egress"
 	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // ProviderType selects the model adapter a provider uses.
@@ -234,6 +235,12 @@ type Overrides struct {
 	// context and of the index; a pull request that changes nothing else
 	// is skipped. They add to the broader scope's.
 	Ignore []string `yaml:"ignore,omitempty"`
+	// Tasks are the operator's own event tasks. They merge by name: a task
+	// a narrower scope writes replaces the broader scope's of that name,
+	// and one with enabled false switches it off.
+	Tasks []tasks.Task `yaml:"tasks,omitempty"`
+	// TaskBounds bound tasks, the repository's and the operator's own.
+	TaskBounds TaskBounds `yaml:"taskBounds,omitempty"`
 }
 
 // ReviewSpec sets how a review is done at one scope: its models, a role
@@ -762,4 +769,13 @@ type Settings struct {
 	// the instance's and its own, sorted: the ones a .kritique.yaml may
 	// choose a model of.
 	Providers []string
+	// Tasks are the operator's event tasks that are switched on, merged
+	// by name across scopes; repoconfig.MergeTasks clips them and adds the
+	// repository's.
+	Tasks []tasks.Task
+	// TaskBounds are the scopes' taskBounds with every default applied.
+	TaskBounds tasks.Bounds
+
+	// taskBounds are the bounds as the scopes write them, before defaults.
+	taskBounds TaskBounds
 }

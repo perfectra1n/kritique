@@ -83,7 +83,7 @@ func Clip(ts []Task, b Bounds, fromRepository bool) (kept []Task, notes []Note) 
 			kept = append(kept, t)
 			continue
 		case !b.RepositoryTasks:
-			notes = append(notes, Note{t.Name, noteTask, "the operator does not allow repository tasks"})
+			notes = append(notes, Note{t.Name, noteTask, "an admin does not allow repository tasks"})
 			continue
 		case len(kept) >= b.MaxTasks:
 			notes = append(notes, Note{t.Name, noteTask, fmt.Sprintf("over the limit of %d tasks", b.MaxTasks)})
@@ -174,7 +174,7 @@ func clipTask(t Task, b Bounds) (Task, []Note) {
 		t.Agent.Tools = tools
 	}
 	if t.System != "" && !b.SystemPrompt {
-		note("system", "the operator does not allow a task to add to the system prompt")
+		note("system", "an admin does not allow a task to add to the system prompt")
 		t.System = ""
 	}
 	if len(t.Fields) > b.MaxFields {

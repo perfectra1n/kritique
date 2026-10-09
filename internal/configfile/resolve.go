@@ -90,6 +90,8 @@ func (f *File) Settings(a *Account, fullName string) Settings {
 		s.apply(&r.Overrides)
 	}
 	s.Limits.Concurrency = cmp.Or(s.Limits.Concurrency, DefaultConcurrency)
+	s.Tasks = enabledTasks(s.Tasks)
+	s.TaskBounds = s.taskBounds.Resolve()
 	return s
 }
 
@@ -201,6 +203,8 @@ func (s *Settings) apply(o *Overrides) {
 	s.trigger(o)
 	s.Agent = s.Agent.overlay(o.Agent)
 	s.Review = s.Review.overlay(o)
+	s.Tasks = WithTasks(s.Tasks, o.Tasks)
+	s.taskBounds = s.taskBounds.overlay(o.TaskBounds)
 }
 
 // trigger lays one scope's trigger keys over s.

@@ -10,6 +10,7 @@ import (
 
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // Merged is the admin's settings with the merge-base FileName applied.
@@ -21,6 +22,10 @@ type Merged struct {
 	// Dropped says which of the file's values fell outside the admin's
 	// bounds; the admin's value applies for each.
 	Dropped []string
+	// TaskNotes say what of the admin's and the file's tasks the task
+	// bounds left out. Settings.Tasks holds the tasks that run: the
+	// admin's, then the file's.
+	TaskNotes []tasks.Note
 }
 
 // Merge applies doc, the merge-base FileName or nil when the repository has
@@ -30,7 +35,9 @@ type Merged struct {
 // appends its context files and rules to the
 // admin's, may only turn review.fixes on and lower confidence.risk, and replaces the models,
 // their effort, the confidence threshold, how the review comments,
-// whether it approves and whether its summary draws a diagram. A model must be one of a provider
+// whether it approves and whether its summary draws a diagram. It adds its
+// tasks after the admin's, clipped to the admin's task bounds (TaskNotes
+// says what was left out). A model must be one of a provider
 // op.Providers names, and an effort one of model.Efforts or empty, which
 // leaves it to the provider. A value it may not take is dropped, and
 // Dropped says so. A file that does not parse is ignored as a whole: op stands, and the
@@ -40,6 +47,7 @@ func Merge(doc []byte, op configfile.Settings) (Merged, error) {
 	op.Review.Context = slices.Clone(op.Review.Context)
 	op.Review.Rules = slices.Clone(op.Review.Rules)
 	m := Merged{Settings: op}
+	m.mergeTasks(&File{}, &op)
 	if doc == nil {
 		return m, nil
 	}
@@ -47,6 +55,7 @@ func Merge(doc []byte, op configfile.Settings) (Merged, error) {
 	if err != nil {
 		return m, err
 	}
+	m.mergeTasks(&f, &op)
 	if f.Enabled != nil && !*f.Enabled {
 		m.Enabled = false
 	}
