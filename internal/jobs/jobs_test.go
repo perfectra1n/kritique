@@ -172,3 +172,24 @@ func TestIndexArgsPriorities(t *testing.T) {
 		t.Fatalf("priorities = %v, want push before reindex before onboard (lower runs first)", priority)
 	}
 }
+
+func TestTaskArgsUniqueTags(t *testing.T) {
+	tests := []struct {
+		name string
+		args any
+		want map[string]bool
+	}{
+		{"dispatch", TaskDispatchArgs{}, map[string]bool{"EventID": true}},
+		{"task", TaskArgs{}, map[string]bool{"EventID": true, "Task": true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := uniqueFields(tt.args); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("river:\"unique\" fields = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	if TaskArgs.InsertOpts(TaskArgs{}).Queue != QueueTask || TaskDispatchArgs.InsertOpts(TaskDispatchArgs{}).Queue != QueueTask {
+		t.Fatal("task jobs go to the task queue")
+	}
+}
