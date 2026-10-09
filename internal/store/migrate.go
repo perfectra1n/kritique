@@ -150,7 +150,11 @@ func (s *Store) grant(ctx context.Context, appRole, runnerRole string) error {
 		// account content gated by its own account_isolation policy.
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON users, identities, sessions, login_states TO ` + app,
 		`GRANT SELECT, INSERT ON audit_events TO ` + app,
+		// The audit log is append-only; a database migrated from before
+		// 0015 still has the update and delete its old grant gave.
+		`REVOKE UPDATE, DELETE ON audit_events FROM ` + app,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON model_calls TO ` + app,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON task_events, task_runs TO ` + app,
 		// The runner role sees only its own job through the runner_job
 		// policies; it needs the table privileges those policies gate. On
 		// runner_runs it may update only what a runner reports, never the
