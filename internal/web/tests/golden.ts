@@ -44,6 +44,9 @@ export const appInstallation = golden<T.AppInstallation>('app_installation');
 export const setupStatus = golden<T.SetupStatus>('setup_status');
 export const auditEvent = golden<T.AuditEvent>('audit_event');
 export const accepted = golden<T.Accepted>('accepted');
+export const taskRun = golden<T.TaskRun>('task_run');
+export const taskRunDetail = golden<T.TaskRunDetail>('task_run_detail');
+export const repoTasks = golden<T.RepoTasks>('repo_tasks');
 
 export const SLUG = me.accounts[0]!;
 
@@ -93,6 +96,10 @@ export function defaultApi(): [RegExp, Body][] {
     [/\/api\/v1\/admin\/setup$/, setupStatus],
     [new RegExp(`${t}/repos$`), repoPage],
     [new RegExp(`${t}/repos/alpha/one$`), repoDetail],
+    [new RegExp(`${t}/repos/alpha/one/tasks$`), repoTasks],
+    [new RegExp(`${t}/task-runs$`), pageOf([taskRun])],
+    [new RegExp(`${t}/task-runs/${taskRun.id}$`), taskRunDetail],
+    [new RegExp(`${t}/task-runs/${taskRun.id}/transcript$`), transcript],
     [
       new RegExp(`${t}/pulls$`),
       (u: URL) => (u.searchParams.get('cursor') ? pageOf([{ ...pull, number: 8, title: 'More widgets', url: pull.url.replace(/\d+$/, '8') }]) : pageOf([pull], repoPage.nextCursor)),

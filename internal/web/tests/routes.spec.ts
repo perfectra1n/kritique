@@ -27,6 +27,9 @@ const ROUTES: Route[] = [
   { name: 'queue', slug: 'github/acme' },
   { name: 'usage', slug: 'github/acme' },
   { name: 'followups', slug: 'github/acme' },
+  { name: 'tasks', slug: 'github/acme' },
+  { name: 'tasks', slug: 'github/acme', filter: { repo: 'kritique/kritique', task: 'triage', status: 'failed' } },
+  { name: 'taskRun', slug: 'github/acme', id: 'tr 1/2' },
   { name: 'admin', slug: 'github/acme' },
   { name: 'admin', slug: 'github/acme', section: 'tokens' },
   // segments containing characters that must round-trip through
@@ -85,6 +88,9 @@ const MALFORMED: [string, Route][] = [
   // The pull list keeps only the filters it knows, and none that are a default.
   ['#/a/github/acme/pulls?state=open&outcome=bogus&repo=&other=1', { name: 'pulls', slug: 'github/acme' }],
   ['#/a/github/acme/pulls/?state=closed&outcome=bogus', { name: 'pulls', slug: 'github/acme', filter: { state: 'closed' } }],
+  // The task run list keeps only the statuses it knows.
+  ['#/a/github/acme/tasks?status=bogus&task=triage', { name: 'tasks', slug: 'github/acme', filter: { task: 'triage' } }],
+  ['#/a/github/acme/tasks/tr-1/extra', { name: 'account', slug: 'github/acme' }],
 ];
 
 test.describe('routes: parse() on unknown/malformed hashes', () => {
@@ -116,6 +122,8 @@ test('switching account keeps the page, and a record gives way to its list', () 
     [{ name: 'pull', slug: a, owner: 'acme', repo: 'one', number: 7 }, { name: 'pulls', slug: b }],
     [{ name: 'review', slug: a, id: 'r1', tab: 'diff' }, { name: 'pulls', slug: b }],
     [{ name: 'repo', slug: a, owner: 'acme', repo: 'one' }, { name: 'repos', slug: b }],
+    [{ name: 'tasks', slug: a, filter: { task: 'triage' } }, { name: 'tasks', slug: b }],
+    [{ name: 'taskRun', slug: a, id: 'tr-1' }, { name: 'tasks', slug: b }],
     [{ name: 'admin', slug: a, section: 'audit' }, { name: 'admin', slug: b, section: 'audit' }],
     [{ name: 'instanceQueue' }, { name: 'queue', slug: b }],
     [{ name: 'overview' }, { name: 'account', slug: b }],

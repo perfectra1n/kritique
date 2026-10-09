@@ -19,6 +19,7 @@
     mdiConsoleLine,
     mdiTrayFull,
     mdiSourcePull,
+    mdiRobotOutline,
     mdiScaleBalance,
     mdiCogOutline,
     mdiAccountOutline,
@@ -97,6 +98,7 @@
   const sectionIcon: Record<Section, string> = {
     analytics: mdiChartBoxOutline,
     pulls: mdiSourcePull,
+    tasks: mdiRobotOutline,
     rules: mdiScaleBalance,
     settings: mdiCogOutline,
   };

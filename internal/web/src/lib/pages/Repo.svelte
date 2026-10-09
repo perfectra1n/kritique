@@ -3,7 +3,7 @@
   import { href } from '../router.svelte';
   import { Resource, live } from '../resource.svelte';
   import { duration, indexTone, shortSha, bytes, wholeNumber } from '../format';
-  import type { Condition, ConfigSource, Page, Pull, RepoDetail, RepoSettings, SkillScope } from '../types';
+  import type { Condition, ConfigSource, Page, Pull, RepoDetail, RepoSettings, RepoTasks, SkillScope } from '../types';
   import StateView from '../components/StateView.svelte';
   import Pill from '../components/Pill.svelte';
   import Time from '../components/Time.svelte';
@@ -26,21 +26,31 @@
     ),
   );
 
+  const tasks = new Resource(() =>
+    getJSON<RepoTasks>(`${account}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tasks`),
+  );
+
   $effect(() => {
     void res.load();
   });
   $effect(() => {
     void pulls.load();
   });
+  $effect(() => {
+    void tasks.load();
+  });
   $effect(() =>
     live(
       (e) => e.account === slug && e.kind !== 'model_call',
-      () => {
+      (dirty) => {
         void res.load();
         void pulls.load();
+        // A task dispatch records the default branch's .kritique.yaml.
+        if (dirty.has('task_run') || dirty.has('resync')) void tasks.load();
       },
     ),
   );
+  const when = (cs: { expr: string }[]) => cs.map((c) => c.expr).join(' or ') || 'always';
 
   const list = (xs: string[]) => (xs.length ? xs.join(', ') : '—');
   const tests = (c: Condition) => [c.expr, c.paths?.length ? `paths ${c.paths.join(', ')}` : ''].filter(Boolean).join(' && ');
@@ -265,6 +275,73 @@
         </section>
       {/snippet}
     </StateView>
+
+    <section class="panel" aria-labelledby="repo-tasks">
+      <header class="panel-head">
+        <h2 id="repo-tasks">Tasks</h2>
+        <a class="small" href={href({ name: 'tasks', slug, filter: { repo: fullName } })}>Task runs</a>
+      </header>
+      <StateView res={tasks} retry={() => tasks.load()}>
+        {#snippet children(t)}
+          {#if !t.enabled}
+            <p class="state-msg" data-testid="tasks-off">
+              Tasks are off: no task runs until an admin sets <span class="mono">taskBounds.enabled</span>, for this repository or a scope
+              above it.
+            </p>
+          {:else}
+            <p class="panel-body muted small" data-testid="tasks-source">
+              {#if t.source === 'defaultBranch'}
+                Resolved from the <span class="mono">.kritique.yaml</span> at the default branch tip
+                <span class="mono" title={t.commit}>{shortSha(t.commit)}</span>, as a task event read it <Time iso={t.resolvedAt} />{t.found
+                  ? ''
+                  : '; there was no file at that commit'}.
+              {:else if t.source === 'lastReview'}
+                No task event has been handled yet; resolved from the <span class="mono">.kritique.yaml</span> the last review read at
+                <span class="mono" title={t.commit}>{shortSha(t.commit)}</span>. Tasks run from the default branch tip.
+              {:else}
+                No task event has been handled yet, and no review has read a <span class="mono">.kritique.yaml</span>: these are the admin's
+                tasks alone.
+              {/if}
+            </p>
+            {#if t.ignored}
+              <p class="notice" role="note" data-testid="tasks-ignored">Ignored as a whole: {t.ignored}</p>
+            {/if}
+            {#if t.tasks.length === 0}
+              <p class="state-msg">No tasks are defined for this repository.</p>
+            {:else}
+              <div class="table-wrap">
+                <table class="data">
+                  <thead>
+                    <tr>
+                      <th scope="col">Task</th><th scope="col">Defined in</th><th scope="col">Runs on</th>
+                      <th scope="col">When</th><th scope="col">Mode</th><th scope="col">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each t.tasks as task (task.name)}
+                      <tr>
+                        <td class="mono"><a href={href({ name: 'tasks', slug, filter: { repo: fullName, task: task.name } })}>{task.name}</a></td>
+                        <td>{sourceLabel[task.source]}</td>
+                        <td class="mono small">{list(task.triggers)}</td>
+                        <td class="mono small">{when(task.when)}</td>
+                        <td>{task.mode}</td>
+                        <td class="mono small">{task.actions.length ? list(task.actions) : 'report only'}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {/if}
+            {#if t.notes.length}
+              <h3 class="subhead">Left out by the admin's task bounds</h3>
+              <ul class="plain-list" data-testid="tasks-notes">
+                {#each t.notes as note, i (i)}<li class="small"><span class="mono">{note.task}</span>: {note.what}: {note.reason}</li>{/each}
+              </ul>
+            {/if}
+          {/if}
+        {/snippet}
+      </StateView>
+    </section>
 
     <section class="panel" aria-labelledby="repo-pulls">
       <header class="panel-head">

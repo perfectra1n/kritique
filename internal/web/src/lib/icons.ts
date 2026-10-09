@@ -44,6 +44,7 @@ export {
   mdiFileDocumentOutline,
   mdiThumbUpOutline,
   mdiThumbDownOutline,
+  mdiRobotOutline,
 } from '@mdi/js';
 
 import { siGithub } from 'simple-icons';

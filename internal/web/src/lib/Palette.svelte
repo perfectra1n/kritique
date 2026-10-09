@@ -28,6 +28,7 @@
     mdiBugOutline,
     mdiChartBoxOutline,
     mdiScaleBalance,
+    mdiRobotOutline,
   } from './icons';
 
   let { me }: { me: Me | undefined } = $props();
@@ -87,6 +88,7 @@
         { label: 'Queue', hint: slug, route: { name: 'queue', slug }, icon: mdiTrayFull },
         { label: 'Spend', hint: slug, route: { name: 'usage', slug }, icon: mdiCurrencyUsd, keywords: 'usage cost tokens' },
         { label: 'Follow-ups', hint: slug, route: { name: 'followups', slug }, icon: mdiClipboardTextClockOutline },
+        { label: 'Task runs', hint: slug, route: { name: 'tasks', slug }, icon: mdiRobotOutline, keywords: 'tasks triage issues events' },
       );
       if (me?.admin) {
         entries.push({ label: 'Audit log', hint: slug, route: { name: 'admin', slug, section: 'audit' }, icon: mdiClipboardTextClockOutline, keywords: 'history' });

@@ -20,6 +20,8 @@
 //   #/a/<slug>/queue                          run queue
 //   #/a/<slug>/usage                          usage/cost dashboard
 //   #/a/<slug>/followups                      follow-up tracker
+//   #/a/<slug>/tasks[?<filter>]               account's task runs; filter is a TaskRunFilter
+//   #/a/<slug>/tasks/<id>                     one task run
 //   #/a/<slug>/admin[/<section>]              an account's settings: its configuration or audit log
 //
 // Segments round-trip through encodeURIComponent/decodeURIComponent, so a
@@ -34,7 +36,7 @@
 // otherwise, including when the malformation is what prevents the slug
 // itself from being parsed (e.g. "#/a//acme").
 
-import type { FindingStatus, ReviewStatus, Severity, Category } from './types';
+import type { FindingStatus, ReviewStatus, Severity, Category, TaskRunStatus } from './types';
 import { SEVERITIES, CATEGORIES } from './format';
 
 export const REVIEW_TABS = ['summary', 'diff', 'conversation', 'timeline', 'raw', 'usage'] as const;
@@ -114,6 +116,27 @@ export function findingFilter(f: {
   return Object.keys(out).length ? out : undefined;
 }
 
+// TaskRunFilter is the task run list's filters, in the hash's query like a
+// PullFilter's; a field is present only when it narrows the list.
+export interface TaskRunFilter {
+  repo?: string;
+  task?: string;
+  status?: TaskRunStatus;
+}
+
+export const TASK_RUN_STATUSES: readonly TaskRunStatus[] = ['queued', 'running', 'succeeded', 'failed', 'skipped'];
+
+// taskRunFilter drops the fields of f that match everything; undefined
+// when nothing is left.
+export function taskRunFilter(f: { repo?: string; task?: string; status?: string }): TaskRunFilter | undefined {
+  const out: TaskRunFilter = {};
+  if (f.repo) out.repo = f.repo;
+  if (f.task) out.task = f.task;
+  const status = TASK_RUN_STATUSES.find((s) => s === f.status);
+  if (status) out.status = status;
+  return Object.keys(out).length ? out : undefined;
+}
+
 export type Route =
   | { name: 'overview' }
   | { name: 'signin' }
@@ -132,6 +155,8 @@ export type Route =
   | { name: 'queue'; slug: string }
   | { name: 'usage'; slug: string }
   | { name: 'followups'; slug: string }
+  | { name: 'tasks'; slug: string; filter?: TaskRunFilter }
+  | { name: 'taskRun'; slug: string; id: string }
   | { name: 'admin'; slug: string; section?: string };
 
 const PULL_NUMBER = /^\d+$/;
@@ -209,6 +234,13 @@ function parseAccountRoute(slug: string, rest: string[], query: URLSearchParams)
     case 'followups':
       if (tail.length === 0) return { name: 'followups', slug };
       break;
+    case 'tasks':
+      if (tail.length === 0) {
+        const filter = taskRunFilter(Object.fromEntries(query));
+        return filter ? { name: 'tasks', slug, filter } : { name: 'tasks', slug };
+      }
+      if (tail.length === 1) return { name: 'taskRun', slug, id: tail[0]! };
+      break;
     case 'admin':
       if (tail.length === 0) return { name: 'admin', slug };
       if (tail.length === 1) return { name: 'admin', slug, section: tail[0] };
@@ -284,6 +316,12 @@ export function href(r: Route): string {
       return `#/a/${slugPath(r.slug)}/usage`;
     case 'followups':
       return `#/a/${slugPath(r.slug)}/followups`;
+    case 'tasks': {
+      const query = new URLSearchParams(Object.entries(r.filter ?? {})).toString();
+      return `#/a/${slugPath(r.slug)}/tasks${query ? `?${query}` : ''}`;
+    }
+    case 'taskRun':
+      return `#/a/${slugPath(r.slug)}/tasks/${s(r.id)}`;
     case 'admin':
       return r.section ? `#/a/${slugPath(r.slug)}/admin/${s(r.section)}` : `#/a/${slugPath(r.slug)}/admin`;
   }

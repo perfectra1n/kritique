@@ -6,7 +6,7 @@
 // import it.
 import type { Route } from './routes';
 
-export type Section = 'analytics' | 'pulls' | 'rules' | 'settings';
+export type Section = 'analytics' | 'pulls' | 'tasks' | 'rules' | 'settings';
 
 type Name = Route['name'];
 
@@ -21,11 +21,12 @@ interface SectionDef {
 export const SECTIONS: Record<Section, SectionDef> = {
   analytics: { label: 'Analytics', names: ['account', 'findings', 'usage'], home: (slug) => ({ name: 'account', slug }) },
   pulls: { label: 'Pull requests', names: ['pulls', 'pull', 'review', 'queue', 'followups'], home: (slug) => ({ name: 'pulls', slug }) },
+  tasks: { label: 'Tasks', names: ['tasks', 'taskRun'], home: (slug) => ({ name: 'tasks', slug }) },
   rules: { label: 'Rules', names: ['rules'], home: (slug) => ({ name: 'rules', slug }) },
   settings: { label: 'Settings', names: ['repos', 'repo', 'admin'], home: (slug) => ({ name: 'repos', slug }) },
 };
 
-export const SECTION_ORDER: readonly Section[] = ['analytics', 'pulls', 'rules', 'settings'];
+export const SECTION_ORDER: readonly Section[] = ['analytics', 'pulls', 'tasks', 'rules', 'settings'];
 
 export function sectionOf(r: Route): Section | undefined {
   return SECTION_ORDER.find((s) => SECTIONS[s].names.includes(r.name));
@@ -84,6 +85,7 @@ export function pageIn(r: Route, slug: string): Route {
     case 'pulls':
     case 'queue':
     case 'followups':
+    case 'tasks':
     case 'rules':
     case 'repos':
       return { name: r.name, slug };
@@ -92,6 +94,8 @@ export function pageIn(r: Route, slug: string): Route {
     case 'pull':
     case 'review':
       return { name: 'pulls', slug };
+    case 'taskRun':
+      return { name: 'tasks', slug };
     case 'repo':
       return { name: 'repos', slug };
     case 'instanceQueue':
