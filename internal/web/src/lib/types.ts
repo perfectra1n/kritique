@@ -2,29 +2,36 @@
 // JSON names in internal/webapi/testdata/*.golden.json. Timestamps are
 // RFC 3339 strings; null means "none".
 
-export type TenantRole = 'admin' | 'member';
-export type TenantManagedBy = 'file' | 'dashboard';
+// Where a connection is declared: the configuration file (or its
+// environment), or the dashboard.
 
-export interface TenantMembership {
-  slug: string;
-  role: TenantRole;
-  managedBy: TenantManagedBy;
-}
-
-export interface Account {
+// A person signed in to the dashboard.
+export interface User {
   id: string;
   displayName: string;
   email: string;
   avatarUrl: string;
 }
 
+// admin administers the instance and every account; accounts are the slugs
+// ("<forge>/<name>") of the accounts the viewer may read.
 export interface Me {
-  account: Account;
-  operator: boolean;
-  tenants: TenantMembership[];
+  user: User;
+  admin: boolean;
+  accounts: string[];
+  settings: UserSettings;
 }
 
-export type SignInProviderType = 'oidc' | 'github' | 'forgejo' | 'gitea';
+// What a user chose for their own dashboard; '' leaves the choice to the
+// browser. timeZone is an IANA zone name.
+export interface UserSettings {
+  timeZone: string;
+  clock: '' | '12' | '24';
+  theme: '' | 'light' | 'dark';
+}
+
+// local is the admin's username and password form, posted to /auth/local.
+export type SignInProviderType = 'local' | 'oidc' | 'github';
 
 export interface SignInProvider {
   name: string;
@@ -46,7 +53,6 @@ export type ErrorCode = 'not_found' | 'bad_request' | 'invalid_cursor' | 'ambigu
 export interface ErrorBody {
   code: ErrorCode | string;
   message: string;
-  details?: unknown;
 }
 
 export type ReviewStatus =
@@ -58,14 +64,13 @@ export type ReviewStatus =
   | 'capped'
   | 'failed'
   | 'canceled';
-export type ReviewMode = 'single' | 'agentic';
 export type ReviewScope = 'full' | 'incremental';
-export type SkipReason = '' | 'disabled' | 'filtered' | 'only_skipped_paths';
+// The repository's own reasons, then the runner's.
+export type SkipReason = '' | 'disabled' | 'filtered' | 'only_skipped_paths' | 'unchanged_patch' | 'too_large';
 export type Severity = 'blocking' | 'important' | 'nit';
 export type IndexRunStatus = 'running' | 'completed' | 'failed' | 'superseded';
 export type FollowupStatus = 'answered' | 'limited' | 'ignored' | 'failed';
-export type Forge = 'github' | 'gitlab' | 'forgejo' | 'gitea';
-export type CredentialKind = 'app' | 'token';
+export type Forge = 'github' | 'forgejo' | 'gitea';
 export type UsageGroup = 'day' | 'model' | 'repo' | 'role';
 export type JobState =
   | 'available'
@@ -76,58 +81,79 @@ export type JobState =
   | 'completed'
   | 'cancelled'
   | 'discarded';
+// Why a job's last attempt failed, where the server can tell; '' otherwise.
+export type JobCause = 'forge_unavailable';
 export type EventKind = 'review' | 'runner_run' | 'index_run' | 'followup' | 'model_call' | 'task_run';
-export type TranscriptKind = 'agent_step' | 'review' | 'fallback' | 'followup' | 'task';
+export type TranscriptKind = 'agent_step' | 'followup' | 'confidence' | 'merge' | 'task';
 export type MessageRole = 'user' | 'assistant';
 
+// reviews are the ones that completed this month, reviewCostUsd what they
+// cost together, medianReviewCostUsd the median cost of one, null when none
+// completed.
 export interface MonthUsage {
   tokens: number;
   costUsd: number;
   tokensPerMonth: number;
   reviewsToday: number;
   reviewsPerDay: number;
+  reviews: number;
+  reviewCostUsd: number;
+  medianReviewCostUsd: number | null;
 }
 
-export interface TenantSummary {
+// forge is the forge the account is on, connection names the connection
+// serving it. attention and the
+// three times are its health: what wants a look, when the connection's
+// webhook last delivered, verified and unsigned, and when the account was
+// last polled, each null for never.
+export interface AccountSummary {
   slug: string;
-  managedBy: TenantManagedBy;
-  role: TenantRole;
-  installations: number;
+  forge: Forge;
+  connection: string;
   repositories: number;
   reviews7d: number;
   usage: MonthUsage;
+  attention: Attention;
+  lastWebhookAt: string | null;
+  lastUnsignedWebhookAt: string | null;
+  lastPolledAt: string | null;
 }
 
-// live is false for a dashboard tenant stored but not in the running
-// configuration (it does not validate, or has not been merged yet), and for
-// a file tenant the merge left out, which conflict explains.
-export interface OperatorTenant extends TenantSummary {
+// live is false for an entry of the instance spec no connection serves,
+// which conflict explains.
+export interface AdminAccount extends AccountSummary {
   live: boolean;
-  revision: number;
   conflict?: string;
 }
 
 export interface CredentialsSet {
   clientId: boolean;
   privateKey: boolean;
-  token: boolean;
-  gitToken: boolean;
   webhookSecret: boolean;
 }
 
-export interface Installation {
+export interface Connection {
   name: string;
   forge: Forge;
-  host: string;
-  account: string;
-  credentialKind: CredentialKind;
+  // webUrl is the forge's web address, no trailing slash; '' when unknown.
+  webUrl: string;
+  accounts: string[];
   credentials: CredentialsSet;
   hookPath: string;
+  // lastWebhookAt is null until a webhook for the connection reaches
+  // kritique; until then kritique only polls it.
+  lastWebhookAt: string | null;
+  // lastUnsignedWebhookAt is when one last arrived with no signature, which
+  // a forge sends for a webhook with no secret; null when none has.
+  lastUnsignedWebhookAt: string | null;
 }
 
+// effort is how hard the review model reasons, one of the providers'
+// levels; '' leaves it to the provider.
 export interface Models {
   review: string;
   fallback: string;
+  effort: string;
 }
 
 export interface Limits {
@@ -136,15 +162,32 @@ export interface Limits {
   tokensPerMonth: number;
 }
 
-export interface TenantDetail {
+// One condition on a pull request: expr, CEL over pr, paths, globs one of
+// which a changed path must match, or both. name and expr are '' when it
+// has none, and paths is absent.
+export interface Condition {
+  name: string;
+  expr: string;
+  paths?: string[];
+}
+
+// A pull request is reviewed when one of include holds, or there are none,
+// and none of exclude does.
+export interface Filters {
+  include: Condition[];
+  exclude: Condition[];
+}
+
+export interface AccountDetail {
   slug: string;
-  managedBy: TenantManagedBy;
-  role: TenantRole;
-  installations: Installation[];
+  connection: Connection;
   models: Models;
   limits: Limits;
-  filter: string;
+  filters: Filters;
   usage: MonthUsage;
+  // lastPolledAt is when kritique last polled the account for pull requests,
+  // null when it never has.
+  lastPolledAt: string | null;
 }
 
 export interface IndexState {
@@ -163,10 +206,14 @@ export interface ReviewRef {
 export interface Repository {
   id: string;
   fullName: string;
-  installation: string;
   enabled: boolean;
-  managedBy: 'file' | 'dashboard' | 'forge';
+  managedBy: 'file' | 'forge';
   defaultBranch: string;
+  archived: boolean;
+  fork: boolean;
+  // turnedOn is the choice an admin made in the dashboard, null while the
+  // configuration decides.
+  turnedOn: boolean | null;
   index: IndexState;
   lastReview: ReviewRef | null;
 }
@@ -175,6 +222,8 @@ export interface AgentLimits {
   maxSteps: number;
   maxToolOutputBytes: number;
   maxTokens: number;
+  maxPromptTokens: number;
+  maxParts: number;
   timeoutSeconds: number;
   commands: string[];
   commandTimeoutSeconds: number;
@@ -187,47 +236,42 @@ export interface ContextFile {
 }
 
 export interface ReviewBlock {
-  instructions: string[];
   requireSuggestedFix: boolean;
   templates: { summary?: string; inline?: string };
-  minSeverity: '' | 'nit' | 'important';
   inlineComments: boolean;
+  approve: boolean;
+  diagram: boolean;
+  cost: boolean;
   context: ContextFile[];
 }
 
-// What a repository's .kritique.yaml may choose; a null bound leaves it the
-// operator's own value, or a limit or settle time at or below it.
-export interface AllowBounds {
-  modes: ReviewMode[] | null;
-  models: string[] | null;
-  commands: string[] | null;
-  agent: {
-    maxSteps: number | null;
-    maxToolOutputBytes: number | null;
-    maxTokens: number | null;
-    timeoutSeconds: number | null;
-  };
-  settleSeconds: number | null;
+// What narrows when a skill is offered: a changed path matching one of
+// paths, and one of the when conditions holding.
+export interface SkillScope {
+  paths?: string[];
+  when?: { name: string; expr: string }[];
 }
 
 export interface RepoSettings {
   enabled: boolean;
-  mode: ReviewMode;
   models: Models;
-  filter: string;
-  forks: boolean;
+  filters: Filters;
   ignore: string[];
+  skills: { paths: string[]; scope: Record<string, SkillScope> };
   settleSeconds: number;
+  maxAutoReviews: number;
   maxDeltaFiles: number;
   review: ReviewBlock;
+  confidence: { model: string; fallback: string; effort: string; threshold: number; gate: boolean; risk: Risk; instructions: string };
   agent: AgentLimits;
   limits: Limits;
-  allow: AllowBounds;
 }
 
-export type ConfigSource = 'default' | 'env' | 'file' | 'dashboard' | 'repository';
+// defaults is a setting written at the configuration file's root, account
+// one written in an account's entry.
+export type ConfigSource = 'default' | 'env' | 'file' | 'defaults' | 'account' | 'repository';
 
-// One instance-wide setting, read-only in the operator console: a secret
+// One instance-wide setting, read-only in the admin console: a secret
 // shows only whether it is set.
 export interface InstanceSetting {
   section: string;
@@ -237,14 +281,13 @@ export interface InstanceSetting {
 }
 
 // The repository's .kritique.yaml as the last review that ran read it, at
-// its merge base, applied to the operator's settings as they are now.
+// its merge base, applied to the admin's settings as they are now.
 export interface RepoConfig {
   reviewId: string;
   commit: string;
   found: boolean;
   settings: RepoSettings;
-  filter: string;
-  skipPaths: string[];
+  filters: Filters;
   dropped: string[];
   ignored?: string;
 }
@@ -264,43 +307,12 @@ export interface IndexRun {
   finishedAt: string | null;
 }
 
-// One task that runs for a repository, after the operator's bounds clipped
-// it: where it is defined, the event names it triggers on (as
-// allow.tasks.events globs them) and the action kinds it declares.
-export interface TaskDef {
-  name: string;
-  source: 'file' | 'dashboard' | 'repository';
-  triggers: string[];
-  if: string;
-  mode: ReviewMode;
-  actions: string[];
-}
-
-// Something the operator's bounds left out of a task, and why.
-export interface TaskNote {
-  task: string;
-  what: string;
-  reason: string;
-}
-
 export interface RepoDetail extends Repository {
   settings: RepoSettings;
-  // Where each of the operator's settings comes from, by policy key.
+  // Where each of the admin's settings comes from, by policy key.
   sources: Record<string, ConfigSource>;
   repoConfig: RepoConfig | null;
   indexRuns: IndexRun[];
-  // The tasks that run: the operator's, then those of the .kritique.yaml
-  // tasksSource names, at tasksCommit ('' when there is none).
-  tasks: TaskDef[];
-  taskNotes: TaskNote[];
-  // defaultBranch: the file a task dispatch last read at the default branch
-  // tip, where tasks run from; lastReview: before any dispatch, the file the
-  // last review read at its merge base.
-  tasksSource: 'defaultBranch' | 'lastReview';
-  tasksCommit: string;
-  // Why that file was ignored as a whole, when it does not parse; its
-  // tasks are left out.
-  tasksIgnored?: string;
 }
 
 export interface Label {
@@ -317,7 +329,6 @@ export interface SeverityCounts {
 export interface ReviewBrief {
   id: string;
   status: ReviewStatus;
-  mode: ReviewMode;
   scope: ReviewScope;
   findings: SeverityCounts;
   createdAt: string;
@@ -330,7 +341,12 @@ export interface Pull {
   author: string;
   state: 'open' | 'closed';
   draft: boolean;
+  // fork is whether the head is in another repository.
+  fork: boolean;
   merged: boolean;
+  // paused is whether its automatic reviews are paused: a push is recorded,
+  // not reviewed, until someone asks for a review or resumes them.
+  paused: boolean;
   headSha: string;
   headRef: string;
   baseRef: string;
@@ -339,6 +355,18 @@ export interface Pull {
   updatedAt: string;
   labels: Label[];
   lastReview: ReviewBrief | null;
+  // Reviews that completed, and what every review of it spent.
+  reviewCount: number;
+  costUsd: number;
+}
+
+// The account's open pull requests that want a look, by why; one may count
+// under several.
+export interface Attention {
+  failed: number;
+  capped: number;
+  blocking: number;
+  paused: number;
 }
 
 export interface TokenCounts {
@@ -350,7 +378,6 @@ export interface Review {
   id: string;
   status: ReviewStatus;
   trigger: string;
-  mode: ReviewMode;
   scope: ReviewScope;
   model: string;
   headSha: string;
@@ -361,13 +388,31 @@ export interface Review {
   finishedAt: string | null;
   skipReason: SkipReason;
   error: string;
+  // confidence is null for a review that was not scored.
+  confidence: Confidence | null;
 }
+
+// Confidence is the score a second model gave a reviewed pull request, out
+// of 5, against the threshold its repository set.
+export interface Confidence {
+  score: number;
+  threshold: number;
+  passed: boolean;
+  reason: string;
+  // risk is '' for a review scored before risk was rated.
+  risk: Risk | '';
+  model: string;
+}
+
+export type Risk = 'low' | 'medium' | 'high' | 'critical';
 
 export interface Followup {
   id: string;
   commentId: number;
   repository: string;
   number: number;
+  // pullUrl is the pull request on the forge, where its comments are.
+  pullUrl: string;
   author: string;
   inline: boolean;
   path: string;
@@ -375,6 +420,10 @@ export interface Followup {
   status: FollowupStatus;
   reason: string;
   replyCommentId: number | null;
+  // commentUrl is the mention on the forge, replyUrl kritique's answer to
+  // it, '' when it posted none.
+  commentUrl: string;
+  replyUrl: string;
   model: string;
   createdAt: string;
 }
@@ -383,26 +432,36 @@ export interface PullDetail {
   pull: Pull;
   reviews: Review[];
   followups: Followup[];
+  // The pull request's review job that has not finished, if any.
+  job: Job | null;
 }
 
 export interface PullRef {
   repository: string;
   number: number;
   title: string;
+  url: string;
 }
 
 export interface ReviewInfo extends Review {
   pull: PullRef;
+  // A merged or closed pull request is reviewed only when someone asks.
+  pullState: 'open' | 'closed';
+  pullMerged: boolean;
   scopeReason: string;
   mergeBaseSha: string;
   patchId: string;
   priorReviewId: string | null;
+  // newestReviewId is the pull request's newest review that was not skipped, null when none is newer than this.
+  newestReviewId: string | null;
   cancelRequestedAt: string | null;
 }
 
 export interface Summary {
+  headline?: string;
   take: string;
   praise: string[];
+  diagram?: string;
 }
 
 export interface Finding {
@@ -411,6 +470,7 @@ export interface Finding {
   line: number;
   endLine: number;
   severity: Severity;
+  category: Category | '';
   title: string;
   explanation: string;
   suggestedFix: string;
@@ -419,7 +479,99 @@ export interface Finding {
   fingerprint: string;
   postedInline: boolean;
   forgeCommentId: number | null;
+  // threadUrl is its inline comment's thread on the forge, '' when there is
+  // none.
+  threadUrl: string;
   createdAt: string;
+  reactionsUp: number;
+  reactionsDown: number;
+  // rules are the ids of the review rules it enforces.
+  rules: string[];
+  // status is what became of it on its pull request; dismissReason is the
+  // reason a dismissed one was dismissed with.
+  status: FindingStatus;
+  dismissReason: string;
+}
+
+export type AnalyticsGroup = 'day' | 'week' | 'month';
+
+export interface AnalyticsTotals {
+  pullRequests: number;
+  reviews: number;
+  failed: number;
+  findings: SeverityCounts;
+  categories: Record<Category, number>;
+  addressed: number;
+  reactionsUp: number;
+  reactionsDown: number;
+  costUsd: number;
+  medianReviewMs: number | null;
+  medianMergeMs: number | null;
+}
+
+export interface AnalyticsPoint {
+  key: string;
+  reviews: number;
+  findings: SeverityCounts;
+  costUsd: number;
+}
+
+export interface RepoActivity {
+  repository: string;
+  reviews: number;
+  findings: SeverityCounts;
+  addressed: number;
+}
+
+export interface Analytics {
+  group: AnalyticsGroup;
+  from: string;
+  to: string;
+  current: AnalyticsTotals;
+  previous: AnalyticsTotals;
+  series: AnalyticsPoint[];
+  repositories: RepoActivity[];
+}
+
+export type RuleKind = 'rule' | 'context';
+// entry is an account's entry for the repository; repository is the
+// repository's own .kritique.yaml.
+export type RuleSource = 'default' | 'env' | 'file' | 'defaults' | 'account' | 'entry' | 'repository';
+
+// Rule is one written rule or file reviews read, with where it is set, the
+// paths it applies to (every change when empty), and the repositories that
+// read it. id, text and when, the conditions on the pull request one of
+// which must hold for it to apply (always when empty), are a written
+// rule's, path and description a file's.
+export interface Rule {
+  kind: RuleKind;
+  id: string;
+  text: string;
+  path: string;
+  description: string;
+  paths: string[];
+  when: { name: string; expr: string }[];
+  source: RuleSource;
+  repositories: string[];
+  // findings and addressed are a written rule's: its repositories'
+  // findings that cite its id, and how many of those were addressed.
+  findings: number;
+  addressed: number;
+}
+
+export type FindingStatus = 'open' | 'addressed' | 'dismissed';
+
+// Category is what kind of problem a finding is; '' on a finding recorded
+// before it had one.
+export type Category = 'correctness' | 'security' | 'performance' | 'reliability' | 'maintainability' | 'tests';
+
+// AccountFinding is one finding of a pull request, however many of its
+// reviews reported it, as the latest of them did.
+export interface AccountFinding extends Finding {
+  reviewId: string;
+  pull: PullRef;
+  firstSeenAt: string;
+  lastSeenAt: string;
 }
 
 export interface RunnerRun {
@@ -449,6 +601,8 @@ export interface Usage {
 
 export interface TimelineStep {
   index: number;
+  // part is the part of a split review the step was for, from 1; 0 when the review was not split.
+  part: number;
   tools: string[];
   durationMs: number;
   outputBytes: number;
@@ -462,6 +616,13 @@ export interface AgentRun {
   toolCalls: Record<string, number>;
   timeline: TimelineStep[];
   sources: string[];
+  // skillsOffered are the repository skills the agent could read, and
+  // skillsOpened the ones it did; commandsOffered and commandsRun the same
+  // for the run tool's commands.
+  skillsOffered: string[];
+  skillsOpened: string[];
+  commandsOffered: string[];
+  commandsRun: string[];
   usage: Usage;
   costUsd: number;
   model: string;
@@ -469,6 +630,18 @@ export interface AgentRun {
   createdAt: string;
   // The submitted review JSON; null unless the agent submitted.
   result: unknown;
+  // carriedReviewId is the review whose conversation the agent carried on, null when it started afresh.
+  carriedReviewId: string | null;
+  // parts are how the parts of a split review ended, in part order; empty when it was not split.
+  parts: AgentPart[];
+}
+
+// AgentPart is one part of a split review: its files, why its agent stopped, with the error it ended on, and its steps.
+export interface AgentPart {
+  paths: string[];
+  stop: string;
+  error: string;
+  steps: number;
 }
 
 export interface UsageRow {
@@ -508,6 +681,8 @@ export interface ContextPack {
   priorHeadSha: string | null;
   stages: Stage[];
   repoNotes: string[];
+  // ruleIds are the ids of the rules the review was given to check.
+  ruleIds: string[];
   repoFiles: RepoFile[];
   createdAt: string;
 }
@@ -525,6 +700,7 @@ export interface ReviewDetail {
 export interface ReviewDiff {
   diff: string;
   deltaDiff: string;
+  swept: boolean;
 }
 
 export interface ContextChunk {
@@ -579,14 +755,16 @@ export interface Response {
   stop: string;
 }
 
-// system and tools are non-null only on a turn that changed them; reset
-// says messages is the whole request rather than what is new since the
-// previous turn of its run.
+// system and tools are non-null only on a turn that changed them from its
+// part's turn before, or, at a part's first turn, from the conversation's;
+// reset says messages is the whole request rather than what is new since
+// the previous turn of its run.
 export interface Turn {
   index: number;
   id: string;
   kind: TranscriptKind;
   step: number;
+  part: number;
   model: string;
   upstream: string;
   system: string | null;
@@ -602,6 +780,8 @@ export interface Turn {
   truncated: boolean;
   createdAt: string;
   runnerRunId: string;
+  // carriedReviewId is the review whose conversation holds the messages before messagesFrom, null when they are earlier turns here.
+  carriedReviewId: string | null;
 }
 
 export interface Transcript {
@@ -647,199 +827,36 @@ export interface Job {
   finalizedAt: string | null;
   args: JobArgs;
   lastError: string;
+  cause: JobCause | '';
 }
 
-// One server-sent event's data; the SSE event name is its kind, plus
-// "resync" (data {}) when the client should refetch everything it shows.
-export interface LiveEvent {
-  kind: EventKind;
-  tenant: string;
-  id: string;
-  reviewId: string | null;
+// A job with the slug of the account it is of.
+export interface InstanceJob extends Job {
+  account: string;
 }
 
-// The management API: dashboard tenants, members and invites, actions and
-// the audit log. ErrorBody.code may also be one of these.
-export type ManagementErrorCode =
-  | 'forbidden'
-  | 'invalid_spec'
-  | 'operator_only'
-  | 'revision_conflict'
-  | 'config_blocked'
-  | 'slug_taken'
-  | 'file_managed'
-  | 'management_disabled'
-  | 'invite_exists'
-  | 'not_invite_member'
-  | 'last_admin'
-  | 'no_head'
-  | 'not_cancelable'
-  | 'actions_disabled'
-  | 'already_queued'
-  | 'reenter_secret'
-  | 'already_member';
-
-// details of an invalid_spec, operator_only or slug_taken error.
-export interface PathDetails {
-  path: string;
+// How many of an account's concurrency slots for a model a running review
+// holds; slots is the account's limit, 0 for none.
+export interface ModelSlots {
+  account: string;
+  model: string;
+  held: number;
+  slots: number;
 }
 
-// details of a slug_taken error: adoptable only when the slug belonged to
-// a tenant that is gone, so creating it again with adopt succeeds.
-export interface SlugTakenDetails extends PathDetails {
-  adoptable?: boolean;
+// The queue of every account the viewer can read, and the model slots that
+// say why a job waits.
+export interface InstanceQueue {
+  jobs: InstanceJob[];
+  slots: ModelSlots[];
 }
 
-export interface Meta {
-  version: string;
-  management: boolean;
-  signIn: SignInProvider[];
-  webUrl: string;
-}
-
-// A secret as a read shows it, and the forms a write may give instead:
-// generate only for a webhook secret, keep only when updating.
-export interface SecretState {
-  set: boolean;
-}
-export type SecretInput = { value: string } | { keep: true } | { generate: true };
-
-export type ConfigScope = 'defaults' | 'tenant' | 'repository';
-export type RepoRule =
-  | 'own'
-  | 'turnOff'
-  | 'turnOn'
-  | 'and'
-  | 'union'
-  | 'append'
-  | 'choose'
-  | 'subset'
-  | 'atMost'
-  | 'replace';
-
-// One setting of the policy table: where the operator may write it,
-// whether a tenant admin may too, what a repository's .kritique.yaml may do
-// with it, and whether the caller may change it on this tenant.
-export interface FieldPolicy {
-  key: string;
-  scopes: ConfigScope[];
-  tenantAdmin: boolean;
-  repository?: RepoRule;
-  editable: boolean;
-}
-
-// What a tenant's fields, and its repository entries' fields, resolve to
-// where the spec leaves them out, and where each value comes from.
-export interface Inherited {
-  tenant: RepoSettings;
-  tenantSources: Record<string, ConfigSource>;
-  repository: RepoSettings;
-  repositorySources: Record<string, ConfigSource>;
-}
-
-export interface TenantConfig {
-  managedBy: TenantManagedBy;
-  revision: number | null;
-  editable: boolean;
-  policy: FieldPolicy[];
-  inherited: Inherited;
-  // A tenant entry of the configuration file, in JSON, with every secret
-  // a SecretState.
-  spec: Record<string, unknown>;
-}
-
-export interface CreateTenantRequest {
-  slug: string;
-  spec: Record<string, unknown>;
-  // Re-use a slug a tenant held before: its members and invites are
-  // removed, its review history is kept.
-  adopt?: boolean;
-}
-
-export interface UpdateTenantRequest {
-  revision: number;
-  spec: Record<string, unknown>;
-}
-
-export interface TenantWriteResult {
-  slug: string;
-  revision: number;
-  // Each server-generated secret, keyed "installations[<name>].<key>";
-  // shown once, never again.
-  generated?: Record<string, string>;
-}
-
-export type MembershipSource = 'forge' | 'invite';
-
-export interface MemberSource {
-  source: MembershipSource;
-  role: TenantRole;
-}
-
-export interface Member {
-  account: Account;
-  role: TenantRole;
-  sources: MemberSource[];
-}
-
-export interface Invite {
-  id: string;
-  email: string;
-  role: TenantRole;
-  createdBy: Account | null;
-  expiresAt: string;
-}
-
-export interface Members {
-  members: Member[];
-  // null unless the viewer is an admin.
-  invites: Invite[] | null;
-}
-
-export interface CreateInviteRequest {
-  email: string;
-  role: TenantRole;
-  ttlHours?: number;
-}
-
-export interface UpdateMemberRequest {
-  role: TenantRole;
-}
-
-export interface MemberRemoved {
-  note: string;
-}
-
-export interface Accepted {
-  jobId?: number;
-}
-
-export type AuditAction =
-  | 'tenant.create'
-  | 'tenant.update'
-  | 'tenant.delete'
-  | 'tenant.adopt'
-  | 'invite.create'
-  | 'invite.delete'
-  | 'member.update'
-  | 'member.remove'
-  | 'review.rerun'
-  | 'review.cancel'
-  | 'repo.reindex';
-
-export interface AuditEvent {
-  id: string;
-  at: string;
-  actor: Account | null;
-  tenant: string;
-  action: AuditAction;
-  target: string;
-  detail: Record<string, unknown>;
-}
-
-// Task runs (internal/webapi/types_tasks.go).
+// Event tasks (internal/webapi/types_tasks.go).
 export type TaskRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped';
+export type TaskMode = 'single' | 'agentic';
 
+// One task run as lists show it. subjectKind is '' for an event with no
+// issue or pull request; durationMs is null until it finishes.
 export interface TaskRun {
   id: string;
   repository: string;
@@ -847,7 +864,7 @@ export interface TaskRun {
   subjectKind: '' | 'issue' | 'pull';
   subjectNumber: number;
   trigger: string;
-  mode: string;
+  mode: TaskMode;
   status: TaskRunStatus;
   reason: string;
   model: string;
@@ -861,6 +878,7 @@ export interface TaskRun {
   durationMs: number | null;
 }
 
+// The delivery a task run ran on.
 export interface TaskEvent {
   forge: string;
   event: string;
@@ -902,12 +920,16 @@ export interface TaskApplied {
   comment: string;
 }
 
+// An action a run left out, and why.
 export interface TaskDrop {
   action: string;
   value: string;
   reason: string;
 }
 
+// One task run with its event and records: event is null once retention
+// swept it, proposed and applied until the model answered. notes say what
+// the run's context left out.
 export interface TaskRunDetail {
   run: TaskRun;
   event: TaskEvent | null;
@@ -915,7 +937,128 @@ export interface TaskRunDetail {
   proposed: TaskAnswer | null;
   applied: TaskApplied | null;
   dropped: TaskDrop[];
+  notes: string[];
   modelCalls: number;
   costUsd: number;
   tokens: TokenCounts;
+}
+
+// One resolved task and where it is defined: the admin's configuration
+// file, or the repository's .kritique.yaml.
+export interface TaskDef {
+  name: string;
+  source: 'file' | 'repository';
+  triggers: string[];
+  when: { name?: string; expr: string }[];
+  mode: TaskMode;
+  actions: string[];
+}
+
+// Something the admin's task bounds left out of a task, and why.
+export interface TaskNote {
+  task: string;
+  what: string;
+  reason: string;
+}
+
+// The tasks that run for one repository. enabled is the admin's
+// taskBounds.enabled. source is which .kritique.yaml they were resolved
+// from: the one a task dispatch last read at the default branch tip, the
+// one the last review read before any dispatch, or '' for neither; commit
+// is its commit, resolvedAt when a dispatch read it, found whether the
+// commit had the file. ignored is why the file was ignored as a whole.
+export interface RepoTasks {
+  enabled: boolean;
+  source: '' | 'defaultBranch' | 'lastReview';
+  commit: string;
+  resolvedAt: string | null;
+  found: boolean;
+  ignored?: string;
+  tasks: TaskDef[];
+  notes: TaskNote[];
+}
+
+// One server-sent event's data; the SSE event name is its kind, plus
+// "resync" (data {}) when the client should refetch everything it shows.
+export interface LiveEvent {
+  kind: EventKind;
+  account: string;
+  id: string;
+  reviewId: string | null;
+}
+
+// The management API: actions, connections and the audit log.
+// ErrorBody.code may also be one of these.
+export type ManagementErrorCode =
+  | 'forbidden'
+  | 'no_head'
+  | 'not_cancelable'
+  | 'already_queued'
+  | 'forge_error'
+  | 'installation_served';
+
+export interface Meta {
+  version: string;
+  webUrl: string;
+}
+
+export interface Accepted {
+  jobId?: number;
+}
+
+// One account a connection's GitHub App is installed on. served is whether
+// the connection lists the account; kritique reviews nothing on one it does
+// not, and an admin may uninstall the App there.
+export interface AppInstallation {
+  id: number;
+  account: string;
+  accountType: string;
+  allRepositories: boolean;
+  suspended: boolean;
+  served: boolean;
+  url?: string;
+}
+
+// How far the instance is from reviewing: what the Configuration page's
+// checklist shows.
+export interface SetupStatus {
+  webUrl: string;
+  // Where each connection's webhook goes, its name appended.
+  hooksUrl: string;
+  connections: string[];
+  // forges are the forges the connections talk to, each once.
+  forges: Forge[];
+  // review.model, '' when unset.
+  reviewModel: string;
+  embedding: boolean;
+}
+
+export interface RegisterResult {
+  added: number;
+}
+
+export type AuditAction =
+  | 'config.update'
+  | 'account.update'
+  | 'app.create'
+  | 'app.uninstall'
+  | 'review.rerun'
+  | 'review.cancel'
+  | 'repo.reindex'
+  | 'repo.turn_on'
+  | 'repo.turn_off';
+
+// Turns a repository on, or off.
+export interface TurnOnRequest {
+  on: boolean;
+}
+
+export interface AuditEvent {
+  id: string;
+  at: string;
+  actor: User | null;
+  account: string;
+  action: AuditAction;
+  target: string;
+  detail: Record<string, unknown>;
 }

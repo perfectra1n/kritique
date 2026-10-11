@@ -2,7 +2,7 @@ package tasks
 
 import "github.com/bmatcuk/doublestar/v4"
 
-// Matches reports whether in fires one of t's triggers and t's if holds
+// Matches reports whether in fires one of t's triggers and one of t's when conditions holds
 // for it. A normalized trigger matches in.Event; a raw one matches
 // in.RawEvent whatever in.Event is. Whether the sender is kritique's own
 // bot is the caller's to check.
@@ -17,11 +17,12 @@ func (t *Task) Matches(in Input) (bool, error) {
 	if !fired {
 		return false, nil
 	}
-	g, err := compileGuard(t.If, false)
+	g, err := compileGuard(t.When, false)
 	if err != nil {
 		return false, err
 	}
-	return g.eval(vars(in, nil))
+	ok, _, err := g.eval(vars(in, nil))
+	return ok, err
 }
 
 func (tr Trigger) matches(in Input) bool {

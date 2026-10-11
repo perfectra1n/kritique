@@ -17,7 +17,7 @@ of its alt text, and carries its own annotation. */}}
 
 kritique ships as an OCI Helm chart. It needs a Postgres with
 [VectorChord](https://github.com/tensorchord/VectorChord) and pgvector, three
-roles, the configuration file, and the secrets the file references:
+roles, its public URL, a way to sign in, and its configuration file:
 
 ```sh
 helm install kritique oci://ghcr.io/perfectra1n/charts/kritique \
@@ -27,172 +27,136 @@ helm install kritique oci://ghcr.io/perfectra1n/charts/kritique \
   --values my-values.yaml
 ```
 
-where `my-values.yaml` carries `config.file` (the declarative configuration:
-providers, defaults, tenants with installations and repositories) and
-`secretMounts` for the GitHub App keys, webhook secrets and provider API
-keys the file references by path. Set `embedding.model` and a key to turn
-on the vector index and the similar-code context stage.
+where `my-values.yaml` sets:
+
+```yaml
+config:
+  webUrl: https://kritique.example.com
+  authAdminPassword:
+    valueFrom:
+      secretKeyRef: { name: kritique-admin, key: password }
+  providersApiKey:
+    valueFrom:
+      secretKeyRef: { name: kritique-openrouter, key: api-key }
+  reviewModel: openrouter/vendor/large-model
+configFile:
+  apps:
+    github:
+      accounts: [org-1]
+      clientId: Iv1.example
+      privateKey: { env: GITHUB_APP_PRIVATE_KEY }
+      webhookSecret: { env: GITHUB_APP_WEBHOOK_SECRET }
+# A Secret with the keys GITHUB_APP_PRIVATE_KEY and GITHUB_APP_WEBHOOK_SECRET.
+envFrom:
+  - secretRef:
+      name: kritique-bot
+ingress:
+  enabled: true
+  hosts: [{ host: kritique.example.com, paths: [{ path: / }] }]
+  tls: [{ hosts: [kritique.example.com], secretName: kritique-tls }]
+```
+
+`config` is every `KRITIQUE_*` variable the chart does not derive from its
+other values, keyed by its name without the prefix in camelCase
+(`pollInterval` is `KRITIQUE_POLL_INTERVAL`): `webUrl`, the one public URL,
+with the dashboard at it and the webhook listener under it at `/hooks`;
+logging, the workers, polling, retention and runner Jobs' deadline and
+RuntimeClass; and the variables that stand in for the configuration file's
+sections, sign-in, one app, one provider, the review, confidence and
+trigger settings and the embedder (see
+[the configuration reference](https://github.com/perfectra1n/kritique/blob/main/docs/configuration.md)).
+A key left empty sets nothing and kritique's default applies; a secret
+takes a `valueFrom` map, like the admin password above, which is the way
+into a fresh instance. The chart's Ingress or HTTPRoute must route
+`webUrl`'s host.
+
+`configFile` is what is reviewed and how: sign-in (`auth`), the forge
+`apps` (GitHub Apps, and Forgejo or Gitea connections), model `providers`, the `embedding`, `egress`, the settings every
+repository gets (`review`, `confidence`, `trigger`, `comments`, `agent`),
+`repositories` entries keyed `owner/*` or `owner/name`, and `accounts`,
+with the `config` variables winning over it.
+
+- kritique reads it at startup: the pods carry its checksum, so a change
+  rolls them, and a pod whose file doesn't load never becomes ready while
+  the ones before it keep serving.
+- Secrets never go in it: it names environment variables, which `env` and
+  `envFrom` set from existing Secrets, the way any Kubernetes container's
+  environment is set.
+- The chart refuses a `KRITIQUE_*` variable under `env`, naming its
+  `config` key, and a `config` key for a variable it derives from its
+  other values, such as the addresses or the database.
+
+The
+[setup guide](https://github.com/perfectra1n/kritique/blob/main/docs/setup.md)
+covers creating the GitHub App, and the dashboard's setup checklist shows
+what a fresh instance still lacks.
 
 ### Database
 
-kritique separates three Postgres roles and refuses to start otherwise: the
-**owner** (runs migrations and applies configuration on the leader, must not
-be a superuser), the **application** role (`database.app.role`, must not own
-the tables so row-level security applies to it) and the **runner** role
-(`database.runner.role`, handed to runner Jobs, can only write its own run).
+The chart requires three Postgres roles, and kritique checks them at
+start:
+
+| Role        | Values                                                   | What it does                                             | kritique refuses one that                        |
+| ----------- | -------------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------- |
+| owner       | `database.owner.existingSecret`                          | runs migrations and applies configuration on the leader  | is a superuser                                  |
+| application | `database.app.existingSecret`, `database.app.role`       | serves everything else, under row-level security         | owns a table, is a superuser or has `BYPASSRLS` |
+| runner      | `database.runner.existingSecret`, `database.runner.role` | is handed to runner Jobs, and can only write its own run |                                                 |
+
 The `vchord` (VectorChord) and `vector` (pgvector, whose types it builds on)
 extensions must exist before the first start, and `vchord` must be in
 `shared_preload_libraries`.
 
-On CloudNativePG, use TensorChord's image (`ghcr.io/tensorchord/cloudnative-vectorchord`,
-tagged `<postgres>-<vchord>`) or mount `ghcr.io/tensorchord/vchord-scratch` as an
-image-volume extension, load the library, make the bootstrap owner `owner`,
-declare the other two roles under `spec.managed.roles`, and let a `Database`
-resource create the extensions:
+The owner and application connections must reach Postgres directly, or
+through a pooler in session mode. The leader is whichever replica holds a
+session advisory lock on its owner connection, and the dashboard's live
+updates and the job queue's notifications `LISTEN` on the application
+connection. A transaction-mode pooler, such as PgBouncer or a CloudNativePG
+`Pooler` with `poolMode: transaction`, hands a session to other clients
+between transactions, which breaks both. `kritique_leader` is 1 on the replica
+that holds the lock.
 
-```yaml
-apiVersion: postgresql.cnpg.io/v1
-kind: Cluster
-metadata:
-  name: kritique-postgres
-spec:
-  instances: 1
-  imageName: ghcr.io/cloudnative-pg/postgresql:18-standard-trixie
-  enableSuperuserAccess: false
-  bootstrap:
-    initdb:
-      database: kritique
-      owner: kritique
-      secret:
-        name: kritique-postgres-credentials
-  managed:
-    roles:
-      - name: kritique_app
-        login: true
-        passwordSecret:
-          name: kritique-postgres-app
-      - name: kritique_runner
-        login: true
-        passwordSecret:
-          name: kritique-postgres-runner
----
-apiVersion: postgresql.cnpg.io/v1
-kind: Database
-metadata:
-  name: kritique
-spec:
-  name: kritique
-  owner: kritique
-  cluster:
-    name: kritique-postgres
-  extensions:
-    - name: vector
-      ensure: present
-    - name: vchord
-      ensure: present
-```
+[Postgres with CloudNativePG](https://github.com/perfectra1n/kritique/blob/main/docs/database.md)
+sets this up end to end: a two-instance cluster with VectorChord mounted as
+an image volume extension, the extensions through a `Database` resource, the
+application and runner roles as `DatabaseRole` resources, the Secrets with
+their `uri` key for `database.*.existingSecret`, failover and backups.
 
-with, on the `Cluster`:
+### Security
 
-```yaml
-spec:
-  imageName: ghcr.io/tensorchord/cloudnative-vectorchord:18.6-1.1.1
-  postgresql:
-    shared_preload_libraries:
-      - vchord
-```
+Runner Jobs parse untrusted content and run what the model asks, so the
+chart confines them:
 
-Each `passwordSecret` is a basic-auth Secret; kritique reads a `uri` key from
-the Secrets named in `database.*.existingSecret`, so either use CNPG's
-generated `uri` for the owner or add one for the managed roles (an External
-Secrets `Password` generator plus a templated `uri` works).
+- With `networkPolicy.enabled`, a runner pod reaches nothing but DNS,
+  Postgres and the egress gateway kritique serve runs on
+  `service.gatewayPort`, which allows what the configuration file's
+  `egress` lists and is the runner's only way to its model.
+- A runner holds no provider key or App key: only a forge token for its
+  run, a gateway token and the runner role's database URI.
+- `runner.tools` adds programs a review's `agent.commands` may run, from
+  their own images; `config.runnerRuntimeClass` puts runner Jobs under a
+  sandboxed runtime such as gVisor; `runner.resources` keeps a runaway run
+  in its own cgroup.
 
-### Egress gateway
-
-Worker-capable pods serve a forward proxy on `gateway.port`, and runner Jobs
-are handed it as `HTTPS_PROXY` and `HTTP_PROXY`. With `networkPolicy.enabled`,
-a runner pod can then reach nothing but DNS, Postgres and that port: its git
-fetch and every command it runs go through the gateway, which allows a
-destination by hostname only. The forges of the file's installations are
-always allowed; `egress.allowHosts` in the configuration file adds the rest
-(registries, release APIs), and `egress.credentials` names hosts the gateway
-adds a bearer token to when a runner sends it a plain `http://` request, so
-the runner never holds the token:
-
-```yaml
-config:
-  file:
-    egress:
-      allowHosts:
-        - api.github.com
-        - "*.githubusercontent.com"
-        - ghcr.io
-      credentials:
-        api.github.com: { file: /var/run/secrets/kritique/github-token }
-```
-
-The same port is an agentic runner's model endpoint. The worker mints a
-token for each run, good for that run until its Job's deadline and revoked
-when it ends, and hands it to the pod in place of a provider key; the
-gateway answers each step through the tenant's provider with the key only
-the worker holds, refuses a step once the run's token budget or the
-tenant's `tokensPerMonth` is spent, and records the step's usage. Provider
-endpoints are therefore not in a runner's allowlist.
-
-`gateway.enabled: false` removes the listener and the Service and gives runner
-pods the `networkPolicy.egressPorts` to anywhere instead. Agentic reviews are
-refused without the gateway.
-
-### Runner tools
-
-An agentic repository's `agent.commands` lets the model run allowlisted
-binaries over a checkout of the head commit: to read a dependency bump's
-release notes and compare view with `curl`, or search with `rg` and `fd`.
-The chart's image has none of them, so no command is offered; point
-`runner.image` at the release's `-tools` tag, an Alpine image with all
-three. Every host `curl` reaches must pass the gateway, so add the
-release APIs and registries to `egress.allowHosts` (a GitHub
-installation already allows `github.com`):
-
-```yaml
-runner:
-  image: ghcr.io/perfectra1n/kritique:<version>-tools
-config:
-  file:
-    egress:
-      allowHosts: [api.github.com, "*.githubusercontent.com"]
-    tenants:
-      - slug: example
-        repositories:
-          - name: example/home-ops
-            mode: agentic
-            agent: { commands: [curl, fd, rg] }
-```
-
-A command runs without a shell, with an environment of `PATH`, its own
-`HOME` and the gateway, and the runner makes itself unreadable to it first,
-so a command cannot read the runner's credentials from `/proc`. The
-`-tools` image does have one, though, and `fd -x` or `rg --pre` can start
-it, and with it a script from the checkout: another reason to run runner
-Jobs under a sandboxed `runner.runtimeClassName`.
-
-### Runner sandbox
-
-Runner Jobs parse untrusted repository content and, in agentic mode, run what
-the model asks of them. Set `runner.runtimeClassName` to a sandboxed runtime
-the cluster offers (`gvisor` with runsc, or a Kata class) so a kernel
-vulnerability reachable from the pod is contained by the sandbox rather than
-the node. It is advised, not required: without it the pod's other bounds
-still hold (no long-lived secret, egress by hostname through the gateway,
-read-only root, no capabilities), but the container runtime alone separates
-it from the node.
+[Security](https://github.com/perfectra1n/kritique/blob/main/docs/security.md) covers the
+gateway, runner tools and the sandbox in full.
 
 ### Topology
 
-`roles.all` runs everything in one Deployment and is the usual shape. For a
-split, disable it and enable `roles.ingest` (webhooks) and `roles.worker`
-(queues, runner Jobs, leader duties) with their own replica counts. Any
-number of replicas may run; one holds the leader lock at a time.
+The chart runs one Deployment of `kritique serve`, one replica by default.
+Its rolling update surges a new pod and takes the old one down only once the
+new one is ready, so a rollout, such as the one a changed `configFile`
+starts, keeps one serving on its own: a pod is ready only once its database
+answers and it serves webhooks. Every replica serves webhooks and
+the dashboard and works jobs, and one holds the leader lock at a time, so
+`replicas: 2` keeps one serving while a pod or node is lost; the chart then
+adds a PodDisruptionBudget so a drain takes one at a time. Until a lost
+replica is back, webhooks are refused; the next poll picks up the pull
+requests they missed, though not the mentions, which only a webhook
+delivers. Runner pods are the Jobs `kritique serve` creates, one per review,
+follow-up and index run, running `kritique run`. A replica that stops drains its jobs
+first; one that dies outright leaves them to the leader, which hands them
+back to the queue within a few minutes and deletes the runner Jobs they
+left, and a remaining replica works them.
 
 {{ template "chart.maintainersSection" . }}
 

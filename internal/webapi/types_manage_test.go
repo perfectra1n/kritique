@@ -4,47 +4,28 @@ import (
 	"encoding/json"
 	"maps"
 
-	"github.com/perfectra1n/kritique/internal/auth"
 	"github.com/perfectra1n/kritique/internal/configfile"
-	"github.com/perfectra1n/kritique/internal/store"
 )
 
-var goldenAccount = Account{ID: "acct-1", DisplayName: "Ada", Email: "ada@example.com", AvatarURL: "https://img.example/a.png"}
+var goldenUser = User{ID: "acct-1", DisplayName: "Ada", Email: "ada@example.com", AvatarURL: "https://img.example/a.png"}
 
 func init() {
 	maps.Copy(goldens, map[string]any{
-		"meta": Meta{
-			Version: "v1.2.3", Management: true, WebURL: "https://kritique.example",
-			SignIn: []auth.ProviderInfo{{Name: "corp", Type: configfile.SignInOIDC, DisplayName: "Corp"}},
+		"meta":            Meta{Version: "v1.2.3", WebURL: "https://kritique.example"},
+		"turn_on_request": TurnOnRequest{On: true},
+		"accepted":        Accepted{JobID: 42},
+		"app_installation": AppInstallation{
+			ID: 2, Account: "stranger", AccountType: "User", Served: false,
+			URL: "https://github.com/settings/installations/2",
 		},
-		"tenant_config": TenantConfig{
-			ManagedBy: configfile.OriginDashboard, Revision: new(int64(3)), Editable: true, Policy: fieldPolicies(&auth.Principal{}, true),
-			Inherited: Inherited{
-				Tenant: goldenRepoSettings, TenantSources: map[string]configfile.Source{"models.review": configfile.SourceFile},
-				Repository:        goldenRepoSettings,
-				RepositorySources: map[string]configfile.Source{"models.review": configfile.SourceFile, "mode": configfile.SourceDashboard},
-			},
-			Spec: json.RawMessage(`{"slug":"alpha","installations":[{"name":"alpha-bot","token":{"set":true}}]}`),
+		"setup_status": SetupStatus{
+			WebURL: "https://kritique.example", HooksURL: "https://kritique.example/hooks/", Connections: []string{"alpha-bot"},
+			Forges: []configfile.Forge{configfile.ForgeGitHub}, ReviewModel: "openrouter/acme-large",
 		},
-		"create_tenant_request": CreateTenantRequest{Slug: "alpha", Spec: json.RawMessage(`{"slug":"alpha"}`)},
-		"update_tenant_request": UpdateTenantRequest{Revision: 3, Spec: json.RawMessage(`{"slug":"alpha"}`)},
-		"tenant_write_result": TenantWriteResult{
-			Slug: "alpha", Revision: 1, Generated: map[string]string{"installations[alpha-bot].webhookSecret": "00ff"},
-		},
-		"members": Members{
-			Members: []Member{{
-				Account: goldenAccount, Role: auth.RoleAdmin,
-				Sources: []MemberSource{{Source: store.SourceForge, Role: auth.RoleMember}, {Source: store.SourceInvite, Role: auth.RoleAdmin}},
-			}},
-			Invites: []Invite{{ID: "inv-1", Email: "bob@example.com", Role: auth.RoleMember, CreatedBy: &goldenAccount, ExpiresAt: t1}},
-		},
-		"create_invite_request": CreateInviteRequest{Email: "bob@example.com", Role: auth.RoleMember, TTLHours: new(24)},
-		"update_member_request": UpdateMemberRequest{Role: auth.RoleAdmin},
-		"member_removed":        MemberRemoved{Note: removedNote},
-		"accepted":              Accepted{JobID: 42},
+		"register_result": RegisterResult{Added: 3},
 		"audit_event": AuditEvent{
-			ID: "7", At: t0, Actor: &goldenAccount, Tenant: "alpha", Action: AuditTenantUpdate, Target: "alpha",
-			Detail: json.RawMessage(`{"revision":2,"secretsChanged":["installations[alpha-bot].token"]}`),
+			ID: "7", At: t0, Actor: &goldenUser, Account: "github/alpha", Action: AuditRepoReindex, Target: "alpha/one",
+			Detail: json.RawMessage(`{"jobId":42}`),
 		},
 	})
 }

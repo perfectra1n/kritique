@@ -4,7 +4,7 @@
 // inspection, which is how git, the model SDKs and curl reach TLS
 // endpoints; a plain http:// request to an allowed host is upgraded to
 // HTTPS here, with a configured credential added, so a runner can use an
-// API at an installation's rate limit without holding a token. Every other
+// API at a connection's rate limit without holding a token. Every other
 // destination is refused by hostname.
 package egress
 
@@ -16,39 +16,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 )
-
-// Rules is what the proxy allows and adds, read on every request so a
-// configuration reload takes effect at once.
-type Rules struct {
-	// Hosts are allowed destinations, lowercase, with a leading "*." for a
-	// suffix match. The port is not part of a rule: CONNECT is allowed to
-	// 443 only, and an upgraded request always goes to 443.
-	Hosts []string
-	// Credentials map a host to the Authorization header value an
-	// upgraded request to it carries.
-	Credentials map[string]string
-}
-
-// Allows reports whether host, without a port, matches a rule.
-func (r Rules) Allows(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	for _, rule := range r.Hosts {
-		switch {
-		case strings.HasPrefix(rule, "*."):
-			if strings.HasSuffix(host, rule[1:]) && len(host) > len(rule)-1 {
-				return true
-			}
-		case host == rule:
-			return true
-		}
-	}
-	return false
-}
 
 // Outcomes a request ends with, for metrics.
 const (
@@ -61,16 +34,89 @@ const (
 type Proxy struct {
 	// Rules returns the current rules; it is called per request.
 	Rules func() Rules
-	// Dial opens the upstream connection for a CONNECT; nil means a
-	// net.Dialer with connectTimeout.
+	// Resolver resolves a destination's name; nil means net.DefaultResolver.
+	Resolver Resolver
+	// Dial opens the upstream connection to an address the rules admit;
+	// nil means a net.Dialer with connectTimeout.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
-	// Client sends upgraded requests; nil means a client that does not
-	// follow redirects, so the runner's own client sees them.
+	// Client sends upgraded requests; nil means a client that dials
+	// through the rules and does not follow redirects, so the runner's own
+	// client sees them.
 	Client *http.Client
 	// Observe, if set, is called once per request with its kind (connect,
 	// http) and outcome.
 	Observe func(kind, outcome string)
 	Logger  *slog.Logger
+
+	clientOnce sync.Once
+	client     *http.Client
+}
+
+// Resolver is the part of net.Resolver the proxy uses.
+type Resolver interface {
+	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
+}
+
+// refusal is a destination the rules refuse, raised from the dial so an
+// upgraded request's client surfaces it through its transport.
+type refusal struct {
+	host, reason string
+}
+
+func (r *refusal) Error() string { return "egress: " + r.host + ": " + r.reason }
+
+// dialContext dials addr, a host:port, as the rules admit: a name passes
+// the host rules and is resolved once, the addresses that pass the
+// address rules are tried in turn, and the one that connects is the one
+// that was checked, so a name cannot be re-resolved to somewhere else in
+// between. It is the transport dialer of upgraded requests and the dial
+// of a CONNECT.
+func (p *Proxy) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("egress: %w", err)
+	}
+	rules := p.Rules()
+	if reason := rules.refuses(host); reason != "" {
+		return nil, &refusal{host, reason}
+	}
+	addrs := []netip.Addr{}
+	if a, err := netip.ParseAddr(host); err == nil {
+		addrs = append(addrs, a.Unmap())
+	} else {
+		resolver := p.Resolver
+		if resolver == nil {
+			resolver = net.DefaultResolver
+		}
+		resolved, err := resolver.LookupNetIP(ctx, "ip", host)
+		if err != nil {
+			return nil, fmt.Errorf("egress: %w", err)
+		}
+		var reason string
+		if addrs, reason = rules.admit(resolved); reason != "" {
+			return nil, &refusal{host, reason}
+		}
+	}
+	dial := p.Dial
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: connectTimeout}).DialContext
+	}
+	var errs []error
+	for _, a := range addrs {
+		conn, err := dial(ctx, network, net.JoinHostPort(a.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		errs = append(errs, err)
+	}
+	return nil, errors.Join(errs...)
+}
+
+// refuse answers a request the rules refuse.
+func (p *Proxy) refuse(w http.ResponseWriter, kind, host, reason string) {
+	p.observe(kind, OutcomeRefused)
+	p.Logger.Warn("egress refused", "kind", kind, "host", host, "reason", reason)
+	http.Error(w, "egress: destination refused: "+reason, http.StatusForbidden)
 }
 
 const (
@@ -96,20 +142,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.upgrade(w, r)
 }
 
-// connect tunnels a CONNECT to host:443 when the host is allowed.
+// connect tunnels a CONNECT to host:443 when the rules admit the host.
 func (p *Proxy) connect(w http.ResponseWriter, r *http.Request) {
 	host, port, err := net.SplitHostPort(r.Host)
-	if err != nil || port != "443" || !p.Rules().Allows(host) {
-		p.observe("connect", OutcomeRefused)
-		p.Logger.Warn("egress refused", "kind", "connect", "host", r.Host)
-		http.Error(w, "egress: destination not allowed", http.StatusForbidden)
+	if err != nil || port != "443" {
+		p.refuse(w, "connect", r.Host, "only port 443 is served")
 		return
 	}
-	dial := p.Dial
-	if dial == nil {
-		dial = (&net.Dialer{Timeout: connectTimeout}).DialContext
+	if reason := p.Rules().refuses(host); reason != "" {
+		p.refuse(w, "connect", r.Host, reason)
+		return
 	}
-	upstream, err := dial(r.Context(), "tcp", net.JoinHostPort(host, port))
+	upstream, err := p.dialContext(r.Context(), "tcp", net.JoinHostPort(host, port))
+	if refused, ok := errors.AsType[*refusal](err); ok {
+		p.refuse(w, "connect", r.Host, refused.reason)
+		return
+	}
 	if err != nil {
 		p.observe("connect", OutcomeError)
 		p.Logger.Warn("egress dial failed", "host", r.Host, "error", err)
@@ -123,11 +171,17 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "egress: connection cannot be hijacked", http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
 	client, buf, err := hj.Hijack()
 	if err != nil {
 		p.observe("connect", OutcomeError)
 		p.Logger.Warn("egress hijack failed", "host", r.Host, "error", err)
+		return
+	}
+	// Written to the connection itself: a 200 through the ResponseWriter
+	// would carry a Transfer-Encoding, which a CONNECT response must not.
+	if _, err := io.WriteString(client, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
+		_ = client.Close()
+		p.observe("connect", OutcomeError)
 		return
 	}
 	defer func() { _ = client.Close() }()
@@ -153,8 +207,7 @@ func tunnel(client net.Conn, buffered io.Reader, upstream net.Conn) {
 	}
 	touch()
 	var wg sync.WaitGroup
-	copy := func(dst io.Writer, src io.Reader) {
-		defer wg.Done()
+	pipe := func(dst io.Writer, src io.Reader) {
 		defer stop()
 		buf := make([]byte, 32<<10)
 		for {
@@ -170,9 +223,8 @@ func tunnel(client net.Conn, buffered io.Reader, upstream net.Conn) {
 			}
 		}
 	}
-	wg.Add(2)
-	go copy(upstream, buffered)
-	go copy(client, upstream)
+	wg.Go(func() { pipe(upstream, buffered) })
+	wg.Go(func() { pipe(client, upstream) })
 	wg.Wait()
 }
 
@@ -192,16 +244,21 @@ func (p *Proxy) upgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	host := r.URL.Hostname()
 	rules := p.Rules()
-	if (r.URL.Port() != "" && r.URL.Port() != "80") || !rules.Allows(host) {
-		p.observe("http", OutcomeRefused)
-		p.Logger.Warn("egress refused", "kind", "http", "host", r.URL.Host)
-		http.Error(w, "egress: destination not allowed", http.StatusForbidden)
+	if r.URL.Port() != "" && r.URL.Port() != "80" {
+		p.refuse(w, "http", r.URL.Host, "only port 80 is served")
+		return
+	}
+	if reason := rules.refuses(host); reason != "" {
+		p.refuse(w, "http", r.URL.Host, reason)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), upgradeTimeout)
 	defer cancel()
 	target := *r.URL
 	target.Scheme, target.Host = "https", host
+	if strings.Contains(host, ":") {
+		target.Host = "[" + host + "]"
+	}
 	req, err := http.NewRequestWithContext(ctx, r.Method, target.String(), r.Body)
 	if err != nil {
 		p.observe("http", OutcomeError)
@@ -217,11 +274,11 @@ func (p *Proxy) upgrade(w http.ResponseWriter, r *http.Request) {
 	if cred, ok := rules.Credentials[strings.ToLower(host)]; ok {
 		req.Header.Set("Authorization", cred)
 	}
-	client := p.Client
-	if client == nil {
-		client = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := p.httpClient().Do(req)
+	if refused, ok := errors.AsType[*refusal](err); ok {
+		p.refuse(w, "http", r.URL.Host, refused.reason)
+		return
 	}
-	resp, err := client.Do(req)
 	if err != nil {
 		p.observe("http", OutcomeError)
 		p.Logger.Warn("egress request failed", "host", host, "error", err)
@@ -238,6 +295,24 @@ func (p *Proxy) upgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// httpClient is Client, or the default one: the default transport less
+// its environment proxy, dialing through the rules, following no redirect.
+func (p *Proxy) httpClient() *http.Client {
+	p.clientOnce.Do(func() {
+		if p.client = p.Client; p.client != nil {
+			return
+		}
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.DialContext = p.dialContext
+		p.client = &http.Client{
+			Transport:     transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+	})
+	return p.client
 }
 
 // ProxyURL checks a gateway URL a runner will be handed: http, a host, no

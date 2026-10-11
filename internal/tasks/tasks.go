@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // Subject is the issue or pull request an event is about.
@@ -90,8 +90,9 @@ type Task struct {
 	// it to turn off a task a broader one declares. Unset is on.
 	Enabled *bool     `yaml:"enabled,omitempty"`
 	On      []Trigger `yaml:"on"`
-	// If is a CEL guard over event, subject and raw; empty always runs.
-	If           string  `yaml:"if,omitempty"`
+	// When are CEL conditions over event, subject and raw, one of which
+	// must hold; empty always runs.
+	When         []When  `yaml:"when,omitempty"`
 	Mode         Mode    `yaml:"mode,omitempty"`
 	Models       Models  `yaml:"models,omitempty"`
 	Agent        Agent   `yaml:"agent,omitempty"`
@@ -125,14 +126,21 @@ type Models struct {
 // Agent is an agentic task's limits, tools and commands; the caller
 // bounds each by the operator's.
 type Agent struct {
-	MaxSteps           *int           `yaml:"maxSteps,omitempty"`
-	MaxToolOutputBytes *int           `yaml:"maxToolOutputBytes,omitempty"`
-	MaxTokens          *int64         `yaml:"maxTokens,omitempty"`
+	MaxSteps           *int           `yaml:"steps,omitempty"`
+	MaxToolOutputBytes *int           `yaml:"output,omitempty"`
+	MaxTokens          *int64         `yaml:"tokens,omitempty"`
 	Timeout            *time.Duration `yaml:"timeout,omitempty"`
 	// Tools are the agent tools the task uses; unset is every tool the
 	// operator allows, and empty is none.
 	Tools    []string `yaml:"tools,omitempty"`
 	Commands []string `yaml:"commands,omitempty"`
+}
+
+// When is one condition, Expr in CEL, in a list of which one must hold.
+// Name, when set, says what the condition is for.
+type When struct {
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+	Expr string `yaml:"expr" json:"expr"`
 }
 
 // Trigger is one event a task runs on. Actions empty is any action.
@@ -365,7 +373,7 @@ const (
 type CommentSpec struct {
 	Mode     string `yaml:"mode,omitempty"`
 	Template string `yaml:"template,omitempty"`
-	If       string `yaml:"if,omitempty"`
+	When     []When `yaml:"when,omitempty"`
 }
 
 // PostMode is the comment's mode, sticky when it sets none.
@@ -381,7 +389,7 @@ func (c *CommentSpec) PostMode() string {
 type LabelsSpec struct {
 	Propose LabelSet    `yaml:"propose,omitempty"`
 	Rules   []LabelRule `yaml:"rules,omitempty"`
-	If      string      `yaml:"if,omitempty"`
+	When    []When      `yaml:"when,omitempty"`
 }
 
 // LabelSet is globs of labels to add and to remove.
@@ -395,15 +403,15 @@ type LabelSet struct {
 type LabelRule struct {
 	Add    []string `yaml:"add,omitempty"`
 	Remove []string `yaml:"remove,omitempty"`
-	If     string   `yaml:"if,omitempty"`
+	When   []When   `yaml:"when,omitempty"`
 }
 
 // StateSpec lets the model close or reopen the subject, and closes or
-// reopens it when a rule's If holds.
+// reopens it when one of a rule's When conditions holds.
 type StateSpec struct {
 	Propose StateSet    `yaml:"propose,omitempty"`
 	Rules   []StateRule `yaml:"rules,omitempty"`
-	If      string      `yaml:"if,omitempty"`
+	When    []When      `yaml:"when,omitempty"`
 }
 
 // StateSet is the state changes the model may propose.
@@ -412,11 +420,11 @@ type StateSet struct {
 	Reopen bool `yaml:"reopen,omitempty"`
 }
 
-// StateRule closes or reopens the subject when If holds.
+// StateRule closes or reopens the subject when one of its When conditions holds.
 type StateRule struct {
 	Close  bool   `yaml:"close,omitempty"`
 	Reopen bool   `yaml:"reopen,omitempty"`
-	If     string `yaml:"if,omitempty"`
+	When   []When `yaml:"when,omitempty"`
 }
 
 // UsersSpec lets the model pick among the proposed users, and picks the
@@ -424,7 +432,7 @@ type StateRule struct {
 type UsersSpec struct {
 	Propose UserSet    `yaml:"propose,omitempty"`
 	Rules   []UserRule `yaml:"rules,omitempty"`
-	If      string     `yaml:"if,omitempty"`
+	When    []When     `yaml:"when,omitempty"`
 }
 
 // UserSet is the logins the model may pick.
@@ -432,16 +440,16 @@ type UserSet struct {
 	Users []string `yaml:"users,omitempty"`
 }
 
-// UserRule picks the users its templates render when If holds.
+// UserRule picks the users its templates render when one of its When conditions holds.
 type UserRule struct {
 	Users []string `yaml:"users,omitempty"`
-	If    string   `yaml:"if,omitempty"`
+	When  []When   `yaml:"when,omitempty"`
 }
 
 // InlineSpec lets the model comment on lines of a pull request's diff.
 type InlineSpec struct {
 	Propose bool   `yaml:"propose,omitempty"`
-	If      string `yaml:"if,omitempty"`
+	When    []When `yaml:"when,omitempty"`
 }
 
 // Action kinds, as the operator's bounds name them.

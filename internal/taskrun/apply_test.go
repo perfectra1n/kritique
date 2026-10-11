@@ -56,9 +56,12 @@ func (f *fakeForge) SetState(_ context.Context, _, _ string, _ int, open bool) e
 
 func (f *fakeForge) LineRanges() bool { return true }
 
-func (f *fakeForge) CreateReview(_ context.Context, _, _ string, _ int, head string, cs []forge.InlineComment) error {
+func (f *fakeForge) CreateReview(_ context.Context, _, _ string, _ int, head string, cs []forge.InlineComment) ([]int64, error) {
 	f.review = cs
-	return f.do("CreateReview " + head)
+	if err := f.do("CreateReview " + head); err != nil {
+		return nil, err
+	}
+	return make([]int64, len(cs)), nil
 }
 
 func (f *fakeForge) FindComment(_ context.Context, _, _ string, _ int, login, marker string) (int64, error) {
@@ -184,7 +187,7 @@ func TestPost(t *testing.T) {
 }
 
 func TestAnchor(t *testing.T) {
-	anchors := map[string]map[int]bool{"a.go": {3: true, 4: true, 5: true}, "b.go": {10: true}}
+	anchors := map[string]map[int]string{"a.go": {3: "", 4: "", 5: ""}, "b.go": {10: ""}}
 	in := []tasks.Inline{
 		{Path: "a.go", Line: 3, Body: "one line"},
 		{Path: "a.go", Line: 4, EndLine: 5, Body: "range"},

@@ -6,13 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/contextpack"
 	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/repoconfig"
@@ -23,8 +25,20 @@ import (
 // submitReview is the tool whose input is the review contract.
 const submitReview = "submit_review"
 
-const submitDescription = "Submit the review and end it. The input is the whole review: a summary and the findings, " +
-	"each anchored to a line added or changed on the head side of the diff. Call it exactly once, when you are done."
+const submitDescription = "Submit the review and end it. The input is the whole review: a summary and the findings. " +
+	"Call it exactly once, when you are done."
+
+// SubmitTool is the submit_review tool as the agent is offered it: its
+// input is the review contract, strict when a suggested fix is required,
+// with a summary diagram when diagram is set. The bench sends it too, so
+// it measures what a review sends.
+func SubmitTool(strict, diagram bool) model.ToolDef {
+	schema := review.Schema(diagram)
+	if strict {
+		schema = review.SchemaStrict(diagram)
+	}
+	return model.ToolDef{Name: submitReview, Description: submitDescription, InputSchema: schema}
+}
 
 // packView is the context pack as the review prompt reads it.
 type packView struct {
@@ -33,56 +47,175 @@ type packView struct {
 	Context   []contextpack.Chunk
 	DeltaDiff string
 	Scope     review.Scope
+	// Part is the part of a split review the prompt is for, nil when it is
+	// not split.
+	Part *review.PartInput
 }
 
-// AgentSkipped is the stop reason an agent_runs row records when the
-// runner did not run the agent because the worker will skip the review; its
-// error column holds the reason, repoconfig.SkipOnlyPaths or
-// SkipUnchangedPatch.
-const AgentSkipped agent.StopReason = "skipped"
-
-// SkipUnchangedPatch is the skip reason for a bot's pull request whose patch
-// id equals its last prepared review's.
+// SkipUnchangedPatch is the skip reason the runner decides beyond
+// repoconfig's: a bot's pull request whose patch id equals its last
+// prepared review's.
 const SkipUnchangedPatch = "unchanged_patch"
 
-// agentPrompt composes the system prompt and user message the way a
-// single-mode review does, from the same repository files and pack, with
-// the agentic addendum to the system prompt, which describes the run tool
-// when commands are offered. Only the similar-code stage is missing: the
-// runner has no index, and the agent can grep instead. strict says whether
-// the contract requires a suggested fix.
-func agentPrompt(p Spec, files repoconfig.Files, pack packView, commands []string) (system, user string, strict bool) {
-	instructions, _ := repoconfig.Instructions(files, repoconfig.Active(p.Prompt.Instructions, p.Prompt.InstructionScopes, pack.Changed))
-	system = review.AgenticSystemPrompt(instructions, commands)
-	var incremental *review.IncrementalInput
-	if pack.Scope == review.ScopeIncremental {
-		incremental = &review.IncrementalInput{PriorHeadSHA: p.PriorHead, DeltaDiff: pack.DeltaDiff, Prior: p.Prompt.Prior}
+// Notes the runner adds to the pack about the repository's files, which
+// the review's summary states.
+const (
+	noteInstructionsTruncated = "AGENTS.md and CLAUDE.md files truncated to 32 KiB"
+	noteRulesLeft             = "%d review rules left out, past the 16 KiB of rule text or 32 KiB of rule files a review is given"
+	noteDiffOmitted           = "%d diff file(s) left out of the prompt to fit its budget: %s"
+	noteContextOmitted        = "%d context chunk(s) left out of the prompt to fit its budget"
+	noteDiffNotKept           = "%d diff file(s) too large to keep, so findings in them have no line to attach to: %s"
+	noteSplit                 = "Reviewed in %d parts, each by an agent of its own"
+)
+
+// promptInputs is what the repository's files and the settings give the
+// review prompt for this change: the rules and reference files that apply
+// to its paths, and the instructions of its agent files. notes say what
+// was left out.
+type promptInputs struct {
+	rules        []review.Rule
+	skills       []repoconfig.Skill
+	instructions []string
+	references   []review.Reference
+	notes        []string
+}
+
+// ruleIDs is the ids of the rules the prompt was given.
+func (in promptInputs) ruleIDs() []string {
+	ids := make([]string, len(in.rules))
+	for i, r := range in.rules {
+		ids[i] = r.ID
 	}
-	active := repoconfig.ActiveContext(p.Prompt.Context, pack.Changed)
-	references := make([]review.Reference, 0, len(active))
-	for _, c := range active {
-		references = append(references, review.Reference{Path: c.Path, Description: c.Description})
+	return ids
+}
+
+// newPromptInputs selects, for a change of the changed paths, the spec's
+// rules, whose when conditions the worker has already judged, the context files
+// and the agent files of the changed directories.
+func newPromptInputs(p Spec, files repoconfig.Files, found []repoconfig.Skill, changed []string) promptInputs {
+	var in promptInputs
+	if sk := p.Prompt.Skills; sk != nil {
+		var left int
+		if in.skills, left = repoconfig.OfferedSkills(found, sk.Scope, sk.Off, changed); left > 0 {
+			in.notes = append(in.notes, fmt.Sprintf(noteSkillsLeft, left))
+		}
+	}
+	var truncated bool
+	if in.instructions, truncated = repoconfig.Instructions(files, repoconfig.AgentFiles(files, changed)); truncated {
+		in.notes = append(in.notes, noteInstructionsTruncated)
+	}
+	var left int
+	if in.rules, left = repoconfig.ActiveRules(p.Prompt.Rules, files, changed); left > 0 {
+		in.notes = append(in.notes, fmt.Sprintf(noteRulesLeft, left))
+	}
+	for _, c := range repoconfig.ActiveContext(p.Prompt.Context, changed) {
+		in.references = append(in.references, review.Reference{Path: c.Path, Description: c.Description})
+	}
+	return in
+}
+
+// agentPrompt is what the agent is sent: the system prompt, the first user
+// message, and the tool it answers with, whose input validate checks and
+// fallback, when set, holds to be an answer validate refused only for a
+// slip. omitted names the diff files, and contextOmitted counts the chunks, the
+// budget left out of the message. carried, when set, is the conversation
+// the agent carries on, and user then its next turn.
+type agentPrompt struct {
+	system, user   string
+	submit         model.ToolDef
+	validate       func(json.RawMessage) error
+	fallback       func(json.RawMessage) bool
+	omitted        []string
+	contextOmitted int
+	carried        *agent.Conversation
+}
+
+// noteOmittedPaths is how many omitted paths a note names.
+const noteOmittedPaths = 5
+
+// namePaths names the first noteOmittedPaths of paths and counts the rest.
+func namePaths(paths []string) string {
+	if n := len(paths); n > noteOmittedPaths {
+		paths = append(slices.Clone(paths[:noteOmittedPaths]), fmt.Sprintf("and %d more", n-noteOmittedPaths))
+	}
+	return strings.Join(paths, ", ")
+}
+
+// notes are what the summary states about the prompt's cuts.
+func (a agentPrompt) notes() []string {
+	var notes []string
+	if n := len(a.omitted); n > 0 {
+		notes = append(notes, fmt.Sprintf(noteDiffOmitted, n, namePaths(a.omitted)))
+	}
+	if a.contextOmitted > 0 {
+		notes = append(notes, fmt.Sprintf(noteContextOmitted, a.contextOmitted))
+	}
+	return notes
+}
+
+// newAgentPrompt composes the prompt from the inputs and the pack, whose
+// context includes the similar code the gateway found. commands are what
+// the run tool offers, fetch says fetch_repo is offered, and search
+// search_code.
+func newAgentPrompt(p Spec, in promptInputs, pack packView, commands []string, fetch, search bool) agentPrompt {
+	system := review.SystemPrompt(in.rules, repoconfig.PromptSkills(in.skills), in.instructions, commands, fetch, search, p.Prompt.Diagram)
+	var incremental *review.IncrementalInput
+	var earlier *review.EarlierInput
+	switch {
+	case pack.Scope == review.ScopeIncremental:
+		incremental = &review.IncrementalInput{PriorHeadSHA: p.PriorHead, DeltaDiff: pack.DeltaDiff, Prior: p.Prompt.Prior,
+			PriorDiagram: p.Prompt.PriorDiagram, Checked: p.Prompt.PriorChecked}
+	case p.PriorHead != "" && p.PriorHead != p.Head && !p.Prompt.PullRequest.Manual():
+		// A re-run at the reviewed head, or one asked for by hand, looks
+		// afresh.
+		earlier = &review.EarlierInput{HeadSHA: p.PriorHead, Findings: p.Prompt.Prior, Checked: p.Prompt.PriorChecked}
 	}
 	pr := p.Prompt.PullRequest
-	user, _, _ = review.Build(review.Input{
+	user, omitted, contextOmitted := review.Build(review.Input{
 		Repository: p.Prompt.Repository, Number: pr.Number, Title: pr.Title, Author: pr.Author, Body: pr.Body,
-		BaseRef: pr.BaseRef, Changed: pack.Changed, Diff: pack.Diff, Context: pack.Context,
-		Incremental: incremental, References: references, BudgetTokens: review.UserBudget(system),
+		Issues: p.Prompt.Issues, BaseRef: pr.BaseRef, Changed: pack.Changed, Diff: pack.Diff, Context: pack.Context,
+		Incremental: incremental, Earlier: earlier, Dismissed: p.Prompt.Dismissed, References: in.references, Part: pack.Part,
+		BudgetTokens: review.UserBudget(system, p.Agent.MaxPromptTokens),
 	})
-	return system, user, p.Prompt.RequireSuggestedFix
+	return agentPrompt{
+		system: system, user: user, submit: SubmitTool(p.Prompt.RequireSuggestedFix, p.Prompt.Diagram), validate: review.Check,
+		fallback: review.Lenient(review.Check), omitted: omitted, contextOmitted: contextOmitted,
+	}
 }
 
 // agentSkip returns why the worker will skip this review whatever the
-// agent finds, or "": the checks the worker makes after the run, made
-// before it so a skipped review spends nothing.
-func agentSkip(p Spec, changed []string, patchID string) string {
+// agent finds, or "", and for a filtered one the name of the exclusion
+// that decided: settled before the agent runs, so a skipped review spends
+// nothing. A condition that fails to evaluate skips; the error is
+// returned for the log. The conditions see the pull request as the spec
+// carries it, its body cut to MaxBodyBytes.
+func agentSkip(p Spec, changed []string, patchID, diff string) (reason, detail string, err error) {
 	switch {
 	case p.Prompt.UnchangedPatchID != "" && patchID == p.Prompt.UnchangedPatchID:
-		return SkipUnchangedPatch
-	case repoconfig.Skip{OnlyPaths: p.Prompt.SkipPaths}.All(changed):
-		return string(repoconfig.SkipOnlyPaths)
+		return SkipUnchangedPatch, "", nil
+	case repoconfig.AllIgnored(p.Ignore, changed):
+		return string(repoconfig.SkipOnlyPaths), "", nil
+	case len(p.Prompt.Filters) == 0:
+		return "", "", nil
 	}
-	return ""
+	vars, err := p.Prompt.PullRequest.Vars()
+	if err != nil {
+		return "", "", err
+	}
+	d := &configfile.Diff{Lines: contextpack.ChangedLines(diff, p.Ignore), Changed: changed}
+	for i := range p.Prompt.Filters {
+		fs := &p.Prompt.Filters[i]
+		if err := fs.Compile(); err != nil {
+			return "", "", fmt.Errorf("runner: filters: %w", err)
+		}
+		if skip, by, err := fs.Skips(vars, d); skip {
+			if by != nil {
+				detail = by.Name
+			}
+			return string(repoconfig.SkipFiltered), detail, err
+		}
+	}
+	return "", "", nil
 }
 
 // limits are the agent loop's bounds, defaults filled in.
@@ -90,34 +223,44 @@ func (a *AgentLimits) limits() agent.Limits {
 	return agent.Limits{MaxSteps: a.MaxSteps, MaxToolOutputBytes: a.MaxToolOutputBytes, MaxTokens: a.MaxTokens}.WithDefaults()
 }
 
-// reviewAgent runs the tool loop over head, with extra tools beside the
-// read-only ones. A positive timeout bounds it; running out of time ends
-// it as canceled with the timeout in Err.
-func reviewAgent(
-	ctx context.Context, stepper model.Stepper, p Spec, head *object.Tree, ignore []string, extra []agent.Tool,
-	system, user string, strict bool, timeout time.Duration, logger *slog.Logger,
-) (agent.Result, []store.TimelineStep) {
-	limits := p.Agent.limits()
-	schema := review.Schema()
-	if strict {
-		schema = review.SchemaStrict()
-	}
+// offeredTools are every tool the agent is offered: the read-only ones over
+// head, then extra. With fetch_repo, or a run tool that keeps cut outputs,
+// among extra, read_file reads what they write too.
+func offeredTools(p Spec, head *object.Tree, ignore []string, extra []agent.Tool) []agent.Tool {
+	limit := p.Agent.limits().MaxToolOutputBytes
 	tree := agent.NewTree(head, ignore)
-	tools := append([]agent.Tool{
-		agent.ReadFileTool(tree, limits.MaxToolOutputBytes),
-		agent.GrepTool(tree, limits.MaxToolOutputBytes),
-		agent.ListFilesTool(tree, limits.MaxToolOutputBytes),
+	issues := make(map[int]string, len(p.Prompt.Issues))
+	for _, is := range p.Prompt.Issues {
+		issues[is.Number] = is.Body
+	}
+	read := agent.ReadFileTool(tree, limit)
+	var written string
+	for _, t := range extra {
+		switch t := t.(type) {
+		case *fetchRepoTool:
+			written = t.dir
+		case *agent.RunTool:
+			if k := t.Kept(); k != nil {
+				written = k.Dir
+			}
+		}
+	}
+	if written != "" {
+		read = fetchedReadFile{Tool: read, dir: written, maxBytes: limit}
+	}
+	return append([]agent.Tool{
+		read,
+		agent.GrepTool(tree, limit),
+		agent.ListFilesTool(tree, limit),
+		agent.ReadDescriptionTool(p.Prompt.PullRequest.Body, issues, limit),
 	}, extra...)
-	submit := model.ToolDef{Name: submitReview, Description: submitDescription, InputSchema: schema}
-	return agentLoop(ctx, stepper, p, tools, submit, system, user, timeout, logger)
 }
 
-// agentLoop runs the tool loop until the agent calls submit or a limit
-// ends it. A positive timeout bounds it; running out of time ends it as
-// canceled with the timeout in Err.
+// agentLoop runs the tool loop with tools until the agent answers with
+// prompt's submit tool. A positive timeout bounds it; running out of time
+// ends it as canceled with the timeout in Err.
 func agentLoop(
-	ctx context.Context, stepper model.Stepper, p Spec, tools []agent.Tool, submit model.ToolDef,
-	system, user string, timeout time.Duration, logger *slog.Logger,
+	ctx context.Context, stepper model.Stepper, p Spec, tools []agent.Tool, prompt agentPrompt, timeout time.Duration, logger *slog.Logger,
 ) (agent.Result, []store.TimelineStep) {
 	actx, cancel := ctx, context.CancelFunc(func() {})
 	if timeout > 0 {
@@ -126,10 +269,12 @@ func agentLoop(
 	defer cancel()
 	timeline := []store.TimelineStep{}
 	res := agent.Run{
-		Stepper: stepper, Model: p.Model.Model, System: system, User: user,
-		Tools:  tools,
-		Submit: submit,
-		Limits: p.Agent.limits(),
+		Stepper: stepper, Model: p.Model.Model, System: prompt.system, User: prompt.user, Carried: prompt.carried,
+		Tools:    tools,
+		Submit:   prompt.submit,
+		Validate: prompt.validate,
+		Fallback: prompt.fallback,
+		Limits:   p.Agent.limits(),
 		OnStep: func(e agent.StepEvent) {
 			tools := e.Tools
 			if tools == nil {
@@ -146,62 +291,78 @@ func agentLoop(
 	if res.Stop == agent.StopCanceled && ctx.Err() == nil && errors.Is(actx.Err(), context.DeadlineExceeded) {
 		res.Err = fmt.Sprintf("agent timeout (%s) reached", timeout)
 	}
+	if res.Refused != "" {
+		logger.Warn("agent ended without a valid submission; taking its last refused one", "refusal", res.Refused)
+	}
 	return res, timeline
 }
 
-// gatewayStepper is the agent's model, reached through the worker's gateway
-// with the run's token.
-func gatewayStepper(p Spec, secrets Secrets) (model.Stepper, error) {
-	stepper, err := model.NewOpenAI(model.OpenAIConfig{
-		BaseURL: strings.TrimSuffix(p.Model.GatewayURL, "/") + "/v1", APIKey: secrets.GatewayToken, ReportsModel: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("runner: %w", err)
-	}
-	return stepper, nil
+// agentTools is what the agent gets beside the read-only tools over head:
+// read_diff over the pull request's diff, the run tool, when commands are
+// offered, with fetch_repo when one of them reaches the network, and
+// search_code, when the repository has an index.
+type agentTools struct {
+	diff   *readDiffTool
+	run    *agent.RunTool
+	fetch  *fetchRepoTool
+	search *searchTool
+	skills *skillTool
 }
 
-// runAgentic runs the agent over the fetched head and writes its
-// agent_runs row, then marks the run done. A review the worker will skip
-// anyway is recorded as skipped without running the agent.
-func runAgentic(
-	ctx context.Context, st *store.Store, p Spec, secrets Secrets, head *object.Tree, files repoconfig.Files,
-	pack packView, ignore []string, patchID string, logger *slog.Logger,
-) error {
-	if reason := agentSkip(p, pack.Changed, patchID); reason != "" {
-		logger.Info("agent not run", "reason", reason)
-		rec := agentRecord{stop: AgentSkipped, toolCalls: []byte("{}"), timeline: []byte("[]"), sources: []byte("[]"), err: reason}
-		return writeAgentRun(ctx, st, p, rec, "done")
+// extra lists the tools to offer.
+func (t agentTools) extra() []agent.Tool {
+	var out []agent.Tool
+	if t.diff != nil {
+		out = append(out, t.diff)
 	}
-	stepper, err := gatewayStepper(p, secrets)
+	if t.run != nil {
+		out = append(out, t.run)
+	}
+	if t.fetch != nil {
+		out = append(out, t.fetch)
+	}
+	if t.search != nil {
+		out = append(out, t.search)
+	}
+	if t.skills != nil {
+		out = append(out, t.skills)
+	}
+	return out
+}
+
+// commands names the run tool's commands, none without it.
+func (t agentTools) commands() []string {
+	if t.run == nil {
+		return nil
+	}
+	return t.run.Names()
+}
+
+// gatewayRetries is how many times a step the gateway answered with a 500,
+// its own database not answering, is sent again; the gateway marks every
+// other refusal final, since it has already retried the provider.
+const gatewayRetries = 2
+
+// runAgentic runs the agent over the fetched head with the prompt already
+// composed, writes its agent_runs row, with a review's conversation for
+// the next re-review, and marks the run done.
+func runAgentic(
+	ctx context.Context, st *store.Store, p Spec, secrets Secrets, head *object.Tree, ignore []string, tools agentTools,
+	prompt agentPrompt, scope review.Scope, logger *slog.Logger,
+) error {
+	stepper, err := gatewayStepper(p, secrets, 0)
 	if err != nil {
 		return err
 	}
-	run, cleanup := commandTool(ctx, p, agent.NewTree(head, ignore), p.Agent.limits().MaxToolOutputBytes, logger)
-	defer cleanup()
-	var extra []agent.Tool
-	var commands []string
-	if run != nil {
-		extra, commands = []agent.Tool{run}, run.Names()
-	}
-	system, user, strict := agentPrompt(p, files, pack, commands)
-	logger.Info("agent started", "model", p.Model.Model, "scope", pack.Scope, "prompt_chars", len(system)+len(user), "commands", commands)
-	res, timeline := reviewAgent(ctx, stepper, p, head, ignore, extra, system, user, strict,
+	logger.Info("agent started", "model", p.Model.Model, "scope", scope, "prompt_chars", len(prompt.system)+len(prompt.user),
+		"commands", tools.commands(), "search", tools.search != nil)
+	res, timeline := agentLoop(ctx, stepper, p, offeredTools(p, head, ignore, tools.extra()), prompt,
 		time.Duration(p.Agent.TimeoutSeconds)*time.Second, logger)
-	sources := []string{}
-	if run != nil {
-		sources = run.Sources()
+	sources := toolSources(tools)
+	var continued string
+	if prompt.carried != nil {
+		continued = p.Prompt.Continue.RunID
 	}
-	return recordAgent(ctx, st, p, secrets, res, timeline, sources, nil, logger)
-}
-
-// recordAgent writes the agent's agent_runs row, with notes on what the
-// run's context left out, and marks the run done, or failed when ctx ended
-// it.
-func recordAgent(
-	ctx context.Context, st *store.Store, p Spec, secrets Secrets, res agent.Result, timeline []store.TimelineStep, sources, notes []string,
-	logger *slog.Logger,
-) error {
 	if cerr := ctx.Err(); cerr != nil {
 		// The run was cancelled, deleted or ran out of Job time: what the
 		// agent spent so far is still spent, so the row is written on a
@@ -212,7 +373,9 @@ func recordAgent(
 		}
 		wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), canceledWriteTimeout)
 		defer cancel()
-		rec, err := newAgentRecord(res, timeline, sources, notes, secrets)
+		rec, err := newAgentRecord(res, timeline, sources, secrets)
+		rec.useTools(tools)
+		rec.continued = continued
 		if err == nil {
 			err = writeAgentRun(wctx, st, p, rec, "failed")
 		}
@@ -220,13 +383,64 @@ func recordAgent(
 			"cost_usd", res.CostUSD, "error", err)
 		return errors.Join(fmt.Errorf("runner: agent: %w", cerr), err)
 	}
-	rec, err := newAgentRecord(res, timeline, sources, notes, secrets)
+	rec, err := newAgentRecord(res, timeline, sources, secrets)
 	if err != nil {
 		return err
 	}
-	logger.Info("agent stopped", "stop", res.Stop, "steps", res.Steps, "tool_calls", res.ToolCalls, "sources", len(sources),
+	rec.useTools(tools)
+	rec.continued = continued
+	if p.Kind == KindReview && res.Conversation != nil {
+		// The gateway names a run's steps by the run, unless its token
+		// names the session of a conversation it may carry on.
+		rec.conversation, rec.tokens, rec.granted = keptConversation(res.Conversation, secrets, logger), res.Conversation.Tokens, p.Model.Granted
+		rec.session = p.RunID
+		if c := p.Prompt.Continue; c != nil {
+			rec.session = c.Session
+		}
+	}
+	logger.Info("agent stopped", "stop", res.Stop, "steps", res.Steps, "tool_calls", res.ToolCalls, "commands", rec.commandsRun,
+		"sources", len(sources),
 		"input_tokens", res.Usage.Prompt(), "output_tokens", res.Usage.Output, "cost_usd", res.CostUSD, "error", rec.err)
 	return writeAgentRun(ctx, st, p, rec, "done")
+}
+
+// gatewayStepper is the run's client of the gateway, naming part, the part
+// of a split review its steps are for, or none when part is 0.
+func gatewayStepper(p Spec, secrets Secrets, part int) (model.Stepper, error) {
+	s, err := model.NewOpenAI(model.OpenAIConfig{
+		BaseURL: strings.TrimSuffix(p.Model.GatewayURL, "/") + "/v1", APIKey: secrets.GatewayToken, ReportsModel: true,
+		Retries: gatewayRetries, RequestTimeout: model.GatewayRequestTimeout, Part: part,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("runner: %w", err)
+	}
+	return s, nil
+}
+
+// toolSources are what the run tool's commands and fetch_repo read from
+// outside the repository, never nil.
+func toolSources(tools agentTools) []string {
+	sources := []string{}
+	if tools.run != nil {
+		sources = tools.run.Sources()
+	}
+	if tools.fetch != nil {
+		sources = append(sources, tools.fetch.Sources()...)
+	}
+	return sources
+}
+
+// useTools records on rec the repository's skills and the run tool's
+// commands the agent was offered, and those it used.
+func (rec *agentRecord) useTools(tools agentTools) {
+	rec.skillsOffered, rec.skillsOpened = []string{}, []string{}
+	if tools.skills != nil {
+		rec.skillsOffered, rec.skillsOpened = tools.skills.names(), tools.skills.Opened()
+	}
+	rec.commandsOffered, rec.commandsRun = []string{}, []string{}
+	if tools.run != nil {
+		rec.commandsOffered, rec.commandsRun = tools.commands(), tools.run.Ran()
+	}
 }
 
 // canceledWriteTimeout bounds writing a cancelled agent's row, well inside
@@ -241,24 +455,63 @@ type agentRecord struct {
 	toolCalls, timeline, sources []byte
 	usage                        model.Usage
 	costUSD                      float64
+	// skillsOffered are the skills the agent could load, and skillsOpened
+	// the ones it did; commandsOffered and commandsRun the same for the
+	// run tool's commands.
+	skillsOffered, skillsOpened  []string
+	commandsOffered, commandsRun []string
 	// model answered the run's last step; empty when no step was answered,
 	// and the worker then names the model the run was granted.
 	model string
 	err   string
-	// notes say what a task run's context left out.
+	// conversation is the agent's exchange, encoded, which the pull
+	// request's next re-review may carry on, nil when none is kept, with
+	// its size in tokens; session is the conversation its steps were sent
+	// as, and granted the model reference the run was granted.
+	conversation     []byte
+	tokens           int64
+	session, granted string
+	// continued is the run whose conversation the agent carried on, "" for
+	// none.
+	continued string
+	// parts are how a split review's parts ended, encoded, nil for a
+	// review that was not split.
+	parts []byte
+	// notes say what a task run's context left out, nil for any other
+	// run.
 	notes []string
 }
 
+// keptConversation is the conversation of a review's agent, encoded, that
+// its run keeps for the next re-review, nil for none: one too long to
+// carry on, or one holding the run's secrets, which a conversation kept
+// unmasked must not.
+func keptConversation(c *agent.Conversation, secrets Secrets, logger *slog.Logger) []byte {
+	if c == nil {
+		return nil
+	}
+	if c.Tokens >= agent.ContinueTokens {
+		logger.Info("conversation not kept: too long to carry on", "tokens", c.Tokens)
+		return nil
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		logger.Warn("conversation not kept", "error", err)
+		return nil
+	}
+	if secrets.Mask(string(b)) != string(b) {
+		logger.Warn("conversation not kept: it holds one of the run's secrets")
+		return nil
+	}
+	return b
+}
+
 // newAgentRecord encodes a finished Run and the sources its commands
-// fetched. The error text and the sources are masked: an error may carry a
-// token, and the worker shows both.
-func newAgentRecord(res agent.Result, timeline []store.TimelineStep, sources, notes []string, secrets Secrets) (agentRecord, error) {
-	rec := agentRecord{
-		stop: res.Stop, steps: res.Steps, usage: res.Usage, costUSD: res.CostUSD, model: res.Model, err: secrets.Mask(res.Err), notes: []string{},
-	}
-	for _, n := range notes {
-		rec.notes = append(rec.notes, secrets.Mask(n))
-	}
+// fetched. The error text, the sources and the submitted review are
+// masked: an error may carry a token, a steered model may write one into
+// its review, and the worker shows all three.
+func newAgentRecord(res agent.Result, timeline []store.TimelineStep, sources []string, secrets Secrets) (agentRecord, error) {
+	rec := agentRecord{stop: res.Stop, steps: res.Steps, usage: res.Usage, costUSD: res.CostUSD, model: res.Model, err: secrets.Mask(res.Err)}
 	masked := make([]string, len(sources))
 	for i, s := range sources {
 		masked[i] = secrets.Mask(s)
@@ -274,7 +527,7 @@ func newAgentRecord(res agent.Result, timeline []store.TimelineStep, sources, no
 		return agentRecord{}, fmt.Errorf("runner: encode timeline: %w", err)
 	}
 	if res.Stop == agent.StopSubmitted {
-		rec.result = string(res.Submitted)
+		rec.result = secrets.Mask(string(res.Submitted))
 	}
 	return rec, nil
 }
@@ -283,17 +536,25 @@ func newAgentRecord(res agent.Result, timeline []store.TimelineStep, sources, no
 func writeAgentRun(ctx context.Context, st *store.Store, p Spec, rec agentRecord, phase string) error {
 	return st.WithRunnerJob(ctx, p.RunID, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
-			INSERT INTO agent_runs (runner_run_id, tenant_id, stop_reason, result, steps, tool_calls, timeline,
-				input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, cost_usd, model, error, sources, notes)
-			SELECT id, tenant_id, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, left($13, 2000), $14, coalesce($15, '{}'::text[])
+			INSERT INTO agent_runs (runner_run_id, account_id, stop_reason, result, steps, tool_calls, timeline,
+				input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, cost_usd, model, error, sources,
+				skills_offered, skills_opened, commands_offered, commands_run, continued_from, parts, notes)
+			SELECT id, account_id, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, left($13, 2000), $14, $15, $16, $17, $18,
+				nullif($19, '')::uuid, coalesce($20::jsonb, '[]'::jsonb), coalesce($21, '{}'::text[])
 			FROM runner_runs WHERE id = $1`,
 			p.RunID, string(rec.stop), rec.result, rec.steps, rec.toolCalls, rec.timeline,
 			rec.usage.Input, rec.usage.CacheRead, rec.usage.CacheWrite, rec.usage.Output, rec.costUSD, rec.model, rec.err,
-			rec.sources, rec.notes)
+			rec.sources, rec.skillsOffered, rec.skillsOpened, rec.commandsOffered, rec.commandsRun, rec.continued, rec.parts, rec.notes)
 		if err != nil {
 			return fmt.Errorf("runner: write agent run: %w", err)
 		}
-		_, err = tx.Exec(ctx, `UPDATE runner_runs SET phase = $2 WHERE id = $1`, p.RunID, phase)
-		return err
+		if rec.conversation != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO agent_conversations (runner_run_id, account_id, session, conversation, tokens, model)
+				SELECT id, account_id, $2, $3, $4, $5 FROM runner_runs WHERE id = $1`,
+				p.RunID, rec.session, string(rec.conversation), rec.tokens, rec.granted); err != nil {
+				return fmt.Errorf("runner: write conversation: %w", err)
+			}
+		}
+		return setPhaseTx(ctx, tx, p.RunID, phase)
 	})
 }

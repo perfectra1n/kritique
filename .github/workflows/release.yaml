@@ -13,6 +13,8 @@ on:
       - published
   # release-please dispatches this on the new tag, because the release it
   # publishes with the built-in token can't fire the release trigger above.
+  # Every tag-only step keys on the ref, not the event, so both paths build
+  # the same release.
   workflow_dispatch:
 
 concurrency:
@@ -35,7 +37,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           cache: false
           experimental: true
@@ -118,7 +120,9 @@ jobs:
 
   helm:
     name: Helm
-    needs: release
+    needs:
+      - release
+      - release-tools
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-26.04
     permissions:
@@ -134,18 +138,20 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           cache: false
           experimental: true
           install_args: --locked
 
-      - name: Pin the released image digest into the chart
+      - name: Pin the released image digests into the chart
         env:
           DIGEST: ${{ needs.release.outputs.digest }}
+          TOOLS_DIGEST: ${{ needs.release-tools.outputs.digest }}
         run: |
           [ -n "${DIGEST}" ] || { echo "::error::empty image digest from build job"; exit 1; }
-          yq -i '.image.digest = strenv(DIGEST)' charts/kritique/values.yaml
+          [ -n "${TOOLS_DIGEST}" ] || { echo "::error::empty -tools image digest from build job"; exit 1; }
+          yq -i '.image.digest = strenv(DIGEST) | .runner.image.digest = strenv(TOOLS_DIGEST)' charts/kritique/values.yaml
 
       - name: Package Helm chart
         run: helm package charts/kritique --version "${VERSION}" --app-version "${VERSION}"

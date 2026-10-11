@@ -1,12 +1,15 @@
 package executor
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,7 +24,8 @@ import (
 	"github.com/perfectra1n/kritique/internal/runner"
 )
 
-// runnerRole is the --role value and container name of a runner pod.
+// runnerRole names a runner pod's container, and its component and role
+// labels, which the runner network policy selects.
 const runnerRole = "runner"
 
 // noProxy is what a runner pod with a gateway reaches directly, besides
@@ -32,28 +36,36 @@ const noProxy = "localhost,127.0.0.1"
 type Kube struct {
 	Client    kubernetes.Interface
 	Namespace string
-	// Image is the kritique image the Job runs, normally the worker's own.
+	// Image is the kritique image the Job runs, normally the release's -tools
+	// image.
 	Image string
+	// ImagePullPolicy, when set, is the runner container's imagePullPolicy.
+	ImagePullPolicy string
 	// ServiceAccount is the permissionless runner service account.
 	ServiceAccount string
 	// DatabaseSecret and DatabaseSecretKey reference the Secret holding the
 	// runner role's DSN, injected as KRITIQUE_DATABASE_URL.
 	DatabaseSecret, DatabaseSecretKey string
-	// GatewayURL, when set, is the egress gateway the pod is handed as its
-	// HTTPS_PROXY and HTTP_PROXY: with the runner network policy allowing
-	// nothing else, every byte the runner sends out passes the gateway's
-	// host allowlist (ADR-0008).
+	// GatewayURL is the egress gateway the pod is handed as its HTTPS_PROXY
+	// and HTTP_PROXY: with the runner network policy allowing nothing else,
+	// every byte the runner sends out passes the gateway's host allowlist.
+	// Every review needs it, so serve refuses to start without one; the
+	// check here only keeps a test's spec honest.
 	GatewayURL string
 	// RuntimeClass, when set, is the RuntimeClass the pod runs under.
 	RuntimeClass string
 	// TTL is ttlSecondsAfterFinished; the run row outlives the Job.
 	TTL time.Duration
 	// Poll is how often the Job is checked.
-	Poll   time.Duration
-	Logger *slog.Logger
+	Poll time.Duration
+	// StartGrace is how long a pod may stay unable to start before its run
+	// is given up; startGrace unless set.
+	StartGrace time.Duration
+	Logger     *slog.Logger
 }
 
-// NewKubeInCluster builds a Kube executor from the pod's service account.
+// NewKubeInCluster returns a Kubernetes client from the pod's service
+// account, and the pod's namespace, for a Kube executor.
 func NewKubeInCluster() (kubernetes.Interface, string, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
@@ -78,15 +90,20 @@ func (k *Kube) Run(ctx context.Context, spec Spec) Result {
 	if err := spec.Job.Validate(); err != nil {
 		return Result{Err: fmt.Errorf("executor: %w", err)}
 	}
-	name := jobName(spec.RunID)
+	name := jobName(spec.Job.RunID)
 	runSpec, err := runner.EncodeSpec(spec.Job)
 	if err != nil {
 		return Result{Err: fmt.Errorf("executor: %w", err)}
 	}
-	job := k.job(spec)
+	job, err := k.job(spec)
+	if err != nil {
+		return Result{Err: err}
+	}
+	// The API refusing the Secret, the Job or the Secret's owner leaves a
+	// run whose container never ran, which the worker retries.
 	secrets := k.Client.CoreV1().Secrets(k.Namespace)
 	if _, err := secrets.Create(ctx, k.secret(spec, runSpec), metav1.CreateOptions{}); err != nil {
-		return Result{Err: fmt.Errorf("executor: create secret: %w", err)}
+		return Result{NeverStarted: true, Err: fmt.Errorf("executor: create secret: %w", err)}
 	}
 	created, err := k.Client.BatchV1().Jobs(k.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
@@ -95,21 +112,21 @@ func (k *Kube) Run(ctx context.Context, spec Spec) Result {
 			k.deleteJob(ctx, name)
 		}
 		k.deleteSecret(ctx, name)
-		return Result{Err: fmt.Errorf("executor: create job: %w", err)}
+		return Result{NeverStarted: true, Err: fmt.Errorf("executor: create job: %w", err)}
 	}
 	res := Result{JobName: created.Name}
 	if err := k.own(ctx, created); err != nil {
 		k.deleteJob(ctx, created.Name)
 		k.deleteSecret(ctx, name)
-		res.Err = err
+		res.NeverStarted, res.Err = true, err
 		return res
 	}
-	poll := k.Poll
-	if poll <= 0 {
-		poll = 3 * time.Second
-	}
+	poll := cmp.Or(k.Poll, 3*time.Second)
 	t := time.NewTicker(poll)
 	defer t.Stop()
+	unread := 0
+	started := false
+	var stuckSince time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -123,9 +140,20 @@ func (k *Kube) Run(ctx context.Context, spec Spec) Result {
 				k.cancel(ctx, &res, spec.Secrets)
 				return res
 			}
+			// The API server answering badly says nothing about the run: the
+			// Job is checked again next tick. One that stays unreadable is
+			// deleted rather than left to run beside the retry the worker
+			// will start.
+			if unread++; unread < maxUnreadStatus {
+				k.logger().Warn("runner job status not read, retrying", "job", created.Name, "error", err)
+				continue
+			}
+			k.deleteJob(ctx, created.Name)
+			k.finish(ctx, &res, spec.Secrets)
 			res.Err = fmt.Errorf("executor: get job: %w", err)
 			return res
 		}
+		unread = 0
 		if j.Status.Succeeded > 0 || j.Status.Failed > 0 || jobFinished(j) {
 			k.finish(ctx, &res, spec.Secrets)
 			if j.Status.Succeeded == 0 {
@@ -133,8 +161,67 @@ func (k *Kube) Run(ctx context.Context, spec Spec) Result {
 			}
 			return res
 		}
+		if started {
+			continue
+		}
+		var stuck string
+		if started, stuck = k.podStart(ctx, created.Name); stuck == "" {
+			stuckSince = time.Time{}
+			continue
+		}
+		if stuckSince.IsZero() {
+			stuckSince = time.Now()
+		}
+		if time.Since(stuckSince) >= cmp.Or(k.StartGrace, startGrace) {
+			k.deleteJob(ctx, created.Name)
+			k.finish(ctx, &res, spec.Secrets)
+			res.TerminationReason, res.NeverStarted = stuck, true
+			res.Err = fmt.Errorf("executor: job %s never started: %s", created.Name, stuck)
+			return res
+		}
 	}
 }
+
+// startGrace is how long a runner pod may stay unable to start, unscheduled
+// or its container refused, before the run is given up rather than holding
+// its review's slot until the Job's deadline. It outlasts what clears on
+// its own: a registry's hiccup, a node on its way from an autoscaler.
+const startGrace = 3 * time.Minute
+
+// stuckReasons are the container waiting reasons of a pod that will not
+// start as it is: an image that cannot be pulled, or a container the
+// kubelet cannot build, as from a Secret or key that does not exist.
+var stuckReasons = []string{"ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError", "CreateContainerError"}
+
+// podStart reports whether the Job's pod has started its container, and
+// otherwise why it cannot, empty while it is only on its way: not yet
+// created, or pulling its image. A pod that cannot be read is on its way.
+func (k *Kube) podStart(ctx context.Context, job string) (started bool, stuck string) {
+	pods, err := k.Client.CoreV1().Pods(k.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "job-name=" + job})
+	if err != nil || len(pods.Items) == 0 {
+		return false, ""
+	}
+	pod := pods.Items[len(pods.Items)-1]
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Running != nil || cs.State.Terminated != nil {
+			return true, ""
+		}
+		if w := cs.State.Waiting; w != nil && slices.Contains(stuckReasons, w.Reason) {
+			return false, strings.TrimSuffix(w.Reason+": "+w.Message, ": ")
+		}
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable {
+			return false, strings.TrimSuffix(c.Reason+": "+c.Message, ": ")
+		}
+	}
+	return false, ""
+}
+
+// maxUnreadStatus is how many status reads in a row may fail before the
+// Job is given up on: with the default poll, half a minute of the API
+// server not answering.
+const maxUnreadStatus = 10
 
 // own makes the Job the Secret's owner so garbage collection deletes the
 // Secret with the Job. It is not the controller and must not block the
@@ -163,12 +250,25 @@ func (k *Kube) cancel(ctx context.Context, res *Result, secrets runner.Secrets) 
 // deleteJob removes a Job and, with foreground propagation, its pod. It
 // runs without ctx's cancellation because ctx has usually ended.
 func (k *Kube) deleteJob(ctx context.Context, name string) {
+	if err := k.removeJob(ctx, name); err != nil {
+		k.logger().Warn("delete runner job", "job", name, "error", err)
+	}
+}
+
+// DeleteRun deletes the Job of run runID, pod and Secret with it, for a run
+// whose worker is gone. A Job already gone counts as deleted.
+func (k *Kube) DeleteRun(ctx context.Context, runID string) error {
+	return k.removeJob(ctx, jobName(runID))
+}
+
+func (k *Kube) removeJob(ctx context.Context, name string) error {
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
 	opts := metav1.DeleteOptions{PropagationPolicy: new(metav1.DeletePropagationForeground)}
 	if err := k.Client.BatchV1().Jobs(k.Namespace).Delete(dctx, name, opts); err != nil && !apierrors.IsNotFound(err) {
-		k.logger().Warn("delete runner job", "job", name, "error", err)
+		return fmt.Errorf("executor: delete runner job %s: %w", name, err)
 	}
+	return nil
 }
 
 // deleteSecret removes a Secret no Job owns yet.
@@ -181,19 +281,13 @@ func (k *Kube) deleteSecret(ctx context.Context, name string) {
 }
 
 func (k *Kube) logger() *slog.Logger {
-	if k.Logger == nil {
-		return slog.Default()
-	}
-	return k.Logger
+	return cmp.Or(k.Logger, slog.Default())
 }
 
 func jobFinished(j *batchv1.Job) bool {
-	for _, c := range j.Status.Conditions {
-		if (c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed) && c.Status == corev1.ConditionTrue {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(j.Status.Conditions, func(c batchv1.JobCondition) bool {
+		return (c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed) && c.Status == corev1.ConditionTrue
+	})
 }
 
 // finish fills the pod-level fields of a result from the Job's pod, with
@@ -312,7 +406,7 @@ func (k *Kube) secret(spec Spec, runSpec []byte) *corev1.Secret {
 		data[secretKeyGatewayToken] = []byte(spec.Secrets.GatewayToken)
 	}
 	return &corev1.Secret{
-		Name: jobName(spec.RunID), Namespace: k.Namespace, Labels: runnerLabels(spec),
+		Name: jobName(spec.Job.RunID), Namespace: k.Namespace, Labels: runnerLabels(spec),
 		Type: corev1.SecretTypeOpaque,
 		Data: data,
 	}
@@ -321,16 +415,14 @@ func (k *Kube) secret(spec Spec, runSpec []byte) *corev1.Secret {
 // job builds the Job for a spec. The runner gets its job document as a
 // read-only file and its credentials as variables, both from the run's
 // Secret, and the runner role's DSN from the database Secret; nothing else.
-func (k *Kube) job(spec Spec) *batchv1.Job {
-	name := jobName(spec.RunID)
+func (k *Kube) job(spec Spec) (*batchv1.Job, error) {
+	resources, err := containerResources(spec.Resources)
+	if err != nil {
+		return nil, err
+	}
+	name := jobName(spec.Job.RunID)
 	deadline := int64(spec.Deadline / time.Second)
-	if deadline <= 0 {
-		deadline = 900
-	}
 	ttl := int32(k.TTL / time.Second)
-	if ttl <= 0 {
-		ttl = 600
-	}
 	labels := runnerLabels(spec)
 	annotations := map[string]string{}
 	for key, v := range spec.Annotations {
@@ -359,10 +451,12 @@ func (k *Kube) job(spec Spec) *batchv1.Job {
 		)
 	}
 	container := corev1.Container{
-		Name:  runnerRole,
-		Image: k.Image,
-		Args:  []string{"--role", runnerRole},
-		Env:   env,
+		Name:            runnerRole,
+		Image:           k.Image,
+		ImagePullPolicy: corev1.PullPolicy(k.ImagePullPolicy),
+		Args:            []string{"run"},
+		Env:             env,
+		Resources:       resources,
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: new(false),
 			ReadOnlyRootFilesystem:   new(true),
@@ -372,11 +466,6 @@ func (k *Kube) job(spec Spec) *batchv1.Job {
 			{Name: "scratch", MountPath: "/tmp"},
 			{Name: "spec", MountPath: specDir, ReadOnly: true},
 		},
-	}
-	if spec.Resources != nil {
-		if b, err := json.Marshal(spec.Resources); err == nil {
-			_ = json.Unmarshal(b, &container.Resources)
-		}
 	}
 	volumes := []corev1.Volume{
 		{Name: "scratch", EmptyDir: &corev1.EmptyDirVolumeSource{}},
@@ -422,5 +511,33 @@ func (k *Kube) job(spec Spec) *batchv1.Job {
 				},
 			},
 		},
+	}, nil
+}
+
+// CheckResources reports whether the configuration's runner resources
+// decode as a container's, so a value that would refuse every Job is
+// refused at startup instead.
+func CheckResources(m map[string]any) error {
+	_, err := containerResources(m)
+	return err
+}
+
+// containerResources decodes an account's runner.resources, which the
+// configuration keeps as the YAML written, refusing a field the Kubernetes
+// type does not have rather than dropping it.
+func containerResources(m map[string]any) (corev1.ResourceRequirements, error) {
+	var r corev1.ResourceRequirements
+	if m == nil {
+		return r, nil
 	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return r, fmt.Errorf("executor: runner.resources: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&r); err != nil {
+		return r, fmt.Errorf("executor: runner.resources: %w", err)
+	}
+	return r, nil
 }

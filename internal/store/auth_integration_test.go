@@ -9,79 +9,72 @@ import (
 	"time"
 )
 
-func TestReplaceForgeMemberships(t *testing.T) {
+// TestSessionGrant: a session keeps the grant its sign-in decided, and a
+// grant without a role is refused.
+func TestSessionGrant(t *testing.T) {
 	s := openStore(t)
-	ctx := context.Background()
-	if err := s.ApplyConfig(ctx, parse(t, twoTenants), "test"); err != nil {
-		t.Fatalf("ApplyConfig: %v", err)
-	}
-	alpha, beta := tenantID(t, s, "alpha"), tenantID(t, s, "beta")
+	ctx := t.Context()
 	now := time.Now()
-	acct, err := s.UpsertIdentity(ctx, SignInIdentity{Provider: "gh", Subject: "store-test-" + now.Format(time.RFC3339Nano), Login: "x"}, now)
+	id := SignInIdentity{Provider: "github", Origin: "github:https://github.com",
+		Subject: "store-test-" + now.Format(time.RFC3339Nano), Login: "x"}
+	acct, err := s.UpsertIdentity(ctx, id)
 	if err != nil {
 		t.Fatalf("UpsertIdentity: %v", err)
 	}
-	notYetApplied := "00000000-0000-5000-8000-000000000001"
-	tests := []struct {
-		name   string
-		grants []Grant
-		want   map[string]Role
-	}{
-		{"a tenant the leader has not created is skipped",
-			[]Grant{{TenantID: notYetApplied, Role: RoleAdmin}, {TenantID: alpha, Role: RoleMember}, {TenantID: beta, Role: RoleAdmin}},
-			map[string]Role{alpha: RoleMember, beta: RoleAdmin}},
-		{"a lapsed membership is dropped", []Grant{{TenantID: beta, Role: RoleMember}}, map[string]Role{beta: RoleMember}},
-		{"no grants", nil, map[string]Role{}},
+	for _, g := range []SessionGrant{
+		{Role: RoleAdmin, Key: "k1"},
+		{Role: RoleMember, AllAccounts: true, Key: "k2"},
+		{Role: RoleMember, Accounts: []string{"github/org-1", "github/user-1"}, Key: "k3"},
+	} {
+		token, err := s.CreateSession(ctx, acct.ID, "github", "github:https://github.com", g, now, now.Add(time.Hour))
+		if err != nil {
+			t.Fatalf("CreateSession(%+v): %v", g, err)
+		}
+		sess, err := s.LookupSession(ctx, token, now)
+		if err != nil {
+			t.Fatalf("LookupSession: %v", err)
+		}
+		got := sess.Grant
+		if got.Role != g.Role || got.AllAccounts != g.AllAccounts || got.Key != g.Key || len(got.Accounts) != len(g.Accounts) {
+			t.Fatalf("grant = %+v, want %+v", got, g)
+		}
+		for i := range g.Accounts {
+			if got.Accounts[i] != g.Accounts[i] {
+				t.Fatalf("grant = %+v, want %+v", got, g)
+			}
+		}
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := s.ReplaceForgeMemberships(ctx, acct.ID, tt.grants, now); err != nil {
-				t.Fatalf("ReplaceForgeMemberships: %v", err)
-			}
-			got, err := s.Memberships(ctx, acct.ID)
-			if err != nil {
-				t.Fatalf("Memberships: %v", err)
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("memberships = %v, want %v", got, tt.want)
-			}
-			for k, v := range tt.want {
-				if got[k] != v {
-					t.Fatalf("memberships = %v, want %v", got, tt.want)
-				}
-			}
-		})
-	}
-	if err := s.ReplaceForgeMemberships(ctx, acct.ID, []Grant{{TenantID: alpha, Role: "owner"}}, now); err == nil {
-		t.Fatal("an invalid role was stored")
+	if _, err := s.CreateSession(ctx, acct.ID, "github", "github:https://github.com", SessionGrant{}, now, now.Add(time.Hour)); err == nil {
+		t.Fatal("a grant without a role was stored")
 	}
 
-	// Sources are kept apart and combine to the higher role.
-	email := "store-invite-" + now.Format("150405.000000") + "@example.com"
-	if _, err := s.App().Exec(ctx, `INSERT INTO invites (id, tenant_id, email, role, expires_at) VALUES (gen_random_uuid(), $1, $2, 'member', $3)`,
-		alpha, email, now.Add(time.Hour)); err != nil {
-		t.Fatalf("insert invite: %v", err)
+	// A user's settings come back with every session of theirs, and a
+	// later sign-in, which refreshes the profile, leaves them alone.
+	token, err := s.CreateSession(ctx, acct.ID, "github", "github:https://github.com", SessionGrant{Role: RoleMember, Key: "k4"}, now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
 	}
-	if n, err := s.AcceptInvites(ctx, acct.ID, email, now); err != nil || n != 1 {
-		t.Fatalf("AcceptInvites = %d, %v", n, err)
+	if sess, err := s.LookupSession(ctx, token, now); err != nil || sess.User.Settings != (UserSettings{}) {
+		t.Fatalf("a new user's settings = %+v, %v; want none", sess.User.Settings, err)
 	}
-	if err := s.ReplaceForgeMemberships(ctx, acct.ID, []Grant{{TenantID: alpha, Role: RoleAdmin}}, now); err != nil {
-		t.Fatalf("ReplaceForgeMemberships: %v", err)
+	want := UserSettings{TimeZone: "Europe/Amsterdam", Clock: "24", Theme: "dark"}
+	if err := s.SetUserSettings(ctx, acct.ID, want); err != nil {
+		t.Fatalf("SetUserSettings: %v", err)
 	}
-	if got, _ := s.Memberships(ctx, acct.ID); got[alpha] != RoleAdmin || len(got) != 1 {
-		t.Fatalf("forge admin + member invite = %v, want admin", got)
+	if _, err := s.UpsertIdentity(ctx, id); err != nil {
+		t.Fatalf("UpsertIdentity again: %v", err)
 	}
-	if err := s.ReplaceForgeMemberships(ctx, acct.ID, nil, now); err != nil {
-		t.Fatalf("ReplaceForgeMemberships: %v", err)
+	if sess, err := s.LookupSession(ctx, token, now); err != nil || sess.User.Settings != want {
+		t.Fatalf("settings = %+v, %v; want %+v", sess.User.Settings, err, want)
 	}
-	if got, _ := s.Memberships(ctx, acct.ID); got[alpha] != RoleMember || len(got) != 1 {
-		t.Fatalf("lapsed forge admin + member invite = %v, want member", got)
+	if err := s.SetUserSettings(ctx, "00000000-0000-0000-0000-000000000000", want); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetUserSettings of no user = %v, want ErrNotFound", err)
 	}
 }
 
 func TestLoginStateConsumedOnce(t *testing.T) {
 	s := openStore(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	now := time.Now()
 	state, err := s.CreateLoginState(ctx, LoginState{Provider: "gh", Nonce: "n", PKCEVerifier: "v", ReturnTo: "#/x"}, "browser", now)
 	if err != nil {
@@ -103,7 +96,7 @@ func TestLoginStateConsumedOnce(t *testing.T) {
 // refused until rows expire, rather than growing the table without bound.
 func TestCreateLoginStateCap(t *testing.T) {
 	s := openStore(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	now := time.Now()
 	t.Cleanup(func() {
 		_, _ = s.owner.Exec(context.Background(), `DELETE FROM login_states WHERE provider = 'cap-test'`)

@@ -1,19 +1,20 @@
 //go:build bench
 
-// Package bench is the offline evaluation harness (ADR-0002 §2.14): a
-// corpus of pull requests with known defects, run through the same fetch,
-// context and prompt code the service uses, against a live model, with
-// recall on must-find cases and cost per review as the output. It runs
-// only locally with a model key, never in CI.
+// Package bench is the offline evaluation harness: a corpus of pull
+// requests with known defects, run through the same fetch, context and
+// prompt code the service uses, against a live model, with recall on
+// must-find cases and cost per review as the output. It runs only locally
+// with a model key, never in CI.
 package bench
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // Case is one pull request with what a reviewer should have caught.
@@ -95,7 +96,7 @@ func Load(glob string) ([]Case, error) {
 			out = append(out, c)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slices.SortFunc(out, func(a, b Case) int { return cmp.Compare(a.ID, b.ID) })
 	return out, nil
 }
 

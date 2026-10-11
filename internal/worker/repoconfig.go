@@ -1,33 +1,34 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/forge"
 	"github.com/perfectra1n/kritique/internal/jobs"
 	"github.com/perfectra1n/kritique/internal/repoconfig"
 	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Effective is a repository's settings once its .kritique.yaml is applied.
-// Settings.Review names the files the runner reads; Instructions,
-// Templates and References hold their contents once it has.
+// Settings.Review names the files the runner reads from the merge base and
+// keeps in the review's context pack.
 type Effective struct {
 	repoconfig.Merged
 	// Found is whether the repository has a .kritique.yaml.
-	Found        bool
-	Instructions []string
-	Templates    review.Templates
-	References   []review.Reference
+	Found bool
 }
 
 // readRepoConfig reads .kritique.yaml at ref through the forge: nil when the
@@ -46,7 +47,7 @@ func readRepoConfig(ctx context.Context, client forge.Client, owner, repo, ref s
 }
 
 // effective applies doc, the merge-base .kritique.yaml or nil when there is
-// none, onto the operator's settings (see repoconfig.Merge). The notes say
+// none, onto the admin's settings (see repoconfig.Merge). The notes say
 // which of the file's values were dropped, or why the whole file was
 // ignored.
 func effective(settings configfile.Settings, doc []byte) (Effective, []string) {
@@ -69,41 +70,11 @@ func (e *Effective) repoFiles() []string {
 	return paths
 }
 
-// fill reads the contents of the files e names out of files, what the
-// runner read, into Instructions, Templates and References, leaving out
-// instructions and context files scoped to paths none of changed matches.
-// notes lead the returned ones; a named file missing from files is noted
-// unless they already say why.
-func (e *Effective) fill(files repoconfig.Files, notes, changed []string) []string {
-	notes = slices.Clone(notes)
-	read := func(p string) string {
-		if p == "" {
-			return ""
-		}
-		content, ok := files[p]
-		if !ok && !slices.ContainsFunc(notes, func(n string) bool { return strings.HasPrefix(n, p+": ") }) {
-			notes = append(notes, fmt.Sprintf("%s: referenced but not found", p))
-		}
-		return content
-	}
-	for _, p := range e.Review.Instructions {
-		read(p)
-	}
-	var truncated bool
-	active := repoconfig.Active(e.Review.Instructions, e.Scoped, changed)
-	if e.Instructions, truncated = repoconfig.Instructions(files, active); truncated {
-		notes = append(notes, "repository instructions truncated to 32 KiB")
-	}
-	e.Templates = review.Templates{Summary: read(e.Review.Templates.Summary), Inline: read(e.Review.Templates.Inline)}
-	applies := repoconfig.ActiveContext(e.Review.Context, changed)
-	e.References = nil
-	for _, c := range e.Review.Context {
-		content := read(c.Path)
-		if content != "" && slices.ContainsFunc(applies, func(a configfile.ContextFile) bool { return a.Path == c.Path }) {
-			e.References = append(e.References, review.Reference{Path: c.Path, Description: c.Description, Content: content})
-		}
-	}
-	return notes
+// templates are the repository's comment templates, read out of files,
+// what the runner read from the merge base; a named file it could not
+// read leaves the built-in template in use, as the pack's notes say.
+func (e *Effective) templates(files repoconfig.Files) review.Templates {
+	return review.Templates{Summary: files[e.Review.Templates.Summary], Inline: files[e.Review.Templates.Inline]}
 }
 
 // settleLeft is how much longer a review job started by trigger, enqueued
@@ -120,33 +91,93 @@ func settleLeft(trigger string, settle time.Duration, created, now time.Time) ti
 // skipByRepo ends a review the merge-base .kritique.yaml disables or filters
 // out before a runner is spent on it, with a success status saying why. It
 // reports whether it ended the review, with the error of recording that.
-func (w *Review) skipByRepo(ctx context.Context, e earlyEnd, eff *Effective, client forge.Client, owner, repo string) (bool, error) {
-	var vars map[string]any
-	if err := w.Store.WithTenant(ctx, e.args.TenantID, func(tx pgx.Tx) error {
-		var err error
-		vars, err = filterVars(ctx, tx, e.pr.id, e.args.Trigger)
-		return err
-	}); err != nil {
-		return true, err
+//
+// A label change that reaches ingest while this job is still to finish
+// queues nothing, the job being the head's review to come; one that lands
+// after the job read the labels would then go unjudged. So a skip is final
+// only once the labels are seen unchanged in the transaction that
+// completes the job, under the pull request's row lock that ingest's own
+// write waits on; labels that moved are judged again.
+func (w *Review) skipByRepo(ctx context.Context, e earlyEnd, job *river.Job[jobs.ReviewArgs], eff *Effective) (bool, error) {
+	for {
+		var judged repoconfig.PullRequest
+		if err := w.Store.WithAccount(ctx, e.args.AccountID, func(tx pgx.Tx) error {
+			var err error
+			judged, err = loadFilterPR(ctx, tx, e.pr.id)
+			return err
+		}); err != nil {
+			return true, err
+		}
+		judged.Event = e.args.Trigger
+		vars, err := judged.Vars()
+		if err != nil {
+			return true, err
+		}
+		// With no changed paths yet, only enabled and the filter can skip.
+		reason, by, err := eff.Check(vars, nil)
+		if err != nil {
+			e.logger.Warn("repository filter failed to evaluate", "filter", by.Label(), "error", err)
+		}
+		if reason == "" {
+			return false, nil
+		}
+		e.filter = ""
+		if by != nil {
+			e.filter = by.Name
+		}
+		if err := w.recordSkip(ctx, e, string(reason)); err != nil {
+			return true, err
+		}
+		moved := false
+		if err := w.Store.WithAccount(ctx, e.args.AccountID, func(tx pgx.Tx) error {
+			var labels json.RawMessage
+			if err := tx.QueryRow(ctx, `SELECT labels FROM pull_requests WHERE id = $1 FOR UPDATE`, e.pr.id).Scan(&labels); err != nil {
+				return fmt.Errorf("worker: read the pull request's labels: %w", err)
+			}
+			if moved = !bytes.Equal(labels, judged.Labels); moved {
+				return nil
+			}
+			_, err := river.JobCompleteTx[*riverpgxv5.Driver](ctx, tx, job)
+			return err
+		}); err != nil {
+			return true, err
+		}
+		if !moved {
+			return true, nil
+		}
 	}
-	// With no changed paths yet, only enabled and the filter can skip.
-	reason, err := eff.Check(vars, nil)
-	if err != nil {
-		e.logger.Warn("repository filter failed to evaluate", "error", err)
+}
+
+// recordSkip records the skip for reason and says so on the head commit.
+// A skip the head's latest review already is, the same job judging again,
+// a retry, or a label change that left the head where it was, is not
+// recorded a second time; only its status is said again. A re-run someone
+// asked for is recorded all the same.
+func (w *Review) recordSkip(ctx context.Context, e earlyEnd, reason string) error {
+	if e.args.Trigger != jobs.TriggerManual {
+		var repeat bool
+		if err := w.Store.WithAccount(ctx, e.args.AccountID, func(tx pgx.Tx) error {
+			var err error
+			repeat, err = store.HeadSkipped(ctx, tx, e.pr.id, e.args.HeadSHA, reason)
+			return err
+		}); err != nil {
+			return err
+		}
+		if repeat {
+			e.logger.Info("review still skipped", "reason", reason)
+			// The skip stands, but the condition that decides it may be
+			// another one now, and the status names it.
+			e.skip = reason
+			state, desc := e.status(store.ReviewSkipped, "")
+			if err := e.client.SetStatus(ctx, e.owner, e.repo, e.args.HeadSHA, state, desc); err != nil {
+				e.logger.Warn("commit status not set", "error", err)
+			}
+			return nil
+		}
 	}
-	if reason == "" {
-		return false, nil
-	}
-	e.logger.Info("review "+statusSkipped+" before its runner", "reason", reason)
+	e.logger.Info("review skipped before its runner", "reason", reason)
 	e.skip = reason
-	if err := w.end(ctx, e, statusSkipped, ""); err != nil {
-		return true, err
-	}
-	desc := "kritique: skipped (" + reason.Description() + ")"
-	if err := client.SetStatus(ctx, owner, repo, e.args.HeadSHA, forge.StatusSuccess, desc); err != nil {
-		e.logger.Warn("commit status not set", "error", err)
-	}
-	return true, nil
+	return w.end(ctx, e, store.ReviewSkipped, "")
 }
 
 // filterVars rebuilds the filter's pr variable for a review started by

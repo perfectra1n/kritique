@@ -1,9 +1,10 @@
 <script lang="ts">
-  // A modal dialog on the native <dialog>: showModal() makes the rest of the
-  // page inert, which is the focus trap, and Escape fires "cancel", which
-  // closes it. Focus returns to whatever opened it. The body renders only
-  // while open, so an input inside (a password, say) never outlives it.
+  // A modal dialog, on Bits UI's: it traps focus, locks the page behind it,
+  // closes on Escape or a click outside, and renders its body only while
+  // open, so an input inside (a password, say) never outlives it. Focus
+  // returns to whatever opened it.
   import type { Snippet } from 'svelte';
+  import { Dialog } from 'bits-ui';
 
   interface Props {
     open: boolean;
@@ -15,25 +16,20 @@
     // save that remounted it, or a disabled button that dropped focus to
     // the body): a selector, by default the page title.
     fallback?: string;
+    // wide makes room for a form.
+    wide?: boolean;
   }
-  let { open = $bindable(false), title, children, footer, onclose, fallback = 'main h1' }: Props = $props();
-  const id = `d${Math.random().toString(36).slice(2, 9)}`;
-  let el = $state<HTMLDialogElement | undefined>(undefined);
+  let { open = $bindable(false), title, children, footer, onclose, fallback = 'main h1', wide = false }: Props = $props();
   let restore: HTMLElement | null = null;
 
-  $effect(() => {
-    if (!el) return;
-    if (open && !el.open) {
-      restore = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      el.showModal();
-    } else if (!open && el.open) {
-      el.close();
-    }
-  });
+  // The dialog opens from state, not a trigger of its own, so what to
+  // return focus to is noted here, before focus moves in.
+  function opening(): void {
+    restore = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
 
-  function closed(): void {
-    open = false;
-    onclose?.();
+  function closing(e: Event): void {
+    e.preventDefault();
     if (restore && restore !== document.body && restore.isConnected) {
       restore.focus();
     } else {
@@ -47,10 +43,15 @@
   }
 </script>
 
-<dialog bind:this={el} class="dialog" aria-modal="true" aria-labelledby={id} onclose={closed}>
-  {#if open}
-    <h2 class="dialog-title" {id}>{title}</h2>
-    <div class="dialog-body">{@render children()}</div>
-    {#if footer}<div class="dialog-actions">{@render footer()}</div>{/if}
-  {/if}
-</dialog>
+<Dialog.Root bind:open onOpenChange={(now) => !now && onclose?.()}>
+  <Dialog.Portal>
+    <Dialog.Overlay class="overlay" />
+    <Dialog.Content class={['modal modal-centered dialog', wide && 'dialog-wide']} onOpenAutoFocus={opening} onCloseAutoFocus={closing}>
+      <Dialog.Title>
+        {#snippet child({ props })}<h2 {...props} class="dialog-title">{title}</h2>{/snippet}
+      </Dialog.Title>
+      <div class="dialog-body">{@render children()}</div>
+      {#if footer}<div class="dialog-actions">{@render footer()}</div>{/if}
+    </Dialog.Content>
+  </Dialog.Portal>
+</Dialog.Root>

@@ -7,9 +7,10 @@ import { test as base, expect } from '@playwright/test';
 import type { Me, SignInProvider } from '../src/lib/types';
 
 export const DEFAULT_ME: Me = {
-  account: { id: 'u1', displayName: 'Ada Lovelace', email: 'ada@example.com', avatarUrl: '' },
-  operator: false,
-  tenants: [{ slug: 'acme', role: 'admin', managedBy: 'file' }],
+  user: { id: 'u1', displayName: 'Ada Lovelace', email: 'ada@example.com', avatarUrl: '' },
+  admin: false,
+  accounts: ['github/acme'],
+  settings: { timeZone: '', clock: '', theme: '' },
 };
 
 export const DEFAULT_PROVIDERS: SignInProvider[] = [{ name: 'github', type: 'github', displayName: 'GitHub' }];

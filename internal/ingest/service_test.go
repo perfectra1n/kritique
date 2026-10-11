@@ -1,10 +1,10 @@
 package ingest
 
 import (
-	"context"
 	"testing"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
@@ -27,29 +27,8 @@ func TestDispatchIgnoresNonPullComments(t *testing.T) {
 				Repository: &webhook.Repository{FullName: "onedr0p/home-ops"},
 				Comment:    &webhook.Comment{ID: 1, Number: 7, Author: "devin", Body: "@bot-ross triage this"},
 			}
-			out, err := svc.Dispatch(context.Background(), Request{Event: ev})
+			out, err := svc.Dispatch(t.Context(), Request{Event: ev})
 			if err != nil || out.Status != Ignored || out.Reason != tt.want {
-				t.Fatalf("out = %+v, %v", out, err)
-			}
-		})
-	}
-}
-
-// TestDispatchLabelActionsNeverReview covers the actions GitHub sends and
-// Forgejo's label changes normalize to: neither records nor reviews the pull
-// request, so no store is needed.
-func TestDispatchLabelActionsNeverReview(t *testing.T) {
-	svc := NewService(nil, nil)
-	for _, action := range []string{"labeled", "unlabeled"} {
-		t.Run(action, func(t *testing.T) {
-			ev := webhook.Event{
-				Kind: webhook.KindPullRequest, Action: action,
-				Subject:     &webhook.Subject{Kind: webhook.SubjectPull, Number: 7},
-				Repository:  &webhook.Repository{FullName: "onedr0p/home-ops"},
-				PullRequest: &webhook.PullRequest{Number: 7, State: "open", HeadSHA: "aaa"},
-			}
-			out, err := svc.Dispatch(context.Background(), Request{Event: ev})
-			if err != nil || out.Status != Ignored || out.Reason != reasonAction {
 				t.Fatalf("out = %+v, %v", out, err)
 			}
 		})
@@ -61,26 +40,20 @@ func TestDispatchLabelActionsNeverReview(t *testing.T) {
 func TestDispatchTasksNeedNoStoreWithoutACandidate(t *testing.T) {
 	t.Setenv("TEST_PEM", "pem")
 	t.Setenv("TEST_SECRET", "s3cret")
-	off, err := configfile.Parse([]byte(configYAML))
-	if err != nil {
-		t.Fatal(err)
-	}
-	onlyReleases, err := configfile.Parse([]byte(`defaults:
-  allow: { tasks: { enabled: true, repositoryTasks: false } }
-  tasks: [{ name: notes, on: [{ raw: { event: release } }] }]
-` + configYAML))
-	if err != nil {
-		t.Fatal(err)
-	}
+	off := configfiletest.Load(t, configYAML)
+	onlyReleases := configfiletest.Load(t, `taskBounds: { enabled: true, repository: false }
+tasks: [{ name: notes, on: [{ raw: { event: release } }] }]
+`+configYAML)
 	svc := NewService(nil, nil)
 	for _, f := range []*configfile.File{off, onlyReleases} {
-		in, tenant, _ := f.Installation("bot-ross")
+		account, _ := f.Account(configfile.ForgeGitHub, "onedr0p")
+		conn, _ := f.Connection("bot-ross")
 		ev := webhook.Event{
 			Kind: webhook.KindIssue, Action: "opened", RawEvent: "issues", Sender: "devin",
 			Repository: &webhook.Repository{FullName: "onedr0p/home-ops"}, Subject: &webhook.Subject{Kind: webhook.SubjectIssue, Number: 7},
 			Issue: &webhook.Issue{Number: 7},
 		}
-		out, err := svc.Dispatch(context.Background(), Request{File: f, Tenant: tenant, Installation: in, Event: ev})
+		out, err := svc.Dispatch(t.Context(), Request{File: f, Account: account, Connection: conn, Event: ev})
 		if err != nil || out.Status != Ignored {
 			t.Fatalf("out = %+v, %v", out, err)
 		}

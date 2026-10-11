@@ -1,45 +1,54 @@
 package ingest
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 const configYAML = `
-tenants:
-  - slug: onedr0p
-    installations:
-      - name: bot-ross
-        forge: github
-        account: onedr0p
-        app:
-          clientId: Iv1.x
-          privateKey: { env: TEST_PEM }
-          webhookSecret: { env: TEST_SECRET }
+apps:
+  bot-ross:
+    accounts: [onedr0p, home-operations]
+    clientId: Iv1.x
+    privateKey: { env: TEST_PEM }
+    webhookSecret: { env: TEST_SECRET }
 `
 
 type fakeDispatcher struct {
-	got []Request
-	out Outcome
-	err error
+	got       []Request
+	out       Outcome
+	err       error
+	delivered []string
+	unsigned  []string
+	recordErr error
 }
 
 func (f *fakeDispatcher) Dispatch(_ context.Context, req Request) (Outcome, error) {
 	f.got = append(f.got, req)
 	return f.out, f.err
+}
+
+func (f *fakeDispatcher) RecordDelivery(_ context.Context, connectionID string) error {
+	f.delivered = append(f.delivered, connectionID)
+	return f.recordErr
+}
+
+func (f *fakeDispatcher) RecordUnsigned(_ context.Context, connectionID string) error {
+	f.unsigned = append(f.unsigned, connectionID)
+	return f.recordErr
 }
 
 func sign(secret string, body []byte) string {
@@ -53,23 +62,20 @@ const prBody = `{"action":"opened","pull_request":{"number":1,"user":{"login":"x
   "base":{"ref":"main","sha":"2","repo":{"full_name":"onedr0p/home-ops"}}},
   "repository":{"full_name":"onedr0p/home-ops","default_branch":"main","owner":{"login":"onedr0p"}}}`
 
-func setup(t *testing.T, disp Dispatcher) *httptest.Server {
-	t.Helper()
-	return setupLog(t, disp, io.Discard)
-}
+const releaseBody = `{"action":"published","release":{"tag_name":"v1"},
+  "repository":{"full_name":"onedr0p/home-ops","owner":{"login":"onedr0p"}},"sender":{"login":"devin"}}`
 
-// setupLog is setup with the handler logging to out at debug level.
-func setupLog(t *testing.T, disp Dispatcher, out io.Writer) *httptest.Server {
+func setup(t *testing.T, disp Dispatcher) *httptest.Server {
 	t.Helper()
 	t.Setenv("TEST_PEM", "pem")
 	t.Setenv("TEST_SECRET", "s3cret")
-	f, err := configfile.Parse([]byte(configYAML))
-	if err != nil {
-		t.Fatal(err)
+	f := configfiletest.Load(t, configYAML)
+	h := NewHandler(configfile.NewCurrent(f), disp, slog.New(slog.DiscardHandler))
+	if r, ok := disp.(DeliveryRecorder); ok {
+		h.Deliveries = r
 	}
 	mux := http.NewServeMux()
-	mux.Handle("POST /hooks/{installation}", NewHandler(configfile.NewCurrent(f), disp,
-		slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelDebug}))))
+	mux.Handle("POST /hooks/{connection}", h)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -103,17 +109,25 @@ func TestHandler(t *testing.T) {
 		err        error
 		want       int
 		dispatched bool
+		// recorded: any delivery that passes the signature check counts.
+		recorded bool
 	}{
-		{"unknown installation", "/hooks/nope", "pull_request", "s3cret", prBody, Outcome{}, nil, http.StatusNotFound, false},
-		{"bad signature", "/hooks/bot-ross", "pull_request", "wrong", prBody, Outcome{}, nil, http.StatusUnauthorized, false},
-		{"missing signature", "/hooks/bot-ross", "pull_request", "", prBody, Outcome{}, nil, http.StatusUnauthorized, false},
-		{"unparsable", "/hooks/bot-ross", "pull_request", "s3cret", "{nope", Outcome{}, nil, http.StatusBadRequest, false},
-		{"ping", "/hooks/bot-ross", "ping", "s3cret", `{"zen":"x"}`, Outcome{}, nil, http.StatusNoContent, false},
-		{"unknown event ignored", "/hooks/bot-ross", "workflow_run", "s3cret", `{}`, Outcome{}, nil, http.StatusAccepted, false},
+		{"unknown connection", "/hooks/nope", "pull_request", "s3cret", prBody, Outcome{}, nil, http.StatusNotFound, false, false},
+		{"bad signature", "/hooks/bot-ross", "pull_request", "wrong", prBody, Outcome{}, nil, http.StatusUnauthorized, false, false},
+		{"missing signature", "/hooks/bot-ross", "pull_request", "", prBody, Outcome{}, nil, http.StatusUnauthorized, false, false},
+		{"unparsable", "/hooks/bot-ross", "pull_request", "s3cret", "{nope", Outcome{}, nil, http.StatusBadRequest, false, true},
+		{"ping", "/hooks/bot-ross", "ping", "s3cret", `{"zen":"x"}`, Outcome{}, nil, http.StatusNoContent, false, true},
+		{"unknown event ignored", "/hooks/bot-ross", "workflow_run", "s3cret", `{}`, Outcome{}, nil, http.StatusAccepted, false, true},
+		// A kind reviews ignore still reaches the dispatcher for tasks when
+		// it concerns a repository.
+		{"unmodeled repository event dispatched", "/hooks/bot-ross", "release", "s3cret", releaseBody, Outcome{Status: Ignored}, nil,
+			http.StatusAccepted, true, true},
 		{"undeclared account ignored", "/hooks/bot-ross", "pull_request", "s3cret",
-			strings.ReplaceAll(prBody, `"owner":{"login":"onedr0p"}`, `"owner":{"login":"stranger"}`), Outcome{}, nil, http.StatusAccepted, false},
-		{"dispatched", "/hooks/bot-ross", "pull_request", "s3cret", prBody, Outcome{Status: Enqueued}, nil, http.StatusAccepted, true},
-		{"dispatcher error", "/hooks/bot-ross", "pull_request", "s3cret", prBody, Outcome{}, errors.New("db down"), http.StatusInternalServerError, true},
+			strings.ReplaceAll(prBody, `"owner":{"login":"onedr0p"}`, `"owner":{"login":"stranger"}`), Outcome{}, nil, http.StatusAccepted, false, true},
+		{"dispatched", "/hooks/bot-ross", "pull_request", "s3cret", prBody, Outcome{Status: Enqueued}, nil, http.StatusAccepted, true, true},
+		{"another declared account dispatched", "/hooks/bot-ross", "pull_request", "s3cret",
+			strings.ReplaceAll(prBody, "onedr0p", "Home-Operations"), Outcome{Status: Enqueued}, nil, http.StatusAccepted, true, true},
+		{"dispatcher error", "/hooks/bot-ross", "pull_request", "s3cret", prBody, Outcome{}, errors.New("db down"), http.StatusInternalServerError, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -126,13 +140,65 @@ func TestHandler(t *testing.T) {
 			if (len(disp.got) > 0) != tt.dispatched {
 				t.Fatalf("dispatched = %v, want %v", len(disp.got) > 0, tt.dispatched)
 			}
+			if (len(disp.delivered) > 0) != tt.recorded {
+				t.Fatalf("recorded = %v, want %v", len(disp.delivered) > 0, tt.recorded)
+			}
 			if tt.dispatched {
 				req := disp.got[0]
-				if req.Tenant.Slug != "onedr0p" || req.Installation.Name != "bot-ross" || req.Event.Kind != webhook.KindPullRequest {
+				if !strings.EqualFold(req.Account.Name, req.Event.Account) || req.Connection == nil || req.Connection.Name != "bot-ross" ||
+					(req.Event.Kind != webhook.KindPullRequest && req.Event.RawEvent != "release") {
 					t.Fatalf("request = %+v", req)
 				}
 			}
 		})
+	}
+}
+
+// TestHandlerRecordsUnsigned: a delivery with no signature, which an App
+// with no webhook secret sends, is recorded as unsigned; a wrong signature
+// is not, and neither is an unsigned request without GitHub's delivery
+// headers, which anyone can send to the public hook path.
+func TestHandlerRecordsUnsigned(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		secret   string
+		bare     bool
+		unsigned bool
+	}{
+		{"no signature", "", false, true},
+		{"a wrong signature", "wrong", false, false},
+		{"no signature and no delivery headers", "", true, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			disp := &fakeDispatcher{}
+			srv := setup(t, disp)
+			var resp *http.Response
+			if tt.bare {
+				req, _ := http.NewRequest(http.MethodPost, srv.URL+"/hooks/bot-ross", strings.NewReader(prBody))
+				req.Header.Set("Content-Type", "application/json")
+				var err error
+				if resp, err = http.DefaultClient.Do(req); err != nil {
+					t.Fatal(err)
+				}
+				_ = resp.Body.Close()
+			} else {
+				resp = post(t, srv, "/hooks/bot-ross", "pull_request", tt.secret, prBody)
+			}
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", resp.StatusCode)
+			}
+			if (len(disp.unsigned) == 1) != tt.unsigned || len(disp.delivered) != 0 {
+				t.Fatalf("unsigned = %v, delivered = %v", disp.unsigned, disp.delivered)
+			}
+		})
+	}
+}
+
+func TestHandlerServesWhenTheDeliveryIsNotRecorded(t *testing.T) {
+	disp := &fakeDispatcher{out: Outcome{Status: Enqueued}, recordErr: errors.New("db down")}
+	srv := setup(t, disp)
+	if resp := post(t, srv, "/hooks/bot-ross", "pull_request", "s3cret", prBody); resp.StatusCode != http.StatusAccepted || len(disp.got) != 1 {
+		t.Fatalf("status = %d, dispatched %d times; want 202 and once", resp.StatusCode, len(disp.got))
 	}
 }
 
@@ -144,66 +210,42 @@ func TestHandlerRejectsOversizedBody(t *testing.T) {
 	}
 }
 
-// TestHandlerOffersIgnoredKindsToTasks: a delivery the review pipeline
-// ignores still reaches the dispatcher when it concerns a repository, since
-// a task may run on it, and never when it does not.
-func TestHandlerOffersIgnoredKindsToTasks(t *testing.T) {
-	tests := []struct {
-		name       string
-		body       string
-		dispatched bool
-	}{
-		{"about a repository", `{"action":"published","sender":{"login":"devin"},
-  "repository":{"full_name":"onedr0p/home-ops","default_branch":"main","owner":{"login":"onedr0p"}}}`, true},
-		{"about no repository", `{"action":"published"}`, false},
-		{"about an undeclared account", `{"action":"published",
-  "repository":{"full_name":"stranger/x","default_branch":"main","owner":{"login":"stranger"}}}`, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			disp := &fakeDispatcher{out: Outcome{Status: Ignored}}
-			srv := setup(t, disp)
-			if resp := post(t, srv, "/hooks/bot-ross", "release", "s3cret", tt.body); resp.StatusCode != http.StatusAccepted {
-				t.Fatalf("status = %d", resp.StatusCode)
-			}
-			if (len(disp.got) > 0) != tt.dispatched {
-				t.Fatalf("dispatched = %v, want %v", len(disp.got) > 0, tt.dispatched)
-			}
-			if tt.dispatched {
-				if ev := disp.got[0].Event; ev.Kind != webhook.KindIgnored || ev.RawEvent != "release" || ev.Action != "published" {
-					t.Fatalf("event = %+v", ev)
-				}
-			}
-		})
-	}
+// dispatcherFunc is a Dispatcher from a function.
+type dispatcherFunc func(context.Context, Request) (Outcome, error)
+
+func (f dispatcherFunc) Dispatch(ctx context.Context, req Request) (Outcome, error) {
+	return f(ctx, req)
 }
 
-// TestHandlerUndeclaredAccountLogLevel: an undeclared account's delivery of
-// a kind kritique acts on is worth a warning; one it ignores is not.
-func TestHandlerUndeclaredAccountLogLevel(t *testing.T) {
-	stranger := `"repository":{"full_name":"stranger/x","default_branch":"main","owner":{"login":"stranger"}}`
-	tests := []struct {
-		name, event, body, level string
-	}{
-		{"a pull request", "pull_request", strings.ReplaceAll(prBody, `"owner":{"login":"onedr0p"}`, `"owner":{"login":"stranger"}`), "WARN"},
-		{"an ignored kind", "check_suite", `{"action":"completed",` + stranger + `}`, "DEBUG"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var logs bytes.Buffer
-			srv := setupLog(t, &fakeDispatcher{}, &logs)
-			if resp := post(t, srv, "/hooks/bot-ross", tt.event, "s3cret", tt.body); resp.StatusCode != http.StatusAccepted {
-				t.Fatalf("status = %d", resp.StatusCode)
-			}
-			var line string
-			for l := range strings.SplitSeq(logs.String(), "\n") {
-				if strings.Contains(l, "undeclared account") {
-					line = l
-				}
-			}
-			if !strings.Contains(line, "level="+tt.level) {
-				t.Fatalf("log line = %q, want level %s", line, tt.level)
-			}
-		})
+// TestHandlerDispatchOutlivesTheRequest: a delivery the forge gave up
+// waiting on is still dispatched to the end.
+func TestHandlerDispatchOutlivesTheRequest(t *testing.T) {
+	entered, release, ended := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	srv := setup(t, dispatcherFunc(func(ctx context.Context, _ Request) (Outcome, error) {
+		close(entered)
+		<-release
+		ended <- ctx.Err()
+		return Outcome{Status: Enqueued}, nil
+	}))
+	ctx, cancel := context.WithCancel(t.Context())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/hooks/bot-ross", strings.NewReader(prBody))
+	req.Header.Set("X-GitHub-Event", "pull_request")
+	req.Header.Set("X-GitHub-Delivery", "d-1")
+	req.Header.Set("X-Hub-Signature-256", sign("s3cret", []byte(prBody)))
+	gone := make(chan struct{})
+	go func() {
+		defer close(gone)
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	<-entered
+	cancel()
+	<-gone
+	// Long enough for the server to notice the client left.
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+	if err := <-ended; err != nil {
+		t.Fatalf("the dispatch's context ended with the request: %v", err)
 	}
 }

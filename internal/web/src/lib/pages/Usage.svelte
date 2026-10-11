@@ -1,29 +1,54 @@
 <script lang="ts">
+  import { accountApi } from '../links';
+  import { day } from '../dates';
   import { getJSON } from '../api.svelte';
   import { Resource, live } from '../resource.svelte';
   import { daysAgo, tokens, usd, wholeNumber } from '../format';
-  import type { UsageGroup, UsagePoint, UsageSeries } from '../types';
+  import type { AccountSummary, UsageGroup, UsagePoint, UsageSeries } from '../types';
   import StateView from '../components/StateView.svelte';
-  import BarChart from '../components/BarChart.svelte';
+  import ColumnChart from '../components/ColumnChart.svelte';
+  import Segmented from '../components/Segmented.svelte';
+  import StatTile from '../components/StatTile.svelte';
+  import Meter from '../components/Meter.svelte';
+  import SectionTabs from '../components/SectionTabs.svelte';
 
   let { slug }: { slug: string } = $props();
-  const PRESETS = [7, 30, 90] as const;
-  const GROUPS: readonly UsageGroup[] = ['day', 'model', 'repo', 'role'];
+  const PERIODS = [
+    { value: '7', label: '7 days' },
+    { value: '30', label: '30 days' },
+    { value: '90', label: '90 days' },
+  ] as const;
+  const GROUPS: readonly { value: UsageGroup; label: string }[] = [
+    { value: 'day', label: 'Day' },
+    { value: 'model', label: 'Model' },
+    { value: 'repo', label: 'Repository' },
+    { value: 'role', label: 'Role' },
+  ];
+  const METRICS = [
+    { value: 'cost', label: 'Cost' },
+    { value: 'tokens', label: 'Tokens' },
+  ] as const;
 
-  let days = $state<(typeof PRESETS)[number]>(30);
+  let days = $state<'7' | '30' | '90'>('30');
   let group = $state<UsageGroup>('day');
   let metric = $state<'cost' | 'tokens'>('cost');
 
   const total = (p: UsagePoint) => p.inputTokens + p.cacheReadTokens + p.cacheWriteTokens + p.outputTokens;
 
   const res = new Resource(() => {
-    const p = new URLSearchParams({ group, from: daysAgo(days, Date.now()) });
-    return getJSON<UsageSeries>(`/api/v1/tenants/${encodeURIComponent(slug)}/usage?${p}`);
+    const p = new URLSearchParams({ group, from: daysAgo(Number(days), Date.now()) });
+    return getJSON<UsageSeries>(`${accountApi(slug)}/usage?${p}`);
   });
+  // The month so far against the account's caps.
+  const summary = new Resource(() => getJSON<AccountSummary[]>('/api/v1/accounts'));
+  const month = $derived(summary.data?.find((t) => t.slug === slug)?.usage);
   $effect(() => {
     void res.load();
   });
-  $effect(() => live((e) => e.tenant === slug && e.kind === 'model_call', () => void res.load(), 2000));
+  $effect(() => {
+    void summary.load();
+  });
+  $effect(() => live((e) => e.account === slug && e.kind === 'model_call', () => void res.load(), 2000));
 
   function sum(rows: UsagePoint[]): UsagePoint {
     const z: UsagePoint = { key: 'Total', inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0, costUsd: 0, calls: 0 };
@@ -38,57 +63,80 @@
     return z;
   }
 
-  function bars(rows: UsagePoint[]) {
+  const groupLabel = (g: UsageGroup) => GROUPS.find((x) => x.value === g)?.label ?? g;
+  // A row with no key is usage no model, repository or role was recorded for.
+  const named = (key: string) => key || '(none)';
+
+  function columns(rows: UsagePoint[]) {
     return rows.map((r) => ({
-      label: group === 'day' ? r.key.slice(5) : r.key.split('/').pop() ?? r.key,
-      value: metric === 'cost' ? r.costUsd : total(r),
-      title: `${r.key}: ${usd(r.costUsd)}, ${wholeNumber(total(r))} tokens, ${r.calls} calls`,
+      key: r.key,
+      label: group === 'day' ? day(r.key, true) : (r.key.split('/').pop() ?? r.key),
+      title: group === 'day' ? day(r.key) : named(r.key),
+      values: [metric === 'cost' ? r.costUsd : total(r)],
     }));
   }
 </script>
 
+<svelte:head><title>Spend · {slug} · kritique</title></svelte:head>
+
 <main class="page">
   <div class="page-inner">
-    <header class="page-head"><h1>Usage</h1></header>
+    <SectionTabs section="analytics" {slug} current="usage" />
+    {#if month}
+      <section class="stats stats-3" aria-label="This month">
+        <StatTile
+          label="Spend this month"
+          value={usd(month.costUsd)}
+          sub={month.medianReviewCostUsd === null
+            ? 'no review completed this month'
+            : `${usd(month.medianReviewCostUsd)} per review (median) · ${usd(month.reviewCostUsd / month.reviews)} mean of ${wholeNumber(month.reviews)}`}
+        />
+        <div class="stat">
+          <span class="stat-label">Tokens this month</span>
+          <span class="stat-value" title={wholeNumber(month.tokens)}>{tokens(month.tokens)}</span>
+          <span class="stat-sub">{month.tokensPerMonth ? `of ${tokens(month.tokensPerMonth)} cap` : 'no monthly cap'}</span>
+          <Meter value={month.tokens} max={month.tokensPerMonth} label="Monthly tokens used" />
+        </div>
+        <div class="stat">
+          <span class="stat-label">Reviews today</span>
+          <span class="stat-value">{wholeNumber(month.reviewsToday)}</span>
+          <span class="stat-sub">{month.reviewsPerDay ? `of ${month.reviewsPerDay} a day` : 'no daily cap'}</span>
+          <Meter value={month.reviewsToday} max={month.reviewsPerDay} label="Reviews today" />
+        </div>
+      </section>
+    {/if}
     <div class="toolbar">
-      <div class="view-toggle" role="group" aria-label="Date range">
-        {#each PRESETS as p (p)}
-          <button class:active={days === p} aria-pressed={days === p} onclick={() => (days = p)}>{p}d</button>
-        {/each}
-      </div>
-      <div class="view-toggle" role="group" aria-label="Group by">
-        {#each GROUPS as g (g)}
-          <button class:active={group === g} aria-pressed={group === g} onclick={() => (group = g)}>{g}</button>
-        {/each}
-      </div>
-      <div class="view-toggle" role="group" aria-label="Chart metric">
-        <button class:active={metric === 'cost'} aria-pressed={metric === 'cost'} onclick={() => (metric = 'cost')}>cost</button>
-        <button class:active={metric === 'tokens'} aria-pressed={metric === 'tokens'} onclick={() => (metric = 'tokens')}>tokens</button>
-      </div>
+      <Segmented label="Period" options={PERIODS} value={days} onchange={(d) => (days = d)} />
+      <Segmented label="Group by" options={GROUPS} value={group} onchange={(g) => (group = g)} />
+      <Segmented label="Chart metric" options={METRICS} value={metric} onchange={(m) => (metric = m)} />
     </div>
     <StateView {res} retry={() => res.load()} isEmpty={(s) => s.rows.length === 0} empty="No model usage in this range.">
       {#snippet children(s)}
         {@const t = sum(s.rows)}
-        <section class="panel" aria-label="Usage chart">
-          <BarChart
-            bars={bars(s.rows)}
+        <section class="panel" aria-labelledby="usage-chart">
+          <header class="panel-head"><h2 id="usage-chart">{metric === 'cost' ? 'Cost' : 'Tokens'} by {groupLabel(s.group).toLowerCase()}</h2></header>
+          <ColumnChart
             label="{metric === 'cost' ? 'Cost' : 'Tokens'} by {s.group}, last {days} days"
+            series={[{ label: metric === 'cost' ? 'Cost' : 'Tokens', color: 'var(--chart-ink)' }]}
+            rows={columns(s.rows)}
             format={metric === 'cost' ? usd : tokens}
+            whole={metric !== 'cost'}
           />
         </section>
-        <div class="table-wrap">
+        <div class="table-wrap table-card">
           <table class="data">
             <thead>
               <tr>
-                <th scope="col">{s.group}</th><th scope="col" class="num">Calls</th><th scope="col" class="num">Input</th>
+                <th scope="col">{groupLabel(s.group)}</th><th scope="col" class="num">Calls</th><th scope="col" class="num">Input</th>
                 <th scope="col" class="num">Cache read</th><th scope="col" class="num">Cache write</th><th scope="col" class="num">Output</th>
                 <th scope="col" class="num">Cost</th>
               </tr>
             </thead>
             <tbody>
-              {#each s.rows as r, i (i)}
+              <!-- Days read newest first; the other groups keep the server's order. -->
+              {#each s.group === 'day' ? [...s.rows].reverse() : s.rows as r (r.key)}
                 <tr>
-                  <td class="mono small">{r.key}</td>
+                  <td class:mono={s.group === 'model' || s.group === 'repo'} class="small">{s.group === 'day' ? day(r.key) : named(r.key)}</td>
                   <td class="num">{wholeNumber(r.calls)}</td>
                   <td class="num" title={wholeNumber(r.inputTokens)}>{tokens(r.inputTokens)}</td>
                   <td class="num" title={wholeNumber(r.cacheReadTokens)}>{tokens(r.cacheReadTokens)}</td>
@@ -102,10 +150,10 @@
               <tr>
                 <th scope="row">Total</th>
                 <td class="num">{wholeNumber(t.calls)}</td>
-                <td class="num">{tokens(t.inputTokens)}</td>
-                <td class="num">{tokens(t.cacheReadTokens)}</td>
-                <td class="num">{tokens(t.cacheWriteTokens)}</td>
-                <td class="num">{tokens(t.outputTokens)}</td>
+                <td class="num" title={wholeNumber(t.inputTokens)}>{tokens(t.inputTokens)}</td>
+                <td class="num" title={wholeNumber(t.cacheReadTokens)}>{tokens(t.cacheReadTokens)}</td>
+                <td class="num" title={wholeNumber(t.cacheWriteTokens)}>{tokens(t.cacheWriteTokens)}</td>
+                <td class="num" title={wholeNumber(t.outputTokens)}>{tokens(t.outputTokens)}</td>
                 <td class="num">{usd(t.costUsd)}</td>
               </tr>
             </tfoot>

@@ -1,34 +1,58 @@
 package webapi
 
 import (
+	"cmp"
 	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/store"
 	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
+func (s *Server) getAttention(w http.ResponseWriter, r *http.Request, t *accountScope) error {
+	ctx := r.Context()
+	var a store.Attention
+	if err := s.read(ctx, t, func(tx pgx.Tx) error {
+		var err error
+		a, err = store.ReadAttention(ctx, tx)
+		return err
+	}); err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, attentionDTO(a))
+	return nil
+}
+
+func attentionDTO(a store.Attention) Attention {
+	return Attention{Failed: a.Failed, Capped: a.Capped, Blocking: a.Blocking, Paused: a.Paused}
+}
+
 // pullFollowups bounds the follow-ups a pull request's detail lists.
 const pullFollowups = 200
 
-func (s *Server) listPulls(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) listPulls(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	page, err := parsePage(r)
 	if err != nil {
 		return err
 	}
 	q := r.URL.Query()
-	f := store.PullFilter{State: store.PullState(q.Get("state")), Outcome: store.ReviewStatus(q.Get("outcome")), Query: q.Get("q")}
-	if f.State == "" {
-		f.State = store.PullOpen
+	f := store.PullFilter{
+		State: store.PullState(q.Get("state")), Outcome: store.ReviewStatus(q.Get("outcome")), Author: q.Get("author"), Query: q.Get("q"),
+		Is: store.PullIs(q.Get("is")),
 	}
+	f.State = cmp.Or(f.State, store.PullOpen)
 	if !f.State.Valid() {
 		return errBadRequest(CodeBadRequest, "state must be open, closed or all")
 	}
 	if f.Outcome != "" && !f.Outcome.Valid() {
 		return errBadRequest(CodeBadRequest, "outcome is not a review status")
+	}
+	if f.Is != "" && !f.Is.Valid() {
+		return errBadRequest(CodeBadRequest, "is must be paused or blocking")
 	}
 	ctx := r.Context()
 	var rows []store.PullRow
@@ -52,17 +76,17 @@ func (s *Server) listPulls(w http.ResponseWriter, r *http.Request, t *tenantScop
 
 func pull(p store.PullRow) Pull {
 	out := Pull{
-		Repository: p.Repository, Number: p.Number, Title: p.Title, Author: p.Author, State: p.State, Draft: p.Draft,
-		Merged: p.Merged, HeadSHA: p.HeadSHA, HeadRef: p.HeadRef, BaseRef: p.BaseRef, URL: p.URL, OpenedAt: p.OpenedAt,
-		UpdatedAt: p.UpdatedAt, Labels: make([]Label, len(p.Labels)),
+		Repository: p.Repository, Number: p.Number, Title: p.Title, Author: p.Author, State: p.State, Draft: p.Draft, Fork: p.Fork,
+		Merged: p.Merged, Paused: p.Paused, HeadSHA: p.HeadSHA, HeadRef: p.HeadRef, BaseRef: p.BaseRef, URL: p.URL, OpenedAt: p.OpenedAt,
+		UpdatedAt: p.UpdatedAt, Labels: make([]Label, len(p.Labels)), ReviewCount: p.Reviews, CostUSD: p.CostUSD,
 	}
 	for i, l := range p.Labels {
 		out.Labels[i] = Label{Name: l.Name, Color: l.Color}
 	}
 	if v := p.LastReview; v != nil {
 		out.LastReview = &ReviewBrief{
-			ID: v.ID, Status: v.Status, Mode: v.Mode, Scope: v.Scope, CreatedAt: v.CreatedAt,
-			Findings: SeverityCounts{Blocking: v.Findings.Blocking, Important: v.Findings.Important, Nit: v.Findings.Nit},
+			ID: v.ID, Status: v.Status, Scope: v.Scope, CreatedAt: v.CreatedAt,
+			Findings: severityCounts(v.Findings),
 		}
 	}
 	return out
@@ -71,7 +95,7 @@ func pull(p store.PullRow) Pull {
 // findPull resolves {owner}/{repo}/{number}.
 func findPull(r *http.Request, tx pgx.Tx) (store.PullRow, error) {
 	ctx := r.Context()
-	number, err := strconv.Atoi(r.PathValue("number"))
+	number, err := strconv.ParseInt(r.PathValue("number"), 10, 32)
 	if err != nil || number <= 0 {
 		return store.PullRow{}, errNotFound("pull request")
 	}
@@ -79,14 +103,14 @@ func findPull(r *http.Request, tx pgx.Tx) (store.PullRow, error) {
 	if err != nil {
 		return store.PullRow{}, err
 	}
-	p, err := store.FindPull(ctx, tx, repo.ID, number)
+	p, err := store.FindPull(ctx, tx, repo.ID, int(number))
 	if errors.Is(err, store.ErrNotFound) {
 		return p, errNotFound("pull request")
 	}
 	return p, err
 }
 
-func (s *Server) getPull(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) getPull(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	ctx := r.Context()
 	var d PullDetail
 	if err := s.read(ctx, t, func(tx pgx.Tx) error {
@@ -102,7 +126,14 @@ func (s *Server) getPull(w http.ResponseWriter, r *http.Request, t *tenantScope)
 		if err != nil {
 			return err
 		}
-		d = PullDetail{Pull: pull(p), Reviews: make([]Review, len(reviews)), Followups: followupList(followups)}
+		job, err := store.FindLiveReviewJob(ctx, tx, p.RepositoryID, p.Number)
+		if err != nil {
+			return err
+		}
+		d = PullDetail{Pull: pull(p), Reviews: make([]Review, len(reviews)), Followups: followupList(followups, t.account.Forge)}
+		if job != nil {
+			d.Job = new(jobItem(*job))
+		}
 		for i, v := range reviews {
 			d.Reviews[i] = reviewItem(v)
 		}
@@ -116,7 +147,7 @@ func (s *Server) getPull(w http.ResponseWriter, r *http.Request, t *tenantScope)
 
 func reviewItem(v store.ReviewRow) Review {
 	out := Review{
-		ID: v.ID, Status: v.Status, Trigger: v.Trigger, Mode: v.Mode, Scope: v.Scope, Model: v.Model, HeadSHA: v.HeadSHA,
+		ID: v.ID, Status: v.Status, Trigger: v.Trigger, Scope: v.Scope, Model: v.Model, HeadSHA: v.HeadSHA,
 		CostUSD: v.CostUSD, Tokens: TokenCounts{Input: v.InputTokens, Output: v.OutputTokens}, CreatedAt: v.CreatedAt,
 		FinishedAt: v.FinishedAt, SkipReason: v.SkipReason, Error: v.Error,
 	}
@@ -124,22 +155,32 @@ func reviewItem(v store.ReviewRow) Review {
 		ms := v.FinishedAt.Sub(v.CreatedAt).Milliseconds()
 		out.DurationMs = &ms
 	}
+	if c := v.Confidence; c != nil {
+		out.Confidence = &Confidence{Score: c.Score, Threshold: c.Threshold, Passed: c.Passed(), Reason: c.Reason, Risk: c.Risk, Model: c.Model}
+	}
 	return out
 }
 
-func followupList(rows []store.FollowupRow) []Followup {
+// followupList is rows as the API shows them, of pull requests on forge.
+func followupList(rows []store.FollowupRow, forge configfile.Forge) []Followup {
 	out := make([]Followup, len(rows))
 	for i, f := range rows {
 		out[i] = Followup{
-			ID: f.ID, CommentID: f.CommentID, Repository: f.Repository, Number: f.Number, Author: f.Author, Inline: f.Inline,
+			ID: f.ID, CommentID: f.CommentID, Repository: f.Repository, Number: f.Number, PullURL: f.PullURL, Author: f.Author, Inline: f.Inline,
 			Path: f.Path, Line: f.Line, Status: f.Status, Reason: f.Reason, ReplyCommentID: f.ReplyCommentID, Model: f.Model,
-			CreatedAt: f.CreatedAt,
+			CreatedAt:  f.CreatedAt,
+			CommentURL: commentURL(forge, f.PullURL, f.CommentID, f.Inline),
+		}
+		if f.ReplyCommentID != nil {
+			// A limited follow-up's notice goes on the conversation, not
+			// in the thread it was asked in.
+			out[i].ReplyURL = commentURL(forge, f.PullURL, *f.ReplyCommentID, f.Inline && f.Status != store.FollowupLimited)
 		}
 	}
 	return out
 }
 
-func (s *Server) listFollowups(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) listFollowups(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	page, err := parsePage(r)
 	if err != nil {
 		return err
@@ -157,15 +198,15 @@ func (s *Server) listFollowups(w http.ResponseWriter, r *http.Request, t *tenant
 	}); err != nil {
 		return err
 	}
-	writeJSON(w, http.StatusOK, newPage(followupList(rows), next))
+	writeJSON(w, http.StatusOK, newPage(followupList(rows, t.account.Forge), next))
 	return nil
 }
 
 // getFollowupTranscript serves the model calls that answered a follow-up
-// comment. A comment id is unique only per forge, so when two of the
-// tenant's pull requests have a follow-up with it, ?repo= (and
-// ?installation=) must say which is meant.
-func (s *Server) getFollowupTranscript(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+// comment. GitHub numbers conversation and inline comments apart, so when
+// two of the account's pull requests have a follow-up with the id, ?repo=
+// must say which is meant.
+func (s *Server) getFollowupTranscript(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	commentID, err := strconv.ParseInt(r.PathValue("commentId"), 10, 64)
 	if err != nil || commentID <= 0 {
 		return errNotFound("follow-up")
@@ -184,7 +225,7 @@ func (s *Server) getFollowupTranscript(w http.ResponseWriter, r *http.Request, t
 		case len(matches) == 0:
 			return errNotFound("follow-up")
 		case len(matches) > 1:
-			return &apiError{status: http.StatusConflict, code: CodeAmbiguous, message: "comment id matches several follow-ups; pass ?repo="}
+			return errStatus(http.StatusConflict, CodeAmbiguous, "comment id matches several follow-ups; pass ?repo=")
 		}
 		rows, err = store.FollowupModelCalls(ctx, tx, matches[0].PullRequestID, commentID)
 		return err

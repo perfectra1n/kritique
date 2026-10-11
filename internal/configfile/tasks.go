@@ -11,9 +11,9 @@ import (
 	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
-// TaskBounds bound tasks (ADR-0012), bound by bound like the rest of
-// Allow: one written at a narrower scope replaces the broader scope's. A
-// bound written nowhere takes its default; tasks are off unless enabled.
+// TaskBounds bound event tasks (see docs/adr), bound by bound: one written
+// at a narrower scope replaces the broader scope's. A bound written nowhere
+// takes its default; tasks are off unless enabled.
 type TaskBounds struct {
 	// Enabled turns tasks on, the operator's own included.
 	Enabled *bool `yaml:"enabled,omitempty"`
@@ -36,8 +36,9 @@ type TaskBounds struct {
 	// SystemPrompt lets a repository's task add to the system prompt;
 	// default false.
 	SystemPrompt *bool `yaml:"systemPrompt,omitempty"`
-	// RepositoryTasks lets a repository define tasks; default true.
-	RepositoryTasks *bool `yaml:"repositoryTasks,omitempty"`
+	// Repository lets a repository's .kritique.yaml define tasks; default
+	// true.
+	Repository *bool `yaml:"repository,omitempty"`
 	// MaxTasks caps a repository's tasks; default tasks.DefaultMaxTasks.
 	MaxTasks *int `yaml:"maxTasks,omitempty"`
 	// MaxRunsPerSubjectPerHour caps how often one task runs on one issue or
@@ -56,88 +57,69 @@ var (
 	taskContextKinds = []string{tasks.ContextThread, tasks.ContextFiles, tasks.ContextSearch, tasks.ContextRelated, tasks.ContextCommands}
 )
 
-// Resolve is the bounds with every default applied; b may be nil.
-func (b *TaskBounds) Resolve() tasks.Bounds {
-	if b == nil {
-		b = &TaskBounds{}
-	}
+// Resolve is the bounds with every default applied.
+func (b TaskBounds) Resolve() tasks.Bounds {
 	pick := func(v *int, def int) int {
 		if v != nil {
 			return *v
 		}
 		return def
 	}
-	out := tasks.Bounds{
-		Enabled: b.Enabled != nil && *b.Enabled, Events: slices.Clone(b.Events), Actions: slices.Clone(b.Actions),
-		Context: slices.Clone(b.Context), Tools: slices.Clone(b.Tools),
-		SystemPrompt: b.SystemPrompt != nil && *b.SystemPrompt, RepositoryTasks: b.RepositoryTasks == nil || *b.RepositoryTasks,
+	orDefault := func(v, def []string) []string {
+		if v == nil {
+			return slices.Clone(def)
+		}
+		return slices.Clone(v)
+	}
+	return tasks.Bounds{
+		Enabled: b.Enabled != nil && *b.Enabled,
+		Events:  orDefault(b.Events, tasks.DefaultEvents), Actions: orDefault(b.Actions, tasks.DefaultActions),
+		Context: orDefault(b.Context, tasks.DefaultContext), Tools: orDefault(b.Tools, tasks.DefaultTools),
+		SystemPrompt: b.SystemPrompt != nil && *b.SystemPrompt, RepositoryTasks: b.Repository == nil || *b.Repository,
 		MaxTasks:                 pick(b.MaxTasks, tasks.DefaultMaxTasks),
 		MaxRunsPerSubjectPerHour: pick(b.MaxRunsPerSubjectPerHour, tasks.DefaultMaxRunsPerSubjectPerHour),
 		MaxFields:                pick(b.MaxFields, tasks.DefaultMaxFields),
 	}
-	if out.Events == nil {
-		out.Events = slices.Clone(tasks.DefaultEvents)
-	}
-	if out.Actions == nil {
-		out.Actions = slices.Clone(tasks.DefaultActions)
-	}
-	if out.Context == nil {
-		out.Context = slices.Clone(tasks.DefaultContext)
-	}
-	if out.Tools == nil {
-		out.Tools = slices.Clone(tasks.DefaultTools)
-	}
-	return out
 }
 
 // overlay lays the bounds o writes over b's.
-func (b *TaskBounds) overlay(o *TaskBounds) *TaskBounds {
-	if o == nil {
-		return b
-	}
-	out := TaskBounds{}
-	if b != nil {
-		out = *b
-	}
+func (b TaskBounds) overlay(o TaskBounds) TaskBounds {
 	if o.Enabled != nil {
-		out.Enabled = o.Enabled
+		b.Enabled = o.Enabled
 	}
 	if o.Events != nil {
-		out.Events = o.Events
+		b.Events = o.Events
 	}
 	if o.Actions != nil {
-		out.Actions = o.Actions
+		b.Actions = o.Actions
 	}
 	if o.Context != nil {
-		out.Context = o.Context
+		b.Context = o.Context
 	}
 	if o.Tools != nil {
-		out.Tools = o.Tools
+		b.Tools = o.Tools
 	}
 	if o.SystemPrompt != nil {
-		out.SystemPrompt = o.SystemPrompt
+		b.SystemPrompt = o.SystemPrompt
 	}
-	if o.RepositoryTasks != nil {
-		out.RepositoryTasks = o.RepositoryTasks
+	if o.Repository != nil {
+		b.Repository = o.Repository
 	}
 	if o.MaxTasks != nil {
-		out.MaxTasks = o.MaxTasks
+		b.MaxTasks = o.MaxTasks
 	}
 	if o.MaxRunsPerSubjectPerHour != nil {
-		out.MaxRunsPerSubjectPerHour = o.MaxRunsPerSubjectPerHour
+		b.MaxRunsPerSubjectPerHour = o.MaxRunsPerSubjectPerHour
 	}
 	if o.MaxFields != nil {
-		out.MaxFields = o.MaxFields
+		b.MaxFields = o.MaxFields
 	}
-	return &out
+	return b
 }
 
 // validateTaskBounds checks one scope's task bounds name event globs and
 // known kinds, and set positive caps.
-func validateTaskBounds(where string, b *TaskBounds) error {
-	if b == nil {
-		return nil
-	}
+func validateTaskBounds(where string, b TaskBounds) error {
 	for i, g := range b.Events {
 		if strings.TrimSpace(g) == "" || !doublestar.ValidatePattern(g) {
 			return fmt.Errorf("configfile: %s.events[%d] %q is not a valid glob", where, i, g)
@@ -179,53 +161,48 @@ func validateTaskBounds(where string, b *TaskBounds) error {
 // toolRe is an agent tool's name.
 var toolRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
-// scopedTask is an operator task and whether the operator's file, rather
-// than the dashboard, wrote it.
-type scopedTask struct {
-	task tasks.Task
-	file bool
-}
-
-// mergeTasks lays the tasks one scope writes over ts by name: one with a
-// name ts has replaces it where it stands, any other is added.
-func mergeTasks(ts []scopedTask, scope []tasks.Task, file bool) []scopedTask {
-	for _, t := range scope {
-		if i := slices.IndexFunc(ts, func(x scopedTask) bool { return x.task.Name == t.Name }); i >= 0 {
-			ts[i] = scopedTask{t, file}
+// WithTasks is ts with more laid over them by name: one of more with a
+// name ts has replaces that task where it stands, and the rest follow in
+// order. A task switched off with enabled false still replaces one, so a
+// narrower scope turns a broader scope's task off by naming it.
+func WithTasks(ts, more []tasks.Task) []tasks.Task {
+	if len(more) == 0 {
+		return ts
+	}
+	out := slices.Clone(ts)
+	for _, t := range more {
+		if i := slices.IndexFunc(out, func(o tasks.Task) bool { return o.Name == t.Name }); i >= 0 {
+			out[i] = t
 		} else {
-			ts = append(ts, scopedTask{t, file})
+			out = append(out, t)
 		}
 	}
-	return ts
+	return out
 }
 
-// setTasks splits the merged tasks into the file's and the dashboard's,
-// leaving out those switched off.
-func (s *Settings) setTasks(ts []scopedTask) {
-	for _, t := range ts {
-		switch {
-		case !t.task.IsEnabled():
-		case t.file:
-			s.Tasks = append(s.Tasks, t.task)
-		default:
-			s.DashboardTasks = append(s.DashboardTasks, t.task)
-		}
-	}
+// enabledTasks is ts without those switched off.
+func enabledTasks(ts []tasks.Task) []tasks.Task {
+	return slices.DeleteFunc(slices.Clone(ts), func(t tasks.Task) bool { return !t.IsEnabled() })
 }
 
 // validateTasks checks each task one scope writes, that its models name
-// declared providers, and that no two share a name.
-func (f *File) validateTasks(where string, ts []tasks.Task) error {
+// providers declared for account a, and that no two share a name.
+func (f *File) validateTasks(where string, a *Account, ts []tasks.Task) error {
 	for i := range ts {
+		at := fmt.Sprintf("%stasks[%d]", where, i)
 		if err := ts[i].Check(); err != nil {
-			return fmt.Errorf("configfile: %s.tasks[%d]: %w", where, i, err)
+			return fmt.Errorf("configfile: %s: %w", at, err)
 		}
-		models := ModelsSpec{Review: new(ModelRef(ts[i].Models.Review)), Fallback: new(ModelRef(ts[i].Models.Fallback))}
-		if err := f.checkModels(fmt.Sprintf("%s.tasks[%d].models", where, i), models); err != nil {
-			return err
+		for _, m := range []struct{ key, ref string }{{"review", ts[i].Models.Review}, {"fallback", ts[i].Models.Fallback}} {
+			if m.ref == "" {
+				continue
+			}
+			if err := f.checkModelRef(at+".models."+m.key, a, ModelRef(m.ref)); err != nil {
+				return err
+			}
 		}
 		if slices.ContainsFunc(ts[:i], func(o tasks.Task) bool { return o.Name == ts[i].Name }) {
-			return fmt.Errorf("configfile: %s.tasks[%d]: name %q is used twice", where, i, ts[i].Name)
+			return fmt.Errorf("configfile: %s: name %q is used twice", at, ts[i].Name)
 		}
 	}
 	return nil

@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
-	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // TestSchemaMatchesFile keeps the published JSON Schema's keys in step
@@ -25,44 +24,25 @@ func TestSchemaMatchesFile(t *testing.T) {
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatal(err)
 	}
-	review := []string{"properties", "review", "properties"}
-	task := []string{"$defs", "task"}
-	taskContext := []string{"$defs", "task", "properties", "context"}
-	actions := []string{"$defs", "task", "properties", "actions"}
 	tests := []struct {
 		name string
 		path []string
 		want []string
 	}{
 		{"the file", nil, yamlKeys[File]()},
-		{"models", []string{"properties", "models"}, yamlKeys[Models]()},
-		{"agent", []string{"properties", "agent"}, yamlKeys[Agent]()},
-		{"skip", []string{"properties", "skip"}, yamlKeys[Skip]()},
 		{"review", []string{"properties", "review"}, yamlKeys[Review]()},
-		{"review.templates", append(review, "templates"), yamlKeys[Templates]()},
-		{"review.context", append(review, "context", "items"), yamlKeys[configfile.ContextFile]()},
-		{"a scoped instruction", append(review, "instructions", "items", "oneOf", "1"), []string{"path", "paths"}},
-		{"a task", task, yamlKeys[tasks.Task]()},
-		{"a raw trigger", []string{"$defs", "trigger", "oneOf", "3", "properties", "raw"}, []string{"event", "actions"}},
-		{"task models", append(task, "properties", "models"), yamlKeys[tasks.Models]()},
-		{"task agent", append(task, "properties", "agent"), yamlKeys[tasks.Agent]()},
-		{"task context", taskContext, yamlKeys[tasks.Context]()},
-		{"task context thread", append(taskContext, "properties", "thread"), yamlKeys[tasks.Thread]()},
-		{"task context command", append(taskContext, "properties", "commands", "items"), yamlKeys[tasks.Command]()},
-		{"a query", []string{"$defs", "query"}, yamlKeys[tasks.Query]()},
-		{"a field", []string{"$defs", "field"}, yamlKeys[tasks.Field]()},
-		{"task actions", actions, yamlKeys[tasks.Actions]()},
-		{"the comment action", append(actions, "properties", "comment"), yamlKeys[tasks.CommentSpec]()},
-		{"the labels action", append(actions, "properties", "labels"), yamlKeys[tasks.LabelsSpec]()},
-		{"labels to propose", append(actions, "properties", "labels", "properties", "propose"), yamlKeys[tasks.LabelSet]()},
-		{"a label rule", append(actions, "properties", "labels", "properties", "rules", "items"), yamlKeys[tasks.LabelRule]()},
-		{"the state action", append(actions, "properties", "state"), yamlKeys[tasks.StateSpec]()},
-		{"states to propose", append(actions, "properties", "state", "properties", "propose"), yamlKeys[tasks.StateSet]()},
-		{"a state rule", append(actions, "properties", "state", "properties", "rules", "items"), yamlKeys[tasks.StateRule]()},
-		{"a users action", []string{"$defs", "users"}, yamlKeys[tasks.UsersSpec]()},
-		{"users to propose", []string{"$defs", "users", "properties", "propose"}, yamlKeys[tasks.UserSet]()},
-		{"a users rule", []string{"$defs", "users", "properties", "rules", "items"}, yamlKeys[tasks.UserRule]()},
-		{"the inline comments action", append(actions, "properties", "inlineComments"), yamlKeys[tasks.InlineSpec]()},
+		{"confidence", []string{"properties", "confidence"}, yamlKeys[Confidence]()},
+		{"trigger", []string{"properties", "trigger"}, yamlKeys[Trigger]()},
+		{"include", []string{"properties", "trigger", "properties", "include", "items"}, yamlKeys[configfile.Filter]()},
+		{"exclude", []string{"properties", "trigger", "properties", "exclude", "items"}, yamlKeys[configfile.Filter]()},
+		{"comments", []string{"properties", "comments"}, yamlKeys[Comments]()},
+		{"context", []string{"properties", "context", "items"}, yamlKeys[configfile.ContextFile]()},
+		{"rules", []string{"properties", "rules", "items"}, yamlKeys[configfile.Rule]()},
+		{"rule when", []string{"properties", "rules", "items", "properties", "when", "items"}, yamlKeys[configfile.When]()},
+		{"skills", []string{"properties", "skills"}, yamlKeys[configfile.SkillsSpec]()},
+		{"skill scope", []string{"properties", "skills", "properties", "scope", "additionalProperties"}, yamlKeys[configfile.SkillScope]()},
+		{"skill scope when", []string{"properties", "skills", "properties", "scope", "additionalProperties", "properties", "when", "items"},
+			yamlKeys[configfile.When]()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -76,6 +56,9 @@ func TestSchemaMatchesFile(t *testing.T) {
 					node = n[i]
 				}
 			}
+			if ref, ok := node.(map[string]any)["$ref"].(string); ok {
+				node = schema["$defs"].(map[string]any)[strings.TrimPrefix(ref, "#/$defs/")]
+			}
 			props, _ := node.(map[string]any)["properties"].(map[string]any)
 			got := slices.Sorted(maps.Keys(props))
 			slices.Sort(tt.want)
@@ -87,47 +70,41 @@ func TestSchemaMatchesFile(t *testing.T) {
 }
 
 // yamlKeys lists the keys T decodes from.
-func yamlKeys[T any]() []string {
-	var out []string
-	for f := range reflect.TypeFor[T]().Fields() {
-		if name, _, _ := strings.Cut(f.Tag.Get("yaml"), ","); name != "" && name != "-" {
-			out = append(out, name)
-		}
-	}
-	return out
-}
+func yamlKeys[T any]() []string { return leafKeys(reflect.TypeFor[T](), "", false) }
 
-// TestFileFollowsPolicies checks the keys .kritique.yaml takes are the
-// settings the policy table gives the repository a rule for.
-func TestFileFollowsPolicies(t *testing.T) {
-	var ruled []string
+// TestFileKeysAreSettings checks the keys .kritique.yaml takes are settings
+// an admin writes too, spelled the same.
+func TestFileKeysAreSettings(t *testing.T) {
+	keys := make([]string, 0, len(configfile.Policies))
 	for _, p := range configfile.Policies {
-		if p.Repository == "" {
-			continue
-		}
-		ruled = append(ruled, p.Key)
-		if _, ok := configfile.SpecValue(&File{}, p.Key); !ok {
-			t.Errorf("the table gives %s a repository rule, but the file has no such key", p.Key)
-		}
+		keys = append(keys, p.Key)
 	}
-	for _, key := range leafKeys(reflect.TypeFor[File](), "") {
-		if !slices.ContainsFunc(ruled, func(r string) bool { return key == r || strings.HasPrefix(key, r+".") }) {
-			t.Errorf("the file takes %s, but the table gives the repository no rule for it", key)
+	for _, key := range leafKeys(reflect.TypeFor[File](), "", true) {
+		if !slices.ContainsFunc(keys, func(k string) bool { return key == k || strings.HasPrefix(key, k+".") }) {
+			t.Errorf("the file takes %s, which is no setting an admin writes", key)
+		}
+		if _, ok := configfile.SpecValue(&configfile.Overrides{}, key); !ok {
+			t.Errorf("the file takes %s, which an admin's entry has no key for", key)
 		}
 	}
 }
 
-// leafKeys lists the dotted keys of the settings t decodes, not looking
-// into lists.
-func leafKeys(t reflect.Type, prefix string) []string {
+// leafKeys lists the keys t decodes from, an inline block's among them:
+// dotted down to the settings when nested, not looking into lists, and t's
+// own otherwise.
+func leafKeys(t reflect.Type, prefix string, nested bool) []string {
 	var out []string
 	for f := range t.Fields() {
-		name, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+		name, opts, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+		if opts == "inline" {
+			out = append(out, leafKeys(f.Type, prefix, nested)...)
+			continue
+		}
 		if name == "" || name == "-" {
 			continue
 		}
-		if f.Type.Kind() == reflect.Struct {
-			out = append(out, leafKeys(f.Type, prefix+name+".")...)
+		if nested && f.Type.Kind() == reflect.Struct {
+			out = append(out, leafKeys(f.Type, prefix+name+".", nested)...)
 			continue
 		}
 		out = append(out, prefix+name)

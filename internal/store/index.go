@@ -7,51 +7,40 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/jobs"
 )
 
-// maxEmbedDims bounds the embedding dimension. halfvec holds up to 16,000
-// and vchordrq indexes any halfvec; the cap is kritique's, as an embedding
-// wider than this is a configuration mistake rather than a model.
-const maxEmbedDims = 4000
-
-// ErrIndexSchemaMismatch is returned when index_chunks was created for a
-// different embedding model or dimension than the deployment now runs.
-var ErrIndexSchemaMismatch = errors.New("store: index_chunks was built for a different embedding model")
-
-// EnsureIndexSchema creates index_chunks at the deployment's embedding
-// dimension on first use, records the model and dimension in
-// index_schema, and on later starts checks they still match. A changed
-// model at the same dimension, or a changed dimension, is refused unless
-// reindex is set, in which case every generation is dropped and the table
-// is rebuilt: each repository is then re-indexed from scratch by its next
-// index job. Leader only.
-func (s *Store) EnsureIndexSchema(ctx context.Context, appRole, model string, dims int, reindex bool) error {
+// EnsureIndexSchema makes index_chunks match the instance's embedder: it
+// creates the table at dims on first use and records model and dims in
+// index_schema. When either differs from what is recorded, every
+// generation is dropped with the table and it is rebuilt, so each
+// repository is indexed afresh by the onboarding that follows; rebuilt
+// reports that. The dashboard asks the admin to confirm such a change
+// before it is saved. Leader only.
+func (s *Store) EnsureIndexSchema(ctx context.Context, appRole, model string, dims int) (rebuilt bool, err error) {
 	if s.owner == nil {
-		return errors.New("store: EnsureIndexSchema needs the owner connection")
+		return false, errors.New("store: EnsureIndexSchema needs the owner connection")
 	}
-	if dims <= 0 || dims > maxEmbedDims {
-		return fmt.Errorf("store: embedding dimension %d is outside the index limit of %d", dims, maxEmbedDims)
+	if dims <= 0 || dims > configfile.MaxEmbedDims {
+		return false, fmt.Errorf("store: embedding dimension %d is outside the index limit of %d", dims, configfile.MaxEmbedDims)
 	}
-	return pgx.BeginFunc(ctx, s.owner, func(tx pgx.Tx) error {
+	err = pgx.BeginFunc(ctx, s.owner, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('kritique-index-schema'))`); err != nil {
-			return err
+			return fmt.Errorf("store: lock index schema: %w", err)
 		}
-		var curModel string
-		var curDims int
-		err := tx.QueryRow(ctx, `SELECT embed_model, embed_dims FROM index_schema WHERE id = 1`).Scan(&curModel, &curDims)
+		curModel, curDims, ok, err := IndexSchemaIn(ctx, tx)
 		switch {
-		case errors.Is(err, pgx.ErrNoRows):
-			return createIndexChunks(ctx, tx, appRole, model, dims)
 		case err != nil:
-			return fmt.Errorf("store: read index schema: %w", err)
+			return err
+		case !ok:
+			return createIndexChunks(ctx, tx, appRole, model, dims)
 		case curModel == model && curDims == dims:
 			return nil
-		case !reindex:
-			return fmt.Errorf("%w: table has %s/%d, deployment wants %s/%d (set KRITIQUE_REINDEX_ON_MODEL_CHANGE=true to rebuild)",
-				ErrIndexSchemaMismatch, curModel, curDims, model, dims)
 		}
-		// Rebuild: no generation is valid for a different embedder, so
-		// detach every repository and drop the vectors with the table.
+		// No generation is valid for a different embedder, so detach every
+		// repository and drop the vectors with the table.
 		stmts := []string{
 			`UPDATE repositories SET active_index_run_id = NULL`,
 			`UPDATE index_runs SET status = 'superseded', finished_at = coalesce(finished_at, now()) WHERE status IN ('running', 'completed')`,
@@ -63,8 +52,23 @@ func (s *Store) EnsureIndexSchema(ctx context.Context, appRole, model string, di
 				return fmt.Errorf("store: rebuild index schema: %w", err)
 			}
 		}
+		rebuilt = true
 		return createIndexChunks(ctx, tx, appRole, model, dims)
 	})
+	return rebuilt && err == nil, err
+}
+
+// IndexSchemaIn is the embedding model and dimension index_chunks was built
+// for, read in tx; ok is false when it was never built.
+func IndexSchemaIn(ctx context.Context, tx pgx.Tx) (model string, dims int, ok bool, err error) {
+	err = tx.QueryRow(ctx, `SELECT embed_model, embed_dims FROM index_schema WHERE id = 1`).Scan(&model, &dims)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", 0, false, nil
+	}
+	if err != nil {
+		return "", 0, false, fmt.Errorf("store: read index schema: %w", err)
+	}
+	return model, dims, true, nil
 }
 
 func createIndexChunks(ctx context.Context, tx pgx.Tx, appRole, model string, dims int) error {
@@ -72,7 +76,7 @@ func createIndexChunks(ctx context.Context, tx pgx.Tx, appRole, model string, di
 	stmts := []string{
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS index_chunks (
 			id            uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-			tenant_id     uuid        NOT NULL REFERENCES tenants (id),
+			account_id     uuid        NOT NULL REFERENCES accounts (id),
 			repository_id uuid        NOT NULL REFERENCES repositories (id),
 			index_run_id  uuid        NOT NULL REFERENCES index_runs (id) ON DELETE CASCADE,
 			path          text        NOT NULL,
@@ -87,17 +91,17 @@ func createIndexChunks(ctx context.Context, tx pgx.Tx, appRole, model string, di
 			created_at    timestamptz NOT NULL DEFAULT now()
 		)`, dims),
 		`CREATE INDEX IF NOT EXISTS index_chunks_run_path_idx ON index_chunks (index_run_id, path)`,
-		`CREATE INDEX IF NOT EXISTS index_chunks_tenant_id_idx ON index_chunks (tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS index_chunks_account_id_idx ON index_chunks (account_id)`,
 		// VectorChord's access method: it partitions and quantises rather
 		// than building a graph, so it builds fast and answers a filtered
 		// query in full. Unpartitioned, since the table stays far below the
 		// size at which VectorChord recommends lists.
 		`CREATE INDEX IF NOT EXISTS index_chunks_embedding_idx ON index_chunks USING vchordrq (embedding halfvec_cosine_ops)`,
 		`ALTER TABLE index_chunks ENABLE ROW LEVEL SECURITY`,
-		`DROP POLICY IF EXISTS tenant_isolation ON index_chunks`,
-		`CREATE POLICY tenant_isolation ON index_chunks
-			USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-			WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)`,
+		`DROP POLICY IF EXISTS account_isolation ON index_chunks`,
+		`CREATE POLICY account_isolation ON index_chunks
+			USING      (account_id = NULLIF(current_setting('app.account_id', true), '')::uuid)
+			WITH CHECK (account_id = NULLIF(current_setting('app.account_id', true), '')::uuid)`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON index_chunks TO ` + app,
 	}
 	for _, stmt := range stmts {
@@ -111,54 +115,89 @@ func createIndexChunks(ctx context.Context, tx pgx.Tx, appRole, model string, di
 	return nil
 }
 
-// SweepDisabledIndexes drops the index of every repository disabled for
-// longer than grace and returns how many it dropped. The repository is left
-// with no active generation, which is marked superseded, so enabling it
-// again onboards a fresh index. It runs on the owner connection, which
-// row-level security does not restrict. Leader only.
-func (s *Store) SweepDisabledIndexes(ctx context.Context, grace time.Duration) (int64, error) {
+// SweepStoppedIndexes drops the index of every repository that has not run
+// for longer than grace and returns how many it dropped. A repository runs
+// while it is enabled and runs, given its account ID, full name and traits,
+// says it does. Its clock, stopped_at, starts at the first sweep that finds
+// it holding an index and not running, and is cleared by the first that
+// finds it running or holding none. The repository is left with no active
+// generation, which is marked superseded, so running it again onboards a
+// fresh index. It runs on the owner connection, which row-level security
+// does not restrict. Leader only.
+func (s *Store) SweepStoppedIndexes(
+	ctx context.Context, grace time.Duration, runs func(accountID, fullName string, t configfile.RepoTraits) bool,
+) (int64, error) {
 	if s.owner == nil {
-		return 0, errors.New("store: SweepDisabledIndexes needs the owner connection")
+		return 0, errors.New("store: SweepStoppedIndexes needs the owner connection")
 	}
-	var runs []string
+	var dropped []string
 	err := pgx.BeginFunc(ctx, s.owner, func(tx pgx.Tx) error {
-		// Locked, so a repository enabled again meanwhile is either left out
+		// Locked, so a repository turned on meanwhile is either seen running
 		// or waits until its index is gone, never swept halfway.
-		rows, err := tx.Query(ctx, `SELECT active_index_run_id::text FROM repositories
-			WHERE NOT enabled AND active_index_run_id IS NOT NULL AND disabled_at < now() - make_interval(secs => $1)
-			FOR UPDATE`, grace.Seconds())
+		rows, err := tx.Query(ctx, `SELECT id::text, account_id::text, name, enabled, archived, fork, turned_on,
+				active_index_run_id IS NOT NULL
+			FROM repositories WHERE active_index_run_id IS NOT NULL OR stopped_at IS NOT NULL
+			FOR UPDATE`)
 		if err != nil {
 			return err
 		}
-		if runs, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil || len(runs) == 0 {
+		var stopped, others []string
+		var id, accountID, name string
+		var enabled, indexed bool
+		var t configfile.RepoTraits
+		_, err = pgx.ForEachRow(rows, []any{&id, &accountID, &name, &enabled, &t.Archived, &t.Fork, &t.TurnedOn, &indexed}, func() error {
+			if indexed && (!enabled || !runs(accountID, name, t)) {
+				stopped = append(stopped, id)
+			} else {
+				others = append(others, id)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE repositories SET stopped_at = NULL WHERE id = ANY($1::uuid[]) AND stopped_at IS NOT NULL`,
+			others); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE repositories SET stopped_at = now() WHERE id = ANY($1::uuid[]) AND stopped_at IS NULL`,
+			stopped); err != nil {
+			return err
+		}
+		rows, err = tx.Query(ctx, `SELECT active_index_run_id::text FROM repositories
+			WHERE id = ANY($1::uuid[]) AND stopped_at <= now() - make_interval(secs => $2)`, stopped, grace.Seconds())
+		if err != nil {
+			return err
+		}
+		if dropped, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil || len(dropped) == 0 {
 			return err
 		}
 		for _, stmt := range []string{
-			`UPDATE repositories SET active_index_run_id = NULL, updated_at = now() WHERE active_index_run_id = ANY($1::uuid[])`,
+			`UPDATE repositories SET active_index_run_id = NULL, stopped_at = NULL, updated_at = now() WHERE active_index_run_id = ANY($1::uuid[])`,
 			`UPDATE index_runs SET status = 'superseded', finished_at = coalesce(finished_at, now()) WHERE id = ANY($1::uuid[])`,
 			`DELETE FROM index_chunks WHERE index_run_id = ANY($1::uuid[])`,
 		} {
-			if _, err := tx.Exec(ctx, stmt, runs); err != nil {
+			if _, err := tx.Exec(ctx, stmt, dropped); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return 0, fmt.Errorf("store: sweep disabled indexes: %w", err)
+		return 0, fmt.Errorf("store: sweep stopped indexes: %w", err)
 	}
-	return int64(len(runs)), nil
+	return int64(len(dropped)), nil
 }
 
-// RepoRef names a repository and its tenant.
-type RepoRef struct{ ID, TenantID string }
+// RepoRef names a repository and its account.
+type RepoRef struct{ ID, AccountID string }
 
 // liveIndexJob is an index job of a repository still queued or running,
 // in River's own table: the states its unique key spans.
-const liveIndexJob = `j.kind = 'index' AND j.state IN ('available', 'pending', 'running', 'scheduled', 'retryable')`
+var liveIndexJob = `j.kind = 'index' AND j.state IN (` + jobs.LiveStatesSQL() + `)`
 
 // OnboardingInFlight counts onboarding index jobs queued or running.
-// Owner connection: it spans every tenant.
+// Owner connection: it spans every account.
 func (s *Store) OnboardingInFlight(ctx context.Context) (int, error) {
 	if s.owner == nil {
 		return 0, errors.New("store: OnboardingInFlight needs the owner connection")
@@ -171,42 +210,52 @@ func (s *Store) OnboardingInFlight(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// OnboardCandidates lists up to limit enabled repositories with no active
-// index generation, no index job queued or running, and no onboarding job
+// OnboardCandidates lists up to limit enabled repositories, of those
+// enabled also admits by account ID, full name and traits, with no active index
+// generation, no index job queued or running, and no onboarding job
 // that finished within retryAfter without building an index: one that
-// failed or was skipped would fail or be skipped again. Tenants take turns,
-// and within a tenant the repositories whose pull requests moved last come
+// failed or was skipped would fail or be skipped again. Accounts take turns,
+// and within an account the repositories whose pull requests moved last come
 // first, as the ones a review is likeliest to need soon. Owner connection:
-// it spans every tenant.
-func (s *Store) OnboardCandidates(ctx context.Context, limit int, retryAfter time.Duration) ([]RepoRef, error) {
+// it spans every account.
+func (s *Store) OnboardCandidates(
+	ctx context.Context, limit int, retryAfter time.Duration, enabled func(accountID, fullName string, t configfile.RepoTraits) bool,
+) ([]RepoRef, error) {
 	if s.owner == nil {
 		return nil, errors.New("store: OnboardCandidates needs the owner connection")
 	}
 	rows, err := s.owner.Query(ctx, `WITH candidates AS (
-			SELECT r.id, r.tenant_id, r.created_at,
+			SELECT r.id, r.account_id, r.name, r.archived, r.fork, r.turned_on, r.created_at,
 				(SELECT max(p.updated_at) FROM pull_requests p WHERE p.repository_id = r.id) AS active
 			FROM repositories r
 			WHERE r.enabled AND r.active_index_run_id IS NULL
 			  AND NOT EXISTS (SELECT 1 FROM river_job j WHERE `+liveIndexJob+` AND j.args->>'repository_id' = r.id::text)
 			  AND NOT EXISTS (SELECT 1 FROM river_job j WHERE j.kind = 'index' AND j.args->>'repository_id' = r.id::text
-			                  AND j.args->>'trigger' = 'onboard' AND j.finalized_at > now() - make_interval(secs => $2)
+			                  AND j.args->>'trigger' = 'onboard' AND j.finalized_at > now() - make_interval(secs => $1)
 			                  AND NOT EXISTS (SELECT 1 FROM index_runs ir WHERE ir.repository_id = r.id
 			                                  AND ir.status IN ('completed', 'superseded') AND ir.created_at >= j.created_at))
 		)
-		SELECT id, tenant_id FROM (
-			SELECT c.*, row_number() OVER (PARTITION BY tenant_id ORDER BY active DESC NULLS LAST, created_at, id) AS turn FROM candidates c
+		SELECT id, account_id, name, archived, fork, turned_on FROM (
+			SELECT c.*, row_number() OVER (PARTITION BY account_id ORDER BY active DESC NULLS LAST, created_at, id) AS turn FROM candidates c
 		) ranked
-		ORDER BY turn, active DESC NULLS LAST, created_at, id
-		LIMIT $1`, limit, retryAfter.Seconds())
+		ORDER BY turn, active DESC NULLS LAST, created_at, id`, retryAfter.Seconds())
 	if err != nil {
 		return nil, fmt.Errorf("store: list onboarding candidates: %w", err)
 	}
-	refs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (RepoRef, error) {
+	defer rows.Close()
+	var refs []RepoRef
+	for len(refs) < limit && rows.Next() {
 		var r RepoRef
-		err := row.Scan(&r.ID, &r.TenantID)
-		return r, err
-	})
-	if err != nil {
+		var name string
+		var t configfile.RepoTraits
+		if err := rows.Scan(&r.ID, &r.AccountID, &name, &t.Archived, &t.Fork, &t.TurnedOn); err != nil {
+			return nil, fmt.Errorf("store: list onboarding candidates: %w", err)
+		}
+		if enabled(r.AccountID, name, t) {
+			refs = append(refs, r)
+		}
+	}
+	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: list onboarding candidates: %w", err)
 	}
 	return refs, nil

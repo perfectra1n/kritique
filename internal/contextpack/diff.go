@@ -1,98 +1,126 @@
 package contextpack
 
 import (
-	"strconv"
 	"strings"
+
+	"github.com/perfectra1n/kritique/internal/chunk"
+	"github.com/perfectra1n/kritique/internal/udiff"
 )
 
 // diffLines is what a unified diff says per path: the head-side lines it
-// added, the head-side lines it shows at all (added plus context), and the
-// base-side lines it removed.
+// added, the head-side lines it shows at all (added plus context) with
+// their text, and the base-side lines it removed.
 type diffLines struct {
 	added   map[string][]int
-	shown   map[string]map[int]bool
+	shown   map[string]map[int]string
 	removed map[string][]int
+}
+
+// diffLine is one line of a hunk: its kind ('+', '-' or ' '), its text
+// without the marker, the paths of the file's two sides ("" for a side
+// that does not exist) and the line's number on each side.
+type diffLine struct {
+	kind             byte
+	text             string
+	oldPath, newPath string
+	oldLine, newLine int
+	// hunk numbers the diff's hunks from 0.
+	hunk int
+}
+
+// walkDiff calls fn for each added, removed and context line of each hunk
+// of a unified diff.
+func walkDiff(diff string, fn func(diffLine)) {
+	hunk := -1
+	for _, f := range udiff.Parse(diff) {
+		for _, h := range f.Hunks {
+			hunk++
+			for _, l := range h.Lines {
+				switch l.Kind {
+				case '+', '-', ' ':
+					fn(diffLine{kind: l.Kind, text: l.Text, oldPath: f.OldPath, newPath: f.NewPath, oldLine: l.OldLine, newLine: l.NewLine, hunk: hunk})
+				}
+			}
+		}
+	}
 }
 
 // parseDiff walks a unified diff once. Paths are head-side for added and
 // shown, base-side for removed; a rename therefore keys the two sides
 // differently, which is what the two trees need.
 func parseDiff(diff string) diffLines {
-	d := diffLines{added: map[string][]int{}, shown: map[string]map[int]bool{}, removed: map[string][]int{}}
-	var oldPath, newPath string
-	var oldLine, newLine int
-	inHunk := false
-	for l := range strings.SplitSeq(diff, "\n") {
+	d := diffLines{added: map[string][]int{}, shown: map[string]map[int]string{}, removed: map[string][]int{}}
+	walkDiff(diff, func(l diffLine) {
 		switch {
-		case strings.HasPrefix(l, "--- "):
-			oldPath = stripPrefix(l[4:], "a/")
-			inHunk = false
-		case strings.HasPrefix(l, "+++ "):
-			newPath = stripPrefix(l[4:], "b/")
-			inHunk = false
-		case strings.HasPrefix(l, "@@"):
-			oldLine, newLine = hunkStarts(l)
-			inHunk = oldLine > 0 && newLine > 0
-		case !inHunk:
-		case strings.HasPrefix(l, "+"):
-			if newPath != "" {
-				d.added[newPath] = append(d.added[newPath], newLine)
-				d.show(newPath, newLine)
-			}
-			newLine++
-		case strings.HasPrefix(l, "-"):
-			if oldPath != "" {
-				d.removed[oldPath] = append(d.removed[oldPath], oldLine)
-			}
-			oldLine++
-		case strings.HasPrefix(l, " "):
-			if newPath != "" {
-				d.show(newPath, newLine)
-			}
-			oldLine++
-			newLine++
-		case strings.HasPrefix(l, "\\"):
-		default:
-			inHunk = false
+		case l.kind == '-' && l.oldPath != "":
+			d.removed[l.oldPath] = append(d.removed[l.oldPath], l.oldLine)
+		case l.kind == '+' && l.newPath != "":
+			d.added[l.newPath] = append(d.added[l.newPath], l.newLine)
+			d.show(l.newPath, l.newLine, l.text)
+		case l.kind == ' ' && l.newPath != "":
+			d.show(l.newPath, l.newLine, l.text)
 		}
-	}
+	})
 	return d
 }
 
-func (d *diffLines) show(path string, line int) {
-	if d.shown[path] == nil {
-		d.shown[path] = map[int]bool{}
-	}
-	d.shown[path][line] = true
-}
-
-func stripPrefix(p, prefix string) string {
-	p = strings.TrimSpace(p)
-	if p == "/dev/null" {
-		return ""
-	}
-	return strings.TrimPrefix(p, prefix)
-}
-
-// hunkStarts reads "@@ -a,b +c,d @@" and returns a and c.
-func hunkStarts(header string) (oldStart, newStart int) {
-	fields := strings.Fields(header)
-	if len(fields) < 3 {
-		return 0, 0
-	}
-	return startOf(fields[1]), startOf(fields[2])
-}
-
-func startOf(field string) int {
-	field = strings.TrimLeft(field, "-+")
-	if i := strings.IndexByte(field, ','); i >= 0 {
-		field = field[:i]
-	}
-	n, err := strconv.Atoi(field)
-	if err != nil {
-		return 0
-	}
+// ChangedLines counts the lines a unified diff adds and removes in the
+// files no ignore glob matches. A file is matched by its head-side path,
+// or its base-side path once deleted.
+func ChangedLines(diff string, ignore []string) int {
+	n := 0
+	walkDiff(diff, func(l diffLine) {
+		if l.kind == ' ' {
+			return
+		}
+		path := l.newPath
+		if path == "" {
+			path = l.oldPath
+		}
+		if !chunk.Matches(ignore, path) {
+			n++
+		}
+	})
 	return n
+}
+
+// ShownLines returns, per head-side path, the head-side lines a unified
+// diff shows, its added and context lines, each with its text.
+func ShownLines(diff string) map[string]map[int]string {
+	return parseDiff(diff).shown
+}
+
+// TouchedLines returns, per head-side path, the head-side lines a unified
+// diff changed: each line it added, and for lines it removed the line that
+// now follows where they were.
+func TouchedLines(diff string) map[string][]int {
+	touched := map[string][]int{}
+	walkDiff(diff, func(l diffLine) {
+		if l.kind != ' ' && l.newPath != "" {
+			touched[l.newPath] = append(touched[l.newPath], l.newLine)
+		}
+	})
+	return touched
+}
+
+// Renames maps the base-side path of each file a unified diff renames and
+// changes to its head-side path. A rename alone has no hunk to say so, and
+// is left out.
+func Renames(diff string) map[string]string {
+	renames := map[string]string{}
+	walkDiff(diff, func(l diffLine) {
+		if l.oldPath != "" && l.newPath != "" && l.oldPath != l.newPath {
+			renames[l.oldPath] = l.newPath
+		}
+	})
+	return renames
+}
+
+func (d *diffLines) show(path string, line int, text string) {
+	if d.shown[path] == nil {
+		d.shown[path] = map[int]string{}
+	}
+	d.shown[path][line] = text
 }
 
 // runs groups sorted line numbers into ranges, merging neighbours closer
@@ -111,38 +139,30 @@ func runs(lines []int, gap int) [][2]int {
 
 // Hunks returns the head-side text of each hunk in a unified diff: added
 // and context lines, without the removed ones, so each string reads like
-// the region as it now is. Hunks are keyed by their head path.
+// the region as it now is. Hunks are keyed by their head path; a deleted
+// file's have none and are left out.
 func Hunks(diff string) []Hunk {
 	var out []Hunk
-	var path string
-	var cur *Hunk
+	last := -1
+	var cur Hunk
 	var text strings.Builder
 	flush := func() {
-		if cur != nil && strings.TrimSpace(text.String()) != "" {
+		if cur.Path != "" && strings.TrimSpace(text.String()) != "" {
 			cur.Text = text.String()
-			out = append(out, *cur)
+			out = append(out, cur)
 		}
-		cur = nil
 		text.Reset()
 	}
-	for l := range strings.SplitSeq(diff, "\n") {
-		switch {
-		case strings.HasPrefix(l, "+++ "):
+	walkDiff(diff, func(l diffLine) {
+		if l.hunk != last {
 			flush()
-			path = stripPrefix(l[4:], "b/")
-		case strings.HasPrefix(l, "--- "), strings.HasPrefix(l, "diff --git "):
-			flush()
-		case strings.HasPrefix(l, "@@"):
-			flush()
-			if path != "" {
-				cur = &Hunk{Path: path}
-			}
-		case cur == nil:
-		case strings.HasPrefix(l, "+"), strings.HasPrefix(l, " "):
-			text.WriteString(l[1:])
+			last, cur = l.hunk, Hunk{Path: l.newPath}
+		}
+		if l.kind != '-' {
+			text.WriteString(l.text)
 			text.WriteByte('\n')
 		}
-	}
+	})
 	flush()
 	return out
 }

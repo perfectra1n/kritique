@@ -74,7 +74,7 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a false block if drops the proposal", p: triaged, in: pull, a: answer(func(a *Answer) { a.State = StateClose }),
 			want:    Plan{AddLabels: []string{"bug", "priority/p1", "area/api"}, RemoveLabels: []string{"needs-triage"}},
-			dropped: []Drop{{ActionState, StateClose, "its if is false"}},
+			dropped: []Drop{{ActionState, StateClose, "no when condition holds"}},
 		},
 		{
 			name: "users outside the allowlist or not allowed", p: prepared(t, "name: a\non: [{issue: []}]\nactions:\n"+
@@ -89,7 +89,7 @@ func TestPlan(t *testing.T) {
 		},
 		{
 			name: "reviewers from a rule, never the author", p: prepared(t, "name: a\non: [{pull_request: []}]\nactions:\n"+
-				"  reviewers: {rules: [{users: [bob, dave], if: 'answer.fields.area == \"runner\"'}]}\nfields: {area: {type: string}}\n", nil),
+				"  reviewers: {rules: [{users: [bob, dave], when: [{expr: 'answer.fields.area == \"runner\"'}]}]}\nfields: {area: {type: string}}\n", nil),
 			in: pull, a: Answer{Fields: map[string]any{"area": "runner"}},
 			want:    Plan{Reviewers: []string{"bob"}},
 			dropped: []Drop{{ActionReviewers, "dave", "the author cannot review their own pull request"}},
@@ -123,24 +123,24 @@ func TestPlan(t *testing.T) {
 		{
 			name: "a false labels if drops the rules' labels too", p: prepared(t, "name: a\non: [{issue: []}]\nactions:\n"+
 				"  labels: {propose: {add: [bug]}, rules: [{add: ['priority/{{ .Answer.Summary }}'], remove: [needs-triage]}], "+
-				"if: 'answer.summary == \"go\"'}\n", nil), in: issue,
+				"when: [{expr: 'answer.summary == \"go\"'}]}\n", nil), in: issue,
 			a: Answer{Summary: "p1", Labels: LabelChanges{Add: []string{"bug"}}},
 			dropped: []Drop{
-				{dropAddLabel, "bug", "its if is false"},
-				{dropAddLabel, "priority/p1", "its if is false"},
-				{dropRemoveLabel, "needs-triage", "its if is false"},
+				{dropAddLabel, "bug", "no when condition holds"},
+				{dropAddLabel, "priority/p1", "no when condition holds"},
+				{dropRemoveLabel, "needs-triage", "no when condition holds"},
 			},
 		},
 		{
 			name: "a false assign if drops the rules' users too", p: prepared(t, "name: a\non: [{issue: []}]\nactions:\n"+
-				"  assign: {rules: [{users: [bob]}], if: 'false'}\n", nil), in: issue,
+				"  assign: {rules: [{users: [bob]}], when: [{expr: 'false'}]}\n", nil), in: issue,
 			a:       Answer{},
-			dropped: []Drop{{ActionAssign, "bob", "its if is false"}},
+			dropped: []Drop{{ActionAssign, "bob", "no when condition holds"}},
 		},
 		{
 			name: "a rule whose if fails", p: prepared(t, "name: a\non: [{issue: []}]\nactions:\n"+
-				"  labels: {rules: [{add: [bug], if: 'answer.fields.nope'}]}\n", nil), in: issue, a: Answer{},
-			dropped: []Drop{{ActionLabels, "answer.fields.nope", "its if failed: tasks: eval \"answer.fields.nope\": no such key: nope"}},
+				"  labels: {rules: [{add: [bug], when: [{expr: 'answer.fields.nope'}]}]}\n", nil), in: issue, a: Answer{},
+			dropped: []Drop{{ActionLabels, "answer.fields.nope", "its when failed: tasks: eval \"answer.fields.nope\": no such key: nope"}},
 		},
 	}
 	for _, tt := range tests {
@@ -181,8 +181,8 @@ func TestPlan_Comment(t *testing.T) {
 	a.Labels.Add = nil
 	facts.RepoLabels = nil
 	got, _ = p.Plan(SampleInput(), a, facts)
-	if got.Comment != nil || !slices.Contains(got.Dropped, Drop{dropComment, CommentSticky, "its if is false"}) {
-		t.Fatalf("comment %+v posted though its if is false; dropped %+v", got.Comment, got.Dropped)
+	if got.Comment != nil || !slices.Contains(got.Dropped, Drop{dropComment, CommentSticky, "no when condition holds"}) {
+		t.Fatalf("comment %+v posted though no when condition holds; dropped %+v", got.Comment, got.Dropped)
 	}
 
 	def := prepared(t, "name: a\non: [{issue: []}]\nactions: {comment: {}, labels: {propose: {add: [bug]}}}\n", nil)

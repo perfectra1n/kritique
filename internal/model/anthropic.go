@@ -23,6 +23,8 @@ type AnthropicConfig struct {
 	// HTTPClient may be nil.
 	HTTPClient *http.Client
 	Pricing    Pricing
+	// Retries is the SDK client's own retries, as OpenAIConfig.Retries.
+	Retries int
 }
 
 // Anthropic is a Stepper over the Anthropic Messages API.
@@ -37,7 +39,10 @@ func NewAnthropic(cfg AnthropicConfig) (*Anthropic, error) {
 	if cfg.APIKey == "" {
 		return nil, errors.New("model: anthropic: an API key is required")
 	}
-	opts := []option.RequestOption{option.WithoutEnvironmentDefaults(), option.WithAPIKey(cfg.APIKey)}
+	opts := []option.RequestOption{
+		option.WithoutEnvironmentDefaults(), option.WithAPIKey(cfg.APIKey), option.WithHeader("User-Agent", userAgent()),
+		option.WithMaxRetries(cfg.Retries), option.WithRequestTimeout(StepTimeout),
+	}
 	if cfg.BaseURL != "" {
 		if err := checkBaseURL(cfg.BaseURL); err != nil {
 			return nil, fmt.Errorf("model: anthropic: %w", err)
@@ -97,21 +102,28 @@ func anthropicStop(s anthropic.StopReason) StopReason {
 // anthropicParams maps everything but the model, which each attempt sets.
 // The system prompt and the last block of the last message are cache
 // breakpoints: the first caches the instructions, the second everything so
-// far, which the next step of a tool loop reads back.
+// far, which the next step of a tool loop reads back. A step no other reads
+// back has none.
 func anthropicParams(req StepRequest) (anthropic.MessageNewParams, error) {
 	p := anthropic.MessageNewParams{MaxTokens: req.MaxTokens}
 	if p.MaxTokens <= 0 {
 		p.MaxTokens = defaultAnthropicMaxTokens
 	}
+	if req.Effort != "" {
+		p.OutputConfig = anthropic.OutputConfigParam{Effort: anthropicEffort(req.Effort)}
+	}
 	if req.System != "" {
-		p.System = []anthropic.TextBlockParam{{Text: req.System, CacheControl: anthropic.NewCacheControlEphemeralParam()}}
+		p.System = []anthropic.TextBlockParam{{Text: req.System}}
+		if !req.Once {
+			p.System[0].CacheControl = anthropic.NewCacheControlEphemeralParam()
+		}
 	}
 	for _, m := range req.Messages {
 		if blocks := anthropicBlocks(m); len(blocks) > 0 {
 			p.Messages = append(p.Messages, anthropic.MessageParam{Role: anthropic.MessageParamRole(m.Role), Content: blocks})
 		}
 	}
-	if n := len(p.Messages); n > 0 {
+	if n := len(p.Messages); n > 0 && !req.Once {
 		blocks := p.Messages[n-1].Content
 		if cc := blocks[len(blocks)-1].GetCacheControl(); cc != nil {
 			*cc = anthropic.NewCacheControlEphemeralParam()
@@ -140,6 +152,15 @@ func anthropicParams(req StepRequest) (anthropic.MessageNewParams, error) {
 		p.ToolChoice = anthropic.ToolChoiceUnionParam{OfAuto: &anthropic.ToolChoiceAutoParam{}}
 	}
 	return p, nil
+}
+
+// anthropicEffort is e as the Messages API spells it, whose levels run from
+// low to max: the levels under low are sent as low.
+func anthropicEffort(e Effort) anthropic.OutputConfigEffort {
+	if e == EffortNone || e == EffortMinimal {
+		return anthropic.OutputConfigEffortLow
+	}
+	return anthropic.OutputConfigEffort(e)
 }
 
 // anthropicBlocks maps one message. Tool results lead a user message, as

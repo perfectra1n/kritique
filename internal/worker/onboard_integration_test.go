@@ -4,7 +4,6 @@ package worker
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"testing"
 
@@ -12,35 +11,26 @@ import (
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
-	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
 )
 
 // TestOnboarderKeepsToItsWindow checks the feeder queues onboarding jobs up
 // to its window and no further, and fills a place a finished job leaves.
 func TestOnboarderKeepsToItsWindow(t *testing.T) {
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.Open(ctx, store.Options{
-		AppURL: env(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: env(t, "KRITIQUE_TEST_OWNER_URL"),
-		Logger: logger,
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	ctx := t.Context()
+	logger := slog.New(slog.DiscardHandler)
+	st := storetest.Open(t)
 	t.Setenv("TEST_PEM", "pem")
 	t.Setenv("TEST_SECRET", "s3cret")
-	file, err := configfile.Parse([]byte(configYAML + `      - name: onedr0p/a
-      - name: onedr0p/b
-      - name: onedr0p/c
-`))
+	file, err := configfiletest.Parse(t, configYAML+`  onedr0p/a: {}
+  onedr0p/b: {}
+  onedr0p/c: {}
+`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ApplyConfig(ctx, file, "test"); err != nil {
+	if err := st.ApplyConfig(ctx, file); err != nil {
 		t.Fatal(err)
 	}
 	// The suites share one database: count from what is already there,
@@ -59,7 +49,16 @@ func TestOnboarderKeepsToItsWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	window := before + 2
-	o := &Onboarder{Store: st, Queue: queue, Current: configfile.NewCurrent(&configfile.File{Indexing: configfile.Indexing{OnboardWindow: window}}), Logger: logger}
+	// running is the test's configuration with the window, and emb as its
+	// embedder: the feeder offers only repositories whose account it runs.
+	running := func(emb *configfile.Embedding) *configfile.File {
+		f := *file
+		f.Run.OnboardWindow = window
+		f.Embedding = emb
+		return &f
+	}
+	current := configfile.NewCurrent(running(nil))
+	o := &Onboarder{Store: st, Queue: queue, Current: current, Logger: logger}
 	queued := func() (jobs, repos int) {
 		t.Helper()
 		if err := st.App().QueryRow(ctx, `SELECT count(*), count(DISTINCT args->>'repository_id') FROM river_job
@@ -68,6 +67,13 @@ func TestOnboarderKeepsToItsWindow(t *testing.T) {
 		}
 		return jobs, repos
 	}
+	if err := o.Offer(ctx); err != nil {
+		t.Fatalf("Offer: %v", err)
+	}
+	if jobs, _ := queued(); jobs != 0 {
+		t.Fatalf("queued %d jobs with no embedder, want none", jobs)
+	}
+	current.Set(running(&configfile.Embedding{Model: "m", Dims: 8}))
 	for range 2 {
 		if err := o.Offer(ctx); err != nil {
 			t.Fatalf("Offer: %v", err)
@@ -88,5 +94,20 @@ func TestOnboarderKeepsToItsWindow(t *testing.T) {
 	}
 	if jobs, repos := queued(); jobs != 3 || repos != 3 {
 		t.Fatalf("after one finished: queued %d jobs for %d repositories, want 3 for 3", jobs, repos)
+	}
+
+	// With repositories off by default, a place that frees up stays empty.
+	off := running(&configfile.Embedding{Model: "m", Dims: 8})
+	off.Defaults.Enabled = new(false)
+	current.Set(off)
+	if _, err := st.App().Exec(ctx, `UPDATE river_job SET state = 'completed', finalized_at = now()
+		WHERE id = (SELECT min(id) FROM river_job WHERE id > $1 AND state <> 'completed')`, lastJob); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Offer(ctx); err != nil {
+		t.Fatalf("Offer: %v", err)
+	}
+	if jobs, _ := queued(); jobs != 3 {
+		t.Fatalf("with repositories off: queued %d jobs, want still 3", jobs)
 	}
 }

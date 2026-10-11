@@ -8,114 +8,139 @@ import (
 	"testing"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 )
 
-// orgs is a fake Membership answering from a fixed table, counting calls.
+// connectionsYAML is the apps the grant tests read forge accounts from.
+const connectionsYAML = `
+apps:
+  personal-bot: { accounts: [Alice], clientId: Iv1.x, privateKey: { env: TEST_AUTH_SECRET }, webhookSecret: { env: TEST_AUTH_SECRET } }
+  org-bot: { accounts: [acme], clientId: Iv1.x, privateKey: { env: TEST_AUTH_SECRET }, webhookSecret: { env: TEST_AUTH_SECRET } }
+  adminorg-bot: { accounts: [widgets], clientId: Iv1.x, privateKey: { env: TEST_AUTH_SECRET }, webhookSecret: { env: TEST_AUTH_SECRET } }
+  several-bot: { accounts: [nobody, Initech], clientId: Iv1.x, privateKey: { env: TEST_AUTH_SECRET }, webhookSecret: { env: TEST_AUTH_SECRET } }
+`
+
+// adminPassword is an auth block's local admin, so a file whose sign-ins
+// have no mapping still has a way to an admin.
+const adminPassword = "  admin: { password: { env: TEST_AUTH_SECRET } }\n"
+
+// testFile loads an auth block over connectionsYAML.
+func testFile(t *testing.T, auth string) *configfile.File {
+	t.Helper()
+	t.Setenv("TEST_AUTH_SECRET", "s3cret")
+	return configfiletest.Load(t, auth+connectionsYAML)
+}
+
+// orgs is a fake forge membership that remembers what it was asked.
 type orgs struct {
-	roles map[string]Role
-	err   error
-	calls []string
+	member map[string]bool
+	err    error
+	calls  []string
 }
 
 func (o *orgs) membership() Membership {
-	return func(_ context.Context, org string) (Role, error) {
+	return func(_ context.Context, org string) (bool, error) {
 		o.calls = append(o.calls, org)
 		if o.err != nil {
-			return "", o.err
+			return false, o.err
 		}
-		return o.roles[strings.ToLower(org)], nil
+		return o.member[strings.ToLower(org)], nil
 	}
 }
 
-func tenant(slug string, installs ...configfile.Installation) configfile.Tenant {
-	return configfile.Tenant{Slug: slug, Installations: installs}
+func githubFacts(o *orgs, login string, orgList ...string) Facts {
+	return Facts{
+		MappingVars: func(context.Context) (map[string]any, error) {
+			return map[string]any{"login": login, "email": "", "orgs": orgList, "teams": []string{}}, nil
+		},
+		Membership: o.membership(),
+	}
 }
 
-func install(forge configfile.Forge, host, account string) configfile.Installation {
-	return configfile.Installation{Name: account + "-bot", Forge: forge, Host: host, Account: account}
-}
-
-func TestResolve(t *testing.T) {
-	file := &configfile.File{Tenants: []configfile.Tenant{
-		tenant("personal", install(configfile.ForgeGitHub, "", "Alice")),
-		tenant("org", install(configfile.ForgeGitHub, "", "acme")),
-		tenant("adminorg", install(configfile.ForgeGitHub, "github.com", "widgets")),
-		tenant("ghe", install(configfile.ForgeGitHub, "ghe.example.com", "acme")),
-		tenant("fj", install(configfile.ForgeForgejo, "code.example.org", "acme")),
-		tenant("fjuser", install(configfile.ForgeForgejo, "https://Code.Example.org", "alice")),
-		tenant("mixed", install(configfile.ForgeForgejo, "code.example.org", "nobody"), install(configfile.ForgeGitHub, "", "widgets")),
+func oidcFacts(roles ...string) Facts {
+	return Facts{MappingVars: func(context.Context) (map[string]any, error) {
+		return map[string]any{"claims": map[string]any{"sub": "x"}, "roles": roles}, nil
 	}}
-	id := func(t *testing.T, slug string) string {
-		t.Helper()
-		for i := range file.Tenants {
-			if file.Tenants[i].Slug == slug {
-				return file.Tenants[i].ID()
-			}
+}
+
+func TestGrant(t *testing.T) {
+	github := func(mapping string) string {
+		auth := "auth:\n" + adminPassword + "  github:\n    clientId: Iv1.x\n    clientSecret: { env: TEST_AUTH_SECRET }\n"
+		if mapping != "" {
+			auth += "    roleMappingExpr: '" + mapping + "'\n"
 		}
-		t.Fatalf("no tenant %s", slug)
-		return ""
+		return auth
 	}
-	github := configfile.SignIn{Name: "gh", Type: configfile.SignInGitHub, Host: "github.com"}
+	oidc := func(mapping, defaultRole string) string {
+		auth := "auth:\n" + adminPassword + "  oidc:\n    issuer: https://id.example.com\n    clientId: k\n    clientSecret: { env: TEST_AUTH_SECRET }\n"
+		if mapping != "" {
+			auth += "    roleMappingExpr: '" + mapping + "'\n"
+		}
+		if defaultRole != "" {
+			auth += "    defaultRole: " + defaultRole + "\n"
+		}
+		return auth
+	}
 	tests := []struct {
-		name   string
-		signIn configfile.SignIn
-		login  string
-		roles  map[string]Role
-		want   map[string]Role
+		name     string
+		auth     string
+		typ      configfile.SignInType
+		login    string
+		facts    func(o *orgs) Facts
+		member   map[string]bool
+		role     Role
+		all      bool
+		accounts []string
+		asked    bool
 	}{
 		{
-			name: "personal account is admin, org member and org admin", signIn: github, login: "alice",
-			roles: map[string]Role{"acme": RoleMember, "widgets": RoleAdmin},
-			want:  map[string]Role{"personal": RoleAdmin, "org": RoleMember, "adminorg": RoleAdmin, "mixed": RoleAdmin},
+			name: "the forge alone: own login and organizations", auth: github(""), typ: configfile.SignInGitHub, login: "alice",
+			facts: func(o *orgs) Facts { return githubFacts(o, "alice") }, member: map[string]bool{"acme": true, "widgets": true},
+			role: RoleMember, accounts: []string{"github/acme", "github/alice", "github/widgets"}, asked: true,
 		},
 		{
-			name: "not a member of anything", signIn: github, login: "bob",
-			want: map[string]Role{},
+			name: "a mapping makes an admin without asking the forge", auth: github(`login == "alice" ? "admin" : ""`), typ: configfile.SignInGitHub,
+			login: "alice", facts: func(o *orgs) Facts { return githubFacts(o, "alice") }, role: RoleAdmin,
 		},
 		{
-			name: "host mismatch: GitHub Enterprise sign-in sees only its host", login: "alice",
-			signIn: configfile.SignIn{Name: "ghe", Type: configfile.SignInGitHub, Host: "https://GHE.example.com"},
-			roles:  map[string]Role{"acme": RoleMember, "widgets": RoleAdmin},
-			want:   map[string]Role{"ghe": RoleMember},
+			name: "a mapped account joins the forge's", auth: github(`{"github/Org-2": "member"}`), typ: configfile.SignInGitHub, login: "bob",
+			facts: func(o *orgs) Facts { return githubFacts(o, "bob") }, member: map[string]bool{"acme": true},
+			role: RoleMember, accounts: []string{"github/acme", "github/org-2"}, asked: true,
 		},
 		{
-			name: "forge mismatch: forgejo sign-in ignores GitHub installations", login: "alice",
-			signIn: configfile.SignIn{Name: "fj", Type: configfile.SignInForgejo, Host: "code.example.org"},
-			roles:  map[string]Role{"acme": RoleAdmin, "widgets": RoleAdmin},
-			want:   map[string]Role{"fj": RoleAdmin, "fjuser": RoleAdmin},
+			name: "a mapped organization", auth: github(`"acme" in orgs ? "member" : ""`), typ: configfile.SignInGitHub, login: "bob",
+			facts: func(o *orgs) Facts { return githubFacts(o, "bob", "acme") }, role: RoleMember, all: true,
 		},
 		{
-			name: "oidc resolves nothing", login: "alice",
-			signIn: configfile.SignIn{Name: "corp", Type: configfile.SignInOIDC, Issuer: "https://id.example.com"},
-			roles:  map[string]Role{"acme": RoleAdmin},
-			want:   map[string]Role{},
+			name: "an oidc member reads everything", auth: oidc(`"kritique-user" in roles ? "member" : ""`, ""), typ: configfile.SignInOIDC,
+			facts: func(*orgs) Facts { return oidcFacts("kritique-user") }, role: RoleMember, all: true,
+		},
+		{
+			name: "an oidc map of every account", auth: oidc(`{"*": "member"}`, ""), typ: configfile.SignInOIDC,
+			facts: func(*orgs) Facts { return oidcFacts() }, role: RoleMember, all: true,
+		},
+		{
+			name: "an oidc default of member", auth: oidc(`"kritique-admin" in roles ? "admin" : ""`, "member"), typ: configfile.SignInOIDC,
+			facts: func(*orgs) Facts { return oidcFacts("other") }, role: RoleMember, all: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o := &orgs{roles: tt.roles}
-			grants, err := Resolve(context.Background(), file, tt.signIn, Identity{Login: tt.login}, o.membership())
+			file := testFile(t, tt.auth)
+			s, _ := file.Auth.SignInByType(tt.typ)
+			o := &orgs{member: tt.member}
+			g, err := grant(t.Context(), file, s, Identity{Login: tt.login}, tt.facts(o))
 			if err != nil {
-				t.Fatalf("Resolve: %v", err)
+				t.Fatalf("grant: %v", err)
 			}
-			got := map[string]Role{}
-			for _, g := range grants {
-				if _, dup := got[g.TenantID]; dup {
-					t.Fatalf("tenant %s granted twice", g.TenantID)
-				}
-				got[g.TenantID] = g.Role
+			if g.Role != tt.role || g.AllAccounts != tt.all || !slices.Equal(g.Accounts, tt.accounts) {
+				t.Fatalf("grant = %+v, want role %s, all %v, accounts %v", g, tt.role, tt.all, tt.accounts)
 			}
-			want := map[string]Role{}
-			for slug, r := range tt.want {
-				want[id(t, slug)] = r
+			if want, _ := GrantKey(file.Auth, string(tt.typ)); g.Key == "" || g.Key != want {
+				t.Fatalf("key = %q, want %q", g.Key, want)
 			}
-			if len(got) != len(want) {
-				t.Fatalf("grants = %v, want %v", got, want)
-			}
-			for k, v := range want {
-				if got[k] != v {
-					t.Fatalf("grants = %v, want %v", got, want)
-				}
+			if (len(o.calls) > 0) != tt.asked {
+				t.Fatalf("asked the forge about %v, want asked %v", o.calls, tt.asked)
 			}
 			seen := map[string]bool{}
 			for _, c := range o.calls {
@@ -128,65 +153,68 @@ func TestResolve(t *testing.T) {
 	}
 }
 
-func TestResolveErrors(t *testing.T) {
-	file := &configfile.File{Tenants: []configfile.Tenant{tenant("org", install(configfile.ForgeGitHub, "", "acme"))}}
-	signIn := configfile.SignIn{Name: "gh", Type: configfile.SignInGitHub, Host: "github.com"}
+func TestGrantRefuses(t *testing.T) {
 	boom := errors.New("boom")
-	o := &orgs{err: boom}
-	if _, err := Resolve(context.Background(), file, signIn, Identity{Login: "alice"}, o.membership()); !errors.Is(err, boom) {
-		t.Fatalf("Resolve error = %v, want %v", err, boom)
-	}
-	grants, err := Resolve(context.Background(), file, signIn, Identity{Login: "acme"}, nil)
-	if err != nil || len(grants) != 1 || grants[0].Role != RoleAdmin {
-		t.Fatalf("Resolve with nil membership = %v, %v; want the personal-account admin grant", grants, err)
-	}
-}
-
-func TestIsOperator(t *testing.T) {
-	web := configfile.Web{
-		SignIn: []configfile.SignIn{
-			{Name: "gh", Type: configfile.SignInGitHub},
-			{Name: "fj", Type: configfile.SignInForgejo},
-			{Name: "corp", Type: configfile.SignInOIDC},
-		},
-		Operators: []string{"gh:Alice", "corp:Sub-123", "email:Ops@Example.com", "gone:carol"},
-	}
-	tests := []struct {
-		name string
-		id   Identity
-		want bool
+	github := testFile(t, "auth:\n"+adminPassword+"  github:\n    clientId: Iv1.x\n    clientSecret: { env: TEST_AUTH_SECRET }\n")
+	gh, _ := github.Auth.SignInByType(configfile.SignInGitHub)
+	oidc := testFile(t, "auth:\n  oidc:\n    issuer: https://id.example.com\n    clientId: k\n    clientSecret: { env: TEST_AUTH_SECRET }\n"+
+		"    roleMappingExpr: 'claims.groups[0] == \"a\" ? \"admin\" : \"\"'\n")
+	od, _ := oidc.Auth.SignInByType(configfile.SignInOIDC)
+	oidcNone := testFile(t, "auth:\n  oidc:\n    issuer: https://id.example.com\n    clientId: k\n    clientSecret: { env: TEST_AUTH_SECRET }\n"+
+		"    roleMappingExpr: '\"kritique-admin\" in roles ? \"admin\" : \"\"'\n")
+	on, _ := oidcNone.Auth.SignInByType(configfile.SignInOIDC)
+	for _, tt := range []struct {
+		name  string
+		file  *configfile.File
+		s     *configfile.SignIn
+		facts Facts
+		want  error
 	}{
-		{"forge login, case-insensitive", Identity{Provider: "gh", Login: "ALICE", Subject: "1"}, true},
-		{"same login on another provider", Identity{Provider: "fj", Login: "alice", Subject: "1"}, false},
-		{"oidc subject, exact", Identity{Provider: "corp", Subject: "Sub-123", Login: "x"}, true},
-		{"oidc subject case differs", Identity{Provider: "corp", Subject: "sub-123"}, false},
-		{"oidc matched by login is not enough", Identity{Provider: "corp", Subject: "zzz", Login: "Sub-123"}, false},
-		{"verified email, case-insensitive", Identity{Provider: "fj", Login: "z", Email: "ops@example.COM", EmailVerified: true}, true},
-		{"unverified email", Identity{Provider: "fj", Login: "z", Email: "ops@example.com"}, false},
-		{"operator on a sign-in no longer configured", Identity{Provider: "gone", Login: "carol"}, false},
-		{"nobody", Identity{Provider: "gh", Login: "bob"}, false},
-	}
-	for _, tt := range tests {
+		{"a stranger on github", github, gh, githubFacts(&orgs{}, "mallory"), ErrNoGrant},
+		{"the forge failing", github, gh, githubFacts(&orgs{err: boom}, "mallory"), boom},
+		{"a mapping that fails", oidc, od, oidcFacts(), ErrRoleMapping},
+		{"oidc placing nobody by default", oidcNone, on, oidcFacts("other"), ErrNoGrant},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsOperator(web, tt.id); got != tt.want {
-				t.Fatalf("IsOperator(%+v) = %v, want %v", tt.id, got, tt.want)
+			if _, err := grant(t.Context(), tt.file, tt.s, Identity{Login: "mallory"}, tt.facts); !errors.Is(err, tt.want) {
+				t.Fatalf("grant = %v, want %v", err, tt.want)
 			}
 		})
 	}
 }
 
-func TestRoleMax(t *testing.T) {
-	roles := []Role{"", RoleMember, RoleAdmin}
-	for _, a := range roles {
-		for _, b := range roles {
-			got := maxRole(a, b)
-			want := a
-			if slices.Index(roles, b) > slices.Index(roles, a) {
-				want = b
-			}
-			if got != want {
-				t.Fatalf("maxRole(%q, %q) = %q, want %q", a, b, got, want)
-			}
+// TestGrantKey: a sign-in's key changes with what decides its grants, and
+// with nothing else.
+func TestGrantKey(t *testing.T) {
+	base := "auth:\n  admin: { password: { env: TEST_AUTH_SECRET } }\n  github:\n    clientId: Iv1.x\n    clientSecret: { env: TEST_AUTH_SECRET }\n" +
+		"    roleMappingExpr: 'login == \"a\" ? \"admin\" : \"\"'\n"
+	key := func(auth, provider string) string {
+		t.Helper()
+		k, ok := GrantKey(testFile(t, auth).Auth, provider)
+		if !ok {
+			t.Fatalf("GrantKey(%s) not configured", provider)
 		}
+		return k
+	}
+	gh, local := key(base, "github"), key(base, "local")
+	if gh == local {
+		t.Fatal("two sign-ins share a key")
+	}
+	if key(strings.Replace(base, "clientId: Iv1.x", "clientId: Iv1.y", 1), "github") != gh {
+		t.Fatal("a client id change changed the key")
+	}
+	if key(strings.Replace(base, `login == "a"`, `login == "b"`, 1), "github") == gh {
+		t.Fatal("a mapping change kept the key")
+	}
+	if key(strings.Replace(base, "admin: {", "admin: { user: root,", 1), "local") == local {
+		t.Fatal("renaming the admin kept the key")
+	}
+	t.Setenv("TEST_AUTH_SECRET", "rotated")
+	f := configfiletest.Load(t, base+connectionsYAML)
+	if k, _ := GrantKey(f.Auth, "local"); k == local {
+		t.Fatal("rotating the password kept the key")
+	}
+	if _, ok := GrantKey(f.Auth, "oidc"); ok {
+		t.Fatal("an unconfigured sign-in has a key")
 	}
 }

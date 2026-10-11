@@ -3,7 +3,6 @@
     "id": "rev-1",
     "status": "completed",
     "trigger": "push",
-    "mode": "agentic",
     "scope": "incremental",
     "model": "acme/large",
     "headSha": "abc123",
@@ -17,20 +16,33 @@
     "finishedAt": "2026-09-01T12:01:30Z",
     "skipReason": "filtered",
     "error": "",
+    "confidence": {
+      "score": 3,
+      "threshold": 5,
+      "passed": false,
+      "reason": "The unchecked error stands.",
+      "risk": "medium",
+      "model": "acme/judge"
+    },
     "pull": {
       "repository": "alpha/one",
       "number": 7,
-      "title": "Add widgets"
+      "title": "Add widgets",
+      "url": "https://git.example/alpha/one/pulls/7"
     },
+    "pullState": "open",
+    "pullMerged": false,
     "scopeReason": "delta",
     "mergeBaseSha": "base1",
     "patchId": "patch1",
     "priorReviewId": "rev-0",
+    "newestReviewId": null,
     "cancelRequestedAt": null
   },
   "summary": {
     "take": "Looks fine.",
-    "praise": ["tests"]
+    "praise": ["tests"],
+    "diagram": "flowchart TD\n  A --> B"
   },
   "findings": [
     {
@@ -39,6 +51,7 @@
       "line": 3,
       "endLine": 5,
       "severity": "blocking",
+      "category": "",
       "title": "nil deref",
       "explanation": "x may be nil",
       "suggestedFix": "check x",
@@ -47,7 +60,13 @@
       "fingerprint": "fp",
       "postedInline": true,
       "forgeCommentId": 55,
-      "createdAt": "2026-09-01T12:00:00Z"
+      "threadUrl": "https://git.example/alpha/one/pulls/7#discussion_r55",
+      "createdAt": "2026-09-01T12:00:00Z",
+      "reactionsUp": 2,
+      "reactionsDown": 1,
+      "rules": ["wrap-errors"],
+      "status": "open",
+      "dismissReason": ""
     }
   ],
   "runnerRun": {
@@ -76,6 +95,7 @@
     "timeline": [
       {
         "index": 0,
+        "part": 1,
         "tools": ["grep"],
         "durationMs": 1200,
         "outputBytes": 300,
@@ -84,6 +104,10 @@
       }
     ],
     "sources": ["https://docs.example"],
+    "skillsOffered": ["renovate-review", "go-style"],
+    "skillsOpened": ["renovate-review"],
+    "commandsOffered": ["gh", "helm"],
+    "commandsRun": ["helm"],
     "usage": {
       "input": 100,
       "cacheRead": 50,
@@ -96,7 +120,16 @@
     "createdAt": "2026-09-01T12:01:30Z",
     "result": {
       "findings": []
-    }
+    },
+    "carriedReviewId": "rev-0",
+    "parts": [
+      {
+        "paths": ["a.go"],
+        "stop": "submitted",
+        "error": "",
+        "steps": 3
+      }
+    ]
   },
   "usage": [
     {
@@ -131,6 +164,7 @@
       }
     ],
     "repoNotes": ["docs/missing.md: not found"],
+    "ruleIds": ["wrap-errors", "no-tokens"],
     "repoFiles": [
       {
         "path": ".kritique.yaml",

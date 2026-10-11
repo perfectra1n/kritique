@@ -5,12 +5,11 @@ package store
 import (
 	"context"
 	"errors"
-	"io"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 )
 
 // The suite needs a VectorChord-enabled Postgres with three roles, as
@@ -40,10 +40,10 @@ func testEnv(t *testing.T, key string) string {
 
 func openStore(t *testing.T) *Store {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	s, err := Open(ctx, Options{
 		AppURL: testEnv(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIQUE_TEST_OWNER_URL"),
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -55,9 +55,25 @@ func openStore(t *testing.T) *Store {
 	return s
 }
 
+// TestPoolStatementTimeouts: both pools bound their statements, the
+// application pool tightly since everything serving shares it.
+func TestPoolStatementTimeouts(t *testing.T) {
+	s := openStore(t)
+	var app, owner string
+	if err := s.app.QueryRow(t.Context(), `SHOW statement_timeout`).Scan(&app); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.owner.QueryRow(t.Context(), `SHOW statement_timeout`).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if app != "1min" || owner != "10min" {
+		t.Fatalf("statement_timeout = %s on the application pool and %s on the owner's, want 1min and 10min", app, owner)
+	}
+}
+
 func TestOpenRefusesUnsafeApplicationDSN(t *testing.T) {
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := t.Context()
+	logger := slog.New(slog.DiscardHandler)
 	tests := []struct {
 		name string
 		url  string
@@ -86,107 +102,112 @@ func TestOpenRefusesUnsafeApplicationDSN(t *testing.T) {
 
 func TestMigrateIsIdempotent(t *testing.T) {
 	s := openStore(t)
-	if ready, err := s.SchemaReady(context.Background()); err != nil || !ready {
+	if ready, err := s.SchemaReady(t.Context()); err != nil || !ready {
 		t.Fatalf("SchemaReady after Migrate = %v, %v", ready, err)
 	}
-	if err := s.Migrate(context.Background(), "kritique_app", "kritique_runner"); err != nil {
+	if err := s.Migrate(t.Context(), "kritique_app", "kritique_runner"); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
 	names, _ := fs.Glob(migrationFS, "migrations/*.sql")
 	var n int
-	if err := s.owner.QueryRow(context.Background(), `SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil || n != len(names) {
+	if err := s.owner.QueryRow(t.Context(), `SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil || n != len(names) {
 		t.Fatalf("schema_migrations rows = %d, err %v; want one per embedded migration (%d)", n, err, len(names))
 	}
 }
 
-const twoTenants = `
-tenants:
-  - slug: alpha
-    installations:
-      - name: alpha-bot
-        forge: forgejo
-        account: alpha
-        token: { env: KRITIQUE_TEST_TOKEN }
-        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
-    repositories:
-      - name: alpha/one
-      - name: alpha/two
-        enabled: false
-  - slug: beta
-    installations:
-      - name: beta-bot
-        forge: forgejo
-        account: beta
-        token: { env: KRITIQUE_TEST_TOKEN }
-        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
+const alphaEntry = `
+repositories:
+  alpha/one: {}
+  alpha/two: {}
 `
+
+// twoAccounts serves alpha and beta; alphaAccount, alpha alone.
+const (
+	twoAccounts = `
+apps:
+  alpha-bot:
+    accounts: [alpha]
+    clientId: Iv1.test
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
+  beta-bot:
+    accounts: [beta]
+    clientId: Iv1.test
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
+` + alphaEntry
+	alphaAccount = `
+apps:
+  alpha-bot:
+    accounts: [alpha]
+    clientId: Iv1.test
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
+` + alphaEntry
+)
 
 func parse(t *testing.T, yaml string) *configfile.File {
 	t.Helper()
 	t.Setenv("KRITIQUE_TEST_TOKEN", "tok")
-	f, err := configfile.Parse([]byte(yaml))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	return f
+	return configfiletest.Load(t, yaml)
 }
 
-func tenantID(t *testing.T, s *Store, slug string) string {
+func accountID(t *testing.T, s *Store, name string) string {
 	t.Helper()
 	var id string
-	if err := s.owner.QueryRow(context.Background(), `SELECT id FROM tenants WHERE slug = $1`, slug).Scan(&id); err != nil {
-		t.Fatalf("tenant %s: %v", slug, err)
+	if err := s.owner.QueryRow(t.Context(), `SELECT id FROM accounts WHERE name = $1`, name).Scan(&id); err != nil {
+		t.Fatalf("account %s: %v", name, err)
 	}
 	return id
 }
 
 func TestApplyConfigAndRowLevelSecurity(t *testing.T) {
 	s := openStore(t)
-	ctx := context.Background()
-	f := parse(t, twoTenants)
-	if err := s.ApplyConfig(ctx, f, "test"); err != nil {
+	ctx := t.Context()
+	f := parse(t, twoAccounts)
+	if err := s.ApplyConfig(ctx, f); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
 	if got, _ := s.AppliedConfigHash(ctx); got != f.Hash() {
 		t.Fatalf("applied hash = %q, want %q", got, f.Hash())
 	}
-	alpha, beta := tenantID(t, s, "alpha"), tenantID(t, s, "beta")
+	alpha, beta := accountID(t, s, "alpha"), accountID(t, s, "beta")
 
-	count := func(t *testing.T, tenant, table string) int {
+	count := func(t *testing.T, account, table string) int {
 		t.Helper()
 		var n int
-		err := s.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		err := s.WithAccount(ctx, account, func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&n)
 		})
 		if err != nil {
-			t.Fatalf("count %s as %s: %v", table, tenant, err)
+			t.Fatalf("count %s as %s: %v", table, account, err)
 		}
 		return n
 	}
 
-	t.Run("each tenant sees only its own rows", func(t *testing.T) {
-		if count(t, alpha, "tenants") != 1 || count(t, alpha, "installations") != 1 || count(t, alpha, "repositories") != 2 {
-			t.Fatal("alpha should see its own tenant, installation and two repositories")
+	t.Run("each account sees only its own rows", func(t *testing.T) {
+		if count(t, alpha, "accounts") != 1 || count(t, alpha, "repositories") != 2 {
+			t.Fatal("alpha should see its own account and two repositories")
 		}
-		if count(t, beta, "repositories") != 0 || count(t, beta, "installations") != 1 {
-			t.Fatal("beta should see one installation and no repositories")
+		if count(t, beta, "repositories") != 0 || count(t, beta, "connections WHERE name IN ('alpha-bot', 'beta-bot')") != 2 {
+			t.Fatal("beta should see no repositories, and every connection, which belong to no account")
 		}
 	})
 
-	t.Run("no tenant set sees nothing", func(t *testing.T) {
-		for _, table := range []string{"tenants", "installations", "repositories", "model_leases"} {
+	t.Run("no account set sees nothing", func(t *testing.T) {
+		for _, table := range []string{"accounts", "repositories", "model_leases"} {
 			var n int
 			if err := s.app.QueryRow(ctx, `SELECT count(*) FROM `+table).Scan(&n); err != nil {
 				t.Fatalf("%s: %v", table, err)
 			}
 			if n != 0 {
-				t.Fatalf("%s: %d rows visible with no tenant set", table, n)
+				t.Fatalf("%s: %d rows visible with no account set", table, n)
 			}
 		}
 	})
 
-	t.Run("tenant does not leak across pooled connections", func(t *testing.T) {
-		// Exhaust the pool's connections through WithTenant, then query bare.
+	t.Run("account does not leak across pooled connections", func(t *testing.T) {
+		// Exhaust the pool's connections through WithAccount, then query bare.
 		for range 20 {
 			if count(t, alpha, "repositories") != 2 {
 				t.Fatal("alpha count changed")
@@ -194,71 +215,209 @@ func TestApplyConfigAndRowLevelSecurity(t *testing.T) {
 		}
 		var n int
 		if err := s.app.QueryRow(ctx, `SELECT count(*) FROM repositories`).Scan(&n); err != nil || n != 0 {
-			t.Fatalf("bare query after tenant transactions saw %d rows (err %v)", n, err)
+			t.Fatalf("bare query after account transactions saw %d rows (err %v)", n, err)
 		}
 	})
 
-	t.Run("application role cannot insert into another tenant", func(t *testing.T) {
-		err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `INSERT INTO model_leases (tenant_id, model_key, slot) VALUES ($1, 'p/m', 0)`, beta)
+	t.Run("application role cannot insert into another account", func(t *testing.T) {
+		err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO model_leases (account_id, model_key, slot) VALUES ($1, 'p/m', 0)`, beta)
 			return err
 		})
 		if err == nil {
-			t.Fatal("insert with a foreign tenant_id must fail the WITH CHECK policy")
+			t.Fatal("insert with a foreign account_id must fail the WITH CHECK policy")
 		}
 	})
 
-	t.Run("disabled repository is recorded as disabled", func(t *testing.T) {
+	t.Run("a listed repository is recorded enabled whatever its account starts it as", func(t *testing.T) {
+		off := strings.Replace(twoAccounts, "    name: alpha\n", "    name: alpha\n    enabled: false\n", 1)
+		if err := s.ApplyConfig(ctx, parse(t, off)); err != nil {
+			t.Fatalf("ApplyConfig: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := s.ApplyConfig(context.Background(), parse(t, twoAccounts)); err != nil {
+				t.Errorf("ApplyConfig: %v", err)
+			}
+		})
 		var enabled bool
 		var disabledAt *time.Time
 		if err := s.owner.QueryRow(ctx, `SELECT enabled, disabled_at FROM repositories WHERE name = 'alpha/two'`).Scan(&enabled, &disabledAt); err != nil {
 			t.Fatal(err)
 		}
-		if enabled || disabledAt == nil {
-			t.Fatalf("alpha/two enabled=%v disabled_at=%v", enabled, disabledAt)
+		if !enabled || disabledAt != nil {
+			t.Fatalf("alpha/two enabled=%v disabled_at=%v; want it recorded as listed", enabled, disabledAt)
 		}
 	})
 
-	t.Run("removing a tenant from the file disables it and keeps its rows", func(t *testing.T) {
-		f2 := parse(t, strings.SplitN(twoTenants, "  - slug: beta", 2)[0])
-		if err := s.ApplyConfig(ctx, f2, "test"); err != nil {
+	t.Run("an account no connection serves any more is disabled and keeps its rows", func(t *testing.T) {
+		f2 := parse(t, alphaAccount)
+		if err := s.ApplyConfig(ctx, f2); err != nil {
 			t.Fatalf("ApplyConfig: %v", err)
 		}
 		var enabled bool
-		var rows int
-		if err := s.owner.QueryRow(ctx, `SELECT enabled, (SELECT count(*) FROM installations WHERE tenant_id = tenants.id) FROM tenants WHERE slug = 'beta'`).Scan(&enabled, &rows); err != nil {
+		if err := s.owner.QueryRow(ctx, `SELECT enabled FROM accounts WHERE name = 'beta'`).Scan(&enabled); err != nil {
 			t.Fatal(err)
 		}
-		if enabled || rows != 1 {
-			t.Fatalf("beta enabled=%v installations=%d; want disabled with rows kept", enabled, rows)
+		if enabled {
+			t.Fatal("beta is still enabled")
 		}
 		var instEnabled bool
-		if err := s.owner.QueryRow(ctx, `SELECT enabled FROM installations WHERE name = 'beta-bot'`).Scan(&instEnabled); err != nil || instEnabled {
+		if err := s.owner.QueryRow(ctx, `SELECT enabled FROM connections WHERE name = 'beta-bot'`).Scan(&instEnabled); err != nil || instEnabled {
 			t.Fatalf("beta-bot enabled=%v err=%v; want disabled", instEnabled, err)
 		}
-		if err := s.ApplyConfig(ctx, f, "test"); err != nil {
+		if err := s.ApplyConfig(ctx, f); err != nil {
 			t.Fatalf("re-apply: %v", err)
 		}
-		if err := s.owner.QueryRow(ctx, `SELECT enabled FROM tenants WHERE slug = 'beta'`).Scan(&enabled); err != nil || !enabled {
+		if err := s.owner.QueryRow(ctx, `SELECT enabled FROM accounts WHERE name = 'beta'`).Scan(&enabled); err != nil || !enabled {
 			t.Fatalf("beta re-enabled=%v err=%v", enabled, err)
 		}
 	})
 }
 
-func TestRunnerRoleUpdatesOnlyWhatARunnerReports(t *testing.T) {
+// TestApplyConfigHandsUnlistedRepositoryBack: a repository its account no
+// longer lists goes back to the forge, enabled, and listing it again takes
+// it over.
+func TestApplyConfigHandsUnlistedRepositoryBack(t *testing.T) {
 	s := openStore(t)
-	ctx := context.Background()
-	if err := s.ApplyConfig(ctx, parse(t, twoTenants), "test"); err != nil {
+	ctx := t.Context()
+	listed := parse(t, twoAccounts)
+	if err := s.ApplyConfig(ctx, listed); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
-	alpha, beta := tenantID(t, s, "alpha"), tenantID(t, s, "beta")
+	unlisted := parse(t, strings.Replace(twoAccounts, "  alpha/two: {}\n", "", 1))
+	check := func(wantOrigin string, wantEnabled bool) {
+		t.Helper()
+		var origin string
+		var enabled bool
+		var disabledAt *time.Time
+		if err := s.owner.QueryRow(ctx, `SELECT managed_by, enabled, disabled_at FROM repositories WHERE name = 'alpha/two'`).
+			Scan(&origin, &enabled, &disabledAt); err != nil {
+			t.Fatal(err)
+		}
+		if origin != wantOrigin || enabled != wantEnabled || (disabledAt == nil) != wantEnabled {
+			t.Fatalf("alpha/two managed_by=%s enabled=%v disabled_at=%v; want %s, enabled %v", origin, enabled, disabledAt, wantOrigin, wantEnabled)
+		}
+	}
+	if err := s.ApplyConfig(ctx, unlisted); err != nil {
+		t.Fatalf("ApplyConfig unlisted: %v", err)
+	}
+	check("forge", true)
+	if err := s.ApplyConfig(ctx, listed); err != nil {
+		t.Fatalf("ApplyConfig listed: %v", err)
+	}
+	check("file", true)
+}
+
+// TestRepositoryNamesIgnoreCase: GitHub's spelling of a listed repository
+// names the same row, which takes that spelling, stays listed through the
+// next apply, and is found in any case.
+func TestRepositoryNamesIgnoreCase(t *testing.T) {
+	s := openStore(t)
+	ctx := t.Context()
+	f := parse(t, twoAccounts)
+	if err := s.ApplyConfig(ctx, f); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+	alpha := accountID(t, s, "alpha")
+	spell := func(name string) (id string, isNew bool) {
+		t.Helper()
+		if err := s.WithAccount(context.Background(), alpha, func(tx pgx.Tx) error {
+			var err error
+			id, isNew, err = EnsureRepository(context.Background(), tx, alpha, ReachedRepository{FullName: name})
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return id, isNew
+	}
+	// The suites share the database, and later ones look the row up as
+	// alpha/one.
+	t.Cleanup(func() { spell("alpha/one") })
+	id, isNew := spell("Alpha/ONE")
+	if isNew || id != configfile.RepositoryID(alpha, "alpha/one") {
+		t.Fatalf("EnsureRepository = %s, new %v; want the listed row", id, isNew)
+	}
+	if err := s.ApplyConfig(ctx, f); err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	var name, origin string
+	var rows int
+	if err := s.owner.QueryRow(ctx, `SELECT name, managed_by, (SELECT count(*) FROM repositories WHERE account_id = $1)
+		FROM repositories WHERE id = $2`, alpha, id).Scan(&name, &origin, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Alpha/ONE" || origin != "file" || rows != 2 {
+		t.Fatalf("name %q, managed_by %s, %d rows; want GitHub's spelling on the one listed row", name, origin, rows)
+	}
+	if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+		row, err := FindRepo(ctx, tx, "alpha/one")
+		if err == nil && row.ID != id {
+			err = fmt.Errorf("found %s", row.ID)
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("FindRepo in another case: %v", err)
+	}
+}
+
+// TestRepositoryTraits: a report that says whether a repository is
+// archived or a fork records it, and one that does not, as an installation
+// event, keeps what was known.
+func TestRepositoryTraits(t *testing.T) {
+	s := openStore(t)
+	ctx := t.Context()
+	if err := s.ApplyConfig(ctx, parse(t, twoAccounts)); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+	alpha := accountID(t, s, "alpha")
+	t.Cleanup(func() {
+		_, _ = s.owner.Exec(context.Background(), `DELETE FROM repositories WHERE id = $1`, configfile.RepositoryID(alpha, "alpha/copy"))
+	})
+	report := func(traits *configfile.RepoTraits) configfile.RepoTraits {
+		t.Helper()
+		var row RepoRow
+		if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+			if _, _, err := EnsureRepository(ctx, tx, alpha, ReachedRepository{FullName: "alpha/copy", Traits: traits}); err != nil {
+				return err
+			}
+			var err error
+			row, err = FindRepo(ctx, tx, "alpha/copy")
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return row.RepoTraits
+	}
+	for _, step := range []struct {
+		name   string
+		report *configfile.RepoTraits
+		want   configfile.RepoTraits
+	}{
+		{"first named without traits", nil, configfile.RepoTraits{}},
+		{"reported archived fork", &configfile.RepoTraits{Archived: true, Fork: true}, configfile.RepoTraits{Archived: true, Fork: true}},
+		{"named again without traits", nil, configfile.RepoTraits{Archived: true, Fork: true}},
+		{"reported unarchived", &configfile.RepoTraits{Fork: true}, configfile.RepoTraits{Fork: true}},
+	} {
+		if got := report(step.report); got != step.want {
+			t.Fatalf("%s: traits %+v, want %+v", step.name, got, step.want)
+		}
+	}
+}
+
+func TestRunnerRoleUpdatesOnlyWhatARunnerReports(t *testing.T) {
+	s := openStore(t)
+	ctx := t.Context()
+	if err := s.ApplyConfig(ctx, parse(t, twoAccounts)); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+	alpha, beta := accountID(t, s, "alpha"), accountID(t, s, "beta")
 	var runID string
-	if err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `INSERT INTO runner_runs (tenant_id, kind) VALUES ($1, 'index') RETURNING id`, alpha).Scan(&runID)
+	if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `INSERT INTO runner_runs (account_id, kind) VALUES ($1, 'index') RETURNING id`, alpha).Scan(&runID)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	runner, err := Open(ctx, Options{AppURL: testEnv(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	runner, err := Open(ctx, Options{AppURL: testEnv(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatalf("Open runner: %v", err)
 	}
@@ -271,7 +430,7 @@ func TestRunnerRoleUpdatesOnlyWhatARunnerReports(t *testing.T) {
 		{name: "phase", stmt: `UPDATE runner_runs SET phase = 'fetching' WHERE id = $1`, allowed: true},
 		{name: "heartbeat", stmt: `UPDATE runner_runs SET heartbeat_at = now() WHERE id = $1`, allowed: true},
 		{name: "error", stmt: `UPDATE runner_runs SET phase = 'failed', error = 'boom' WHERE id = $1`, allowed: true},
-		{name: "tenant", stmt: `UPDATE runner_runs SET tenant_id = '` + beta + `' WHERE id = $1`},
+		{name: "account", stmt: `UPDATE runner_runs SET account_id = '` + beta + `' WHERE id = $1`},
 		{name: "log tail", stmt: `UPDATE runner_runs SET log_tail = 'forged' WHERE id = $1`},
 		{name: "exit code", stmt: `UPDATE runner_runs SET exit_code = 0 WHERE id = $1`},
 		{name: "secret swept", stmt: `UPDATE runner_runs SET secret_swept_at = now() WHERE id = $1`},
@@ -285,38 +444,76 @@ func TestRunnerRoleUpdatesOnlyWhatARunnerReports(t *testing.T) {
 				}
 				return err
 			})
-			var pgErr *pgconn.PgError
+			pgErr, refused := errors.AsType[*pgconn.PgError](err)
 			switch {
 			case tt.allowed && err != nil:
 				t.Fatalf("a runner must be able to update its %s: %v", tt.name, err)
-			case !tt.allowed && (!errors.As(err, &pgErr) || pgErr.Code != "42501"):
+			case !tt.allowed && (!refused || pgErr.Code != "42501"):
 				t.Fatalf("a runner updating its %s must be refused permission, got %v", tt.name, err)
 			}
 		})
 	}
-	var tenant string
-	if err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT tenant_id FROM runner_runs WHERE id = $1`, runID).Scan(&tenant)
-	}); err != nil || tenant != alpha {
-		t.Fatalf("run tenant = %q, %v", tenant, err)
+	var account string
+	if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT account_id FROM runner_runs WHERE id = $1`, runID).Scan(&account)
+	}); err != nil || account != alpha {
+		t.Fatalf("run account = %q, %v", account, err)
 	}
+	// What a runner writes carries its run's account: a pack under another
+	// account is refused by the policy, not left invisible to every reader.
+	for _, tt := range []struct {
+		name    string
+		account string
+		allowed bool
+	}{{"own account", alpha, true}, {"another account", beta, false}} {
+		t.Run("index pack under "+tt.name, func(t *testing.T) {
+			err := runner.WithRunnerJob(ctx, runID, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, `INSERT INTO index_packs (runner_run_id, account_id, mode) VALUES ($1, $2, 'full')`, runID, tt.account)
+				return err
+			})
+			pgErr, refused := errors.AsType[*pgconn.PgError](err)
+			switch {
+			case tt.allowed && err != nil:
+				t.Fatalf("a runner must be able to write its pack: %v", err)
+			case !tt.allowed && (!refused || pgErr.Code != "42501"):
+				t.Fatalf("a pack under another account must be refused, got %v", err)
+			}
+		})
+		t.Run("conversation under "+tt.name, func(t *testing.T) {
+			err := runner.WithRunnerJob(ctx, runID, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, `INSERT INTO agent_conversations (runner_run_id, account_id, session, conversation, tokens)
+					VALUES ($1, $2, $3, '{}', 1)`, runID, tt.account, runID)
+				return err
+			})
+			pgErr, refused := errors.AsType[*pgconn.PgError](err)
+			switch {
+			case tt.allowed && err != nil:
+				t.Fatalf("a runner must be able to keep its conversation: %v", err)
+			case !tt.allowed && (!refused || pgErr.Code != "42501"):
+				t.Fatalf("a conversation under another account must be refused, got %v", err)
+			}
+		})
+	}
+	t.Cleanup(func() {
+		_, _ = s.owner.Exec(context.Background(), `DELETE FROM agent_conversations WHERE runner_run_id = $1`, runID)
+	})
 }
 
 func TestRunSecretsToSweep(t *testing.T) {
 	s := openStore(t)
-	ctx := context.Background()
-	if err := s.ApplyConfig(ctx, parse(t, twoTenants), "test"); err != nil {
+	ctx := t.Context()
+	if err := s.ApplyConfig(ctx, parse(t, twoAccounts)); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
-	alpha, beta := tenantID(t, s, "alpha"), tenantID(t, s, "beta")
-	insert := func(tenant, age string, finished, swept bool) string {
+	alpha, beta := accountID(t, s, "alpha"), accountID(t, s, "beta")
+	insert := func(account, age string, finished, swept bool) string {
 		t.Helper()
 		var id string
-		if err := s.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `INSERT INTO runner_runs (tenant_id, kind, created_at, finished_at, secret_swept_at)
+		if err := s.WithAccount(ctx, account, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `INSERT INTO runner_runs (account_id, kind, created_at, finished_at, secret_swept_at)
 				VALUES ($1, 'index', now() - $2::interval,
 					CASE WHEN $3 THEN now() END, CASE WHEN $4 THEN now() END) RETURNING id`,
-				tenant, age, finished, swept).Scan(&id)
+				account, age, finished, swept).Scan(&id)
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -339,7 +536,7 @@ func TestRunSecretsToSweep(t *testing.T) {
 	if limited, err := s.RunSecretsToSweep(ctx, alpha, 15*time.Minute, 3*time.Hour, 1); err != nil || len(limited) != 1 || limited[0] != abandoned {
 		t.Fatalf("limited sweep = %v, %v; want the oldest run only", limited, err)
 	}
-	// Marking is idempotent and scoped to the tenant: beta's run is not
+	// Marking is idempotent and scoped to the account: beta's run is not
 	// visible from alpha, so marking it there changes nothing.
 	for range 2 {
 		if err := s.MarkRunSecretsSwept(ctx, alpha, append(got, betaRun)); err != nil {
@@ -356,7 +553,7 @@ func TestRunSecretsToSweep(t *testing.T) {
 
 func TestLeaderLockIsExclusive(t *testing.T) {
 	s := openStore(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	held := make(chan struct{})
@@ -428,7 +625,7 @@ func TestEnsureIndexSchemaUsesVectorChord(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = s.owner.Exec(context.Background(), `DROP TABLE IF EXISTS index_chunks; DELETE FROM index_schema`)
 	})
-	if err := s.EnsureIndexSchema(ctx, "kritique_app", "test-embed", 8, true); err != nil {
+	if _, err := s.EnsureIndexSchema(ctx, "kritique_app", "test-embed", 8); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
 	var method string
@@ -444,142 +641,286 @@ func TestEnsureIndexSchemaUsesVectorChord(t *testing.T) {
 	}
 }
 
-// TestSweepDisabledIndexes checks that only a repository disabled for longer
-// than the grace loses its index, that it is left to onboard afresh, and
-// that a second sweep finds nothing.
-func TestSweepDisabledIndexes(t *testing.T) {
+// TestEnsureIndexSchemaRebuildsForANewEmbedder: the same embedder leaves
+// the index alone, and another model or dimension drops every generation
+// with the table and leaves each repository to onboard afresh.
+func TestEnsureIndexSchemaRebuildsForANewEmbedder(t *testing.T) {
 	ctx := t.Context()
 	s := openStore(t)
-	if err := s.ApplyConfig(ctx, parse(t, twoTenants), "test"); err != nil {
+	if err := s.ApplyConfig(ctx, parse(t, twoAccounts)); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
-	// The suites share one database: leave no index schema behind.
 	t.Cleanup(func() {
 		_, _ = s.owner.Exec(context.Background(), `UPDATE repositories SET active_index_run_id = NULL;
 			DROP TABLE IF EXISTS index_chunks; DELETE FROM index_schema`)
 	})
-	if err := s.EnsureIndexSchema(ctx, "kritique_app", "test-embed", 8, true); err != nil {
+	ensure := func(model string, dims int) bool {
+		t.Helper()
+		rebuilt, err := s.EnsureIndexSchema(ctx, "kritique_app", model, dims)
+		if err != nil {
+			t.Fatalf("EnsureIndexSchema(%s, %d): %v", model, dims, err)
+		}
+		return rebuilt
+	}
+	if ensure("test-embed", 8) {
+		t.Fatal("creating the index is not a rebuild")
+	}
+	var run string
+	if err := s.owner.QueryRow(ctx, `WITH g AS (
+			INSERT INTO index_runs (account_id, repository_id, commit_sha, embed_model, embed_dims, mode, status)
+			SELECT account_id, id, 'abc', 'test-embed', 8, 'full', 'completed' FROM repositories WHERE name = 'alpha/one'
+			RETURNING id, account_id, repository_id
+		), c AS (
+			INSERT INTO index_chunks (account_id, repository_id, index_run_id, path, start_line, end_line, text, embedding)
+			SELECT account_id, repository_id, id, 'main.go', 1, 1, 'package main', '[1,0,0,0,0,0,0,0]' FROM g
+		)
+		UPDATE repositories r SET active_index_run_id = g.id FROM g WHERE r.id = g.repository_id RETURNING g.id`).Scan(&run); err != nil {
+		t.Fatalf("seed a generation: %v", err)
+	}
+	if ensure("test-embed", 8) {
+		t.Fatal("the same embedder must not rebuild the index")
+	}
+	for _, next := range []struct {
+		model string
+		dims  int
+	}{{"other-embed", 8}, {"other-embed", 16}} {
+		if !ensure(next.model, next.dims) {
+			t.Fatalf("%s/%d must rebuild the index", next.model, next.dims)
+		}
+		var active *string
+		var status string
+		if err := s.owner.QueryRow(ctx, `SELECT r.active_index_run_id::text, g.status FROM repositories r, index_runs g
+			WHERE r.name = 'alpha/one' AND g.id = $1`, run).Scan(&active, &status); err != nil {
+			t.Fatal(err)
+		}
+		if active != nil || status != "superseded" {
+			t.Fatalf("after the rebuild: active = %v, status = %s", active, status)
+		}
+		var model string
+		var dims int
+		if err := s.owner.QueryRow(ctx, `SELECT embed_model, embed_dims FROM index_schema`).Scan(&model, &dims); err != nil ||
+			model != next.model || dims != next.dims {
+			t.Fatalf("index_schema = %s/%d, %v", model, dims, err)
+		}
+		var typmod string
+		if err := s.owner.QueryRow(ctx, `SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+			WHERE attrelid = 'index_chunks'::regclass AND attname = 'embedding'`).Scan(&typmod); err != nil ||
+			typmod != fmt.Sprintf("halfvec(%d)", next.dims) {
+			t.Fatalf("embedding column = %s, %v", typmod, err)
+		}
+	}
+}
+
+// TestSweepStoppedIndexes: a repository that stops running for any reason
+// (archived, turned off, off in the configuration, disabled or under an
+// account no App serves) starts its clock at the next sweep and loses its
+// index, left to onboard afresh, once the clock is past the grace; one
+// that runs again within it keeps its index, and a clock left on a
+// repository with no index is cleared.
+func TestSweepStoppedIndexes(t *testing.T) {
+	ctx := t.Context()
+	s := openStore(t)
+	on := parse(t, twoAccounts)
+	if err := s.ApplyConfig(ctx, on); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+	off := parse(t, twoAccounts+"  alpha/*: { enabled: false }\n")
+	unserved := parse(t, strings.Replace(alphaAccount, "alpha", "beta", 2))
+	// The suites share one database: leave no index schema behind.
+	t.Cleanup(func() {
+		_, _ = s.owner.Exec(context.Background(), `UPDATE repositories SET active_index_run_id = NULL, stopped_at = NULL;
+			DROP TABLE IF EXISTS index_chunks; DELETE FROM index_schema`)
+	})
+	if _, err := s.EnsureIndexSchema(ctx, "kritique_app", "test-embed", 8); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
-	// Both alpha repositories get an active generation with one chunk;
-	// alpha/two is the disabled one.
-	runs := map[string]string{}
-	for _, name := range []string{"alpha/one", "alpha/two"} {
+	// index gives the repository an active generation with one chunk.
+	index := func(name string) string {
+		t.Helper()
 		var run string
 		if err := s.owner.QueryRow(ctx, `WITH g AS (
-				INSERT INTO index_runs (tenant_id, repository_id, commit_sha, embed_model, embed_dims, mode, status)
-				SELECT tenant_id, id, 'abc', 'test-embed', 8, 'full', 'completed' FROM repositories WHERE name = $1
-				RETURNING id, tenant_id, repository_id
+				INSERT INTO index_runs (account_id, repository_id, commit_sha, embed_model, embed_dims, mode, status)
+				SELECT account_id, id, 'abc', 'test-embed', 8, 'full', 'completed' FROM repositories WHERE name = $1
+				RETURNING id, account_id, repository_id
 			), c AS (
-				INSERT INTO index_chunks (tenant_id, repository_id, index_run_id, path, start_line, end_line, text, embedding)
-				SELECT tenant_id, repository_id, id, 'main.go', 1, 1, 'package main', '[1,0,0,0,0,0,0,0]' FROM g
+				INSERT INTO index_chunks (account_id, repository_id, index_run_id, path, start_line, end_line, text, embedding)
+				SELECT account_id, repository_id, id, 'main.go', 1, 1, 'package main', '[1,0,0,0,0,0,0,0]' FROM g
 			)
 			UPDATE repositories r SET active_index_run_id = g.id FROM g WHERE r.id = g.repository_id RETURNING g.id`, name).Scan(&run); err != nil {
 			t.Fatalf("index %s: %v", name, err)
 		}
-		runs[name] = run
+		return run
 	}
-	state := func(name string) (active bool, status string, chunks int) {
+	// check fails unless the repository still has run as its index and its
+	// clock is running as stopped says, or, when dropped, the run is
+	// superseded with no chunks and the repository has no clock.
+	check := func(what, name, run string, dropped, stopped bool) {
 		t.Helper()
+		var active, clock bool
+		var status string
+		var chunks int
 		if err := s.owner.QueryRow(ctx, `SELECT
 				(SELECT active_index_run_id IS NOT NULL FROM repositories WHERE name = $1),
+				(SELECT stopped_at IS NOT NULL FROM repositories WHERE name = $1),
 				(SELECT status FROM index_runs WHERE id = $2),
-				(SELECT count(*) FROM index_chunks WHERE index_run_id = $2)`, name, runs[name]).Scan(&active, &status, &chunks); err != nil {
+				(SELECT count(*) FROM index_chunks WHERE index_run_id = $2)`, name, run).Scan(&active, &clock, &status, &chunks); err != nil {
 			t.Fatal(err)
 		}
-		return active, status, chunks
-	}
-	sweep := func(want int64) {
-		t.Helper()
-		if n, err := s.SweepDisabledIndexes(ctx, time.Hour); err != nil || n != want {
-			t.Fatalf("SweepDisabledIndexes = %d, %v; want %d", n, err, want)
+		if dropped && (active || clock || status != "superseded" || chunks != 0) ||
+			!dropped && (!active || clock != stopped || status != "completed" || chunks != 1) {
+			t.Fatalf("%s: %s active=%v stopped=%v status=%s chunks=%d; want dropped %v, stopped %v",
+				what, name, active, clock, status, chunks, dropped, stopped)
 		}
 	}
+	sweep := func(f *configfile.File, want int64) {
+		t.Helper()
+		n, err := s.SweepStoppedIndexes(ctx, time.Hour, func(accountID, fullName string, traits configfile.RepoTraits) bool {
+			a, ok := f.AccountByID(accountID)
+			return ok && f.Runs(a, fullName, traits)
+		})
+		if err != nil || n != want {
+			t.Fatalf("SweepStoppedIndexes = %d, %v; want %d", n, err, want)
+		}
+	}
+	exec := func(sql string) {
+		t.Helper()
+		if _, err := s.owner.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backdate := func(name string) {
+		t.Helper()
+		if _, err := s.owner.Exec(ctx, `UPDATE repositories SET stopped_at = now() - interval '2 hours' WHERE name = $1`, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turn := func(name string, on bool) {
+		t.Helper()
+		alpha := accountID(t, s, "alpha")
+		if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+			return TurnOn(ctx, tx, configfile.RepositoryID(alpha, name), on)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = s.owner.Exec(context.Background(), `UPDATE repositories SET archived = false, turned_on = NULL, turned_at = NULL,
+			enabled = true, disabled_at = NULL WHERE name IN ('alpha/one', 'alpha/two')`)
+	})
+	one, two := index("alpha/one"), index("alpha/two")
 
-	sweep(0)
-	if active, status, chunks := state("alpha/two"); !active || status != "completed" || chunks != 1 {
-		t.Fatalf("within the grace: active=%v status=%s chunks=%d, want the index kept", active, status, chunks)
+	sweep(on, 0)
+	check("running", "alpha/one", one, false, false)
+	check("running", "alpha/two", two, false, false)
+
+	exec(`UPDATE repositories SET archived = true WHERE name = 'alpha/one'`)
+	turn("alpha/two", false)
+	sweep(on, 0)
+	check("archived, within the grace", "alpha/one", one, false, true)
+	check("turned off, within the grace", "alpha/two", two, false, true)
+
+	backdate("alpha/two")
+	turn("alpha/two", true)
+	turn("alpha/two", false)
+	sweep(on, 0)
+	check("turned on and off again between sweeps", "alpha/two", two, false, true)
+
+	exec(`UPDATE repositories SET archived = false WHERE name = 'alpha/one'`)
+	turn("alpha/two", true)
+	sweep(on, 0)
+	check("unarchived within the grace", "alpha/one", one, false, false)
+	check("turned on within the grace", "alpha/two", two, false, false)
+
+	sweep(off, 0)
+	check("off in the configuration, within the grace", "alpha/one", one, false, true)
+	check("turned on, whatever the configuration says", "alpha/two", two, false, false)
+	backdate("alpha/one")
+	sweep(off, 1)
+	check("off in the configuration past the grace", "alpha/one", one, true, false)
+
+	exec(`UPDATE repositories SET enabled = false WHERE name = 'alpha/two'`)
+	sweep(on, 0)
+	check("disabled, within the grace", "alpha/two", two, false, true)
+	backdate("alpha/two")
+	sweep(on, 1)
+	check("disabled past the grace", "alpha/two", two, true, false)
+
+	one = index("alpha/one")
+	sweep(unserved, 0)
+	backdate("alpha/one")
+	sweep(unserved, 1)
+	check("under an account no App serves past the grace", "alpha/one", one, true, false)
+
+	backdate("alpha/one")
+	sweep(on, 0)
+	check("no index, a clock left behind", "alpha/one", one, true, false)
+
+	// A repository the forge reports rather than the configuration lists.
+	alpha := accountID(t, s, "alpha")
+	reach := func(archived bool) {
+		t.Helper()
+		if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+			_, _, err := EnsureRepository(ctx, tx, alpha, ReachedRepository{FullName: "alpha/forge", Traits: &configfile.RepoTraits{Archived: archived}})
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := s.owner.Exec(ctx, `UPDATE repositories SET disabled_at = now() - interval '2 hours' WHERE name = 'alpha/two'`); err != nil {
-		t.Fatal(err)
+	lose := func() {
+		t.Helper()
+		if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+			return DisableForgeRepositories(ctx, tx, alpha, configfile.RepositoryID(alpha, "alpha/forge"))
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	sweep(1)
-	if active, status, chunks := state("alpha/two"); active || status != "superseded" || chunks != 0 {
-		t.Fatalf("past the grace: active=%v status=%s chunks=%d, want the index dropped", active, status, chunks)
-	}
-	if active, status, chunks := state("alpha/one"); !active || status != "completed" || chunks != 1 {
-		t.Fatalf("enabled repository: active=%v status=%s chunks=%d, want the index kept", active, status, chunks)
-	}
-	sweep(0)
+	reach(false)
+	t.Cleanup(func() {
+		id := configfile.RepositoryID(alpha, "alpha/forge")
+		_, _ = s.owner.Exec(context.Background(), `UPDATE repositories SET active_index_run_id = NULL WHERE id = $1`, id)
+		_, _ = s.owner.Exec(context.Background(), `DELETE FROM index_runs WHERE repository_id = $1`, id)
+		_, _ = s.owner.Exec(context.Background(), `DELETE FROM repositories WHERE id = $1`, id)
+	})
+	forge := index("alpha/forge")
+	lose()
+	sweep(on, 0)
+	backdate("alpha/forge")
+	reach(false)
+	lose()
+	sweep(on, 0)
+	check("lost, reached again and lost again between sweeps", "alpha/forge", forge, false, true)
+
+	reach(true)
+	sweep(on, 0)
+	backdate("alpha/forge")
+	reach(true)
+	sweep(on, 1)
+	check("archived past the grace, however often the forge names it", "alpha/forge", forge, true, false)
 }
 
-// TestFindRepoAcrossInstallations checks that a repository name two
-// installations of a tenant hold is ambiguous without an installation,
-// resolves with one, and stops being ambiguous once one installation is
-// gone and only its disabled repository is left.
-func TestFindRepoAcrossInstallations(t *testing.T) {
+// TestFindRepo: a repository is found by its full name within the account
+// the transaction reads.
+func TestFindRepo(t *testing.T) {
 	ctx := t.Context()
 	s := openStore(t)
-	const twoForges = `
-tenants:
-  - slug: gamma
-    installations:
-      - name: gamma-one
-        forge: forgejo
-        host: one.example.com
-        account: gamma
-        token: { env: KRITIQUE_TEST_TOKEN }
-        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
-      - name: gamma-two
-        forge: forgejo
-        host: two.example.com
-        account: gamma
-        token: { env: KRITIQUE_TEST_TOKEN }
-        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
-    repositories:
-      - { name: gamma/x, installation: gamma-one }
-      - { name: gamma/x, installation: gamma-two }
-`
-	if err := s.ApplyConfig(ctx, parse(t, twoForges), "test"); err != nil {
+	if err := s.ApplyConfig(ctx, parse(t, twoAccounts)); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
-	gamma := tenantID(t, s, "gamma")
-	find := func(name, installation string) (RepoRow, error) {
+	find := func(account, name string) (RepoRow, error) {
 		t.Helper()
 		var row RepoRow
-		err := s.WithTenant(ctx, gamma, func(tx pgx.Tx) error {
+		err := s.WithAccount(ctx, accountID(t, s, account), func(tx pgx.Tx) error {
 			var err error
-			row, err = FindRepo(ctx, tx, name, installation)
+			row, err = FindRepo(ctx, tx, name)
 			return err
 		})
 		return row, err
 	}
-
-	_, err := find("gamma/x", "")
-	e, ok := errors.AsType[*AmbiguousRepoError](err)
-	if !ok || !slices.Equal(slices.Sorted(slices.Values(e.Installations)), []string{"gamma-one", "gamma-two"}) {
-		t.Fatalf("FindRepo without installation = %v, want ambiguous over gamma-one and gamma-two", err)
+	if row, err := find("alpha", "alpha/one"); err != nil || row.FullName != "alpha/one" || !row.Enabled || row.ManagedBy != "file" {
+		t.Fatalf("FindRepo(alpha/one) = %+v, %v", row, err)
 	}
-	if row, err := find("gamma/x", "gamma-two"); err != nil || row.Installation != "gamma-two" {
-		t.Fatalf("FindRepo(gamma-two) = %+v, %v", row, err)
-	}
-	if _, err := find("gamma/nope", ""); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("FindRepo(unknown) = %v, want ErrNotFound", err)
-	}
-
-	oneLeft := strings.Replace(strings.Replace(twoForges, `      - { name: gamma/x, installation: gamma-two }
-`, "", 1), `      - name: gamma-two
-        forge: forgejo
-        host: two.example.com
-        account: gamma
-        token: { env: KRITIQUE_TEST_TOKEN }
-        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
-`, "", 1)
-	if err := s.ApplyConfig(ctx, parse(t, oneLeft), "test"); err != nil {
-		t.Fatalf("ApplyConfig without gamma-two: %v", err)
-	}
-	if row, err := find("gamma/x", ""); err != nil || row.Installation != "gamma-one" || !row.Enabled {
-		t.Fatalf("FindRepo after gamma-two went = %+v, %v; want gamma-one's enabled repository", row, err)
+	if _, err := find("beta", "alpha/one"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("FindRepo from another account = %v, want ErrNotFound", err)
 	}
 }
 
@@ -592,31 +933,57 @@ func changeLast(s string) string {
 	return s[:len(s)-1] + "0"
 }
 
+// checkFollowUpGrant: a follow-up's run has no parent, names the comment it
+// answers, and has no review to name on a pull request not yet reviewed.
+func checkFollowUpGrant(ctx context.Context, t *testing.T, s *Store, alpha string, g GatewayGrant) {
+	t.Helper()
+	fg := GatewayGrant{AccountID: alpha, RepositoryID: g.RepositoryID, FollowupCommentID: 6024351112, Model: g.Model, Budget: 1000}
+	if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+		var err error
+		if fg.RunID, err = InsertRunnerRun(ctx, tx, alpha, RunnerKindFollowUp, "", 0); err != nil {
+			return err
+		}
+		return FailRunnerRun(ctx, tx, fg.RunID, "ended by the test")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	followUp, err := s.MintGatewayToken(ctx, fg, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.LookupGatewayToken(ctx, followUp); err != nil || got != fg {
+		t.Fatalf("follow-up grant = %+v, %v; want %+v", got, err, fg)
+	}
+	if err := s.RevokeGatewayTokens(ctx, fg.RunID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGatewayTokens(t *testing.T) {
 	s := openStore(t)
-	ctx := context.Background()
-	if err := s.ApplyConfig(ctx, parse(t, twoTenants), "test"); err != nil {
+	ctx := t.Context()
+	if err := s.ApplyConfig(ctx, parse(t, twoAccounts)); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
-	alpha := tenantID(t, s, "alpha")
+	alpha := accountID(t, s, "alpha")
 	// A run needs a review, which needs a pull request of a repository.
 	grant := func() GatewayGrant {
 		t.Helper()
-		g := GatewayGrant{TenantID: alpha, Model: "openrouter/acme/large", Fallback: "openrouter/acme/small", Budget: 1000}
-		if err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
+		g := GatewayGrant{AccountID: alpha, Model: "openrouter/acme/large", Fallback: "openrouter/acme/small", Effort: "high", Budget: 1000}
+		if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
 			if err := tx.QueryRow(ctx, `SELECT id FROM repositories WHERE name = 'alpha/one'`).Scan(&g.RepositoryID); err != nil {
 				return err
 			}
 			var prID string
-			if err := tx.QueryRow(ctx, `INSERT INTO pull_requests (tenant_id, repository_id, number, head_sha)
+			if err := tx.QueryRow(ctx, `INSERT INTO pull_requests (account_id, repository_id, number, head_sha)
 				VALUES ($1, $2, (random() * 1e6)::int, 'abc') RETURNING id`, alpha, g.RepositoryID).Scan(&prID); err != nil {
 				return err
 			}
-			if err := tx.QueryRow(ctx, `INSERT INTO reviews (tenant_id, pull_request_id, head_sha, status)
+			if err := tx.QueryRow(ctx, `INSERT INTO reviews (account_id, pull_request_id, head_sha, status)
 				VALUES ($1, $2, 'abc', 'running') RETURNING id`, alpha, prID).Scan(&g.ReviewID); err != nil {
 				return err
 			}
-			return tx.QueryRow(ctx, `INSERT INTO runner_runs (tenant_id, kind) VALUES ($1, 'review') RETURNING id`, alpha).Scan(&g.RunID)
+			return tx.QueryRow(ctx, `INSERT INTO runner_runs (account_id, kind) VALUES ($1, 'review') RETURNING id`, alpha).Scan(&g.RunID)
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -650,6 +1017,8 @@ func TestGatewayTokens(t *testing.T) {
 			t.Fatalf("lookup %q = %v, want ErrGatewayToken", bad, err)
 		}
 	}
+
+	checkFollowUpGrant(ctx, t, s, alpha, g)
 
 	expired, err := s.MintGatewayToken(ctx, grant(), time.Now().Add(-time.Minute))
 	if err != nil {
@@ -692,7 +1061,7 @@ func TestGatewayTokens(t *testing.T) {
 // its size, and not once the run is at or over it; a refund brings it back.
 func checkReservations(t *testing.T, s *Store, token string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	for _, tt := range []struct {
 		tokens int64
 		ok     bool
@@ -711,5 +1080,41 @@ func checkReservations(t *testing.T, s *Store, token string) {
 	}
 	if ok, err := s.ReserveGatewayTokens(ctx, token, 1); err != nil || !ok {
 		t.Fatalf("reserve after a refund = %v, %v", ok, err)
+	}
+}
+
+// TestLeaderDutiesAreRetried: a tenure whose duties fail releases the lock
+// and is tried again rather than ending RunAsLeader, and with it the process.
+func TestLeaderDutiesAreRetried(t *testing.T) {
+	s := openStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	tenures := make(chan int, 2)
+	done := make(chan error, 1)
+	go func() {
+		n := 0
+		done <- s.RunAsLeader(ctx, 20*time.Millisecond, func(ctx context.Context) error {
+			n++
+			tenures <- n
+			if n == 1 {
+				return errors.New("deadlock detected")
+			}
+			<-ctx.Done()
+			return nil
+		})
+	}()
+	for want := 1; want <= 2; want++ {
+		select {
+		case got := <-tenures:
+			if got != want {
+				t.Fatalf("tenure %d, want %d", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("tenure %d never started", want)
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunAsLeader = %v, want nil once ctx ends", err)
 	}
 }

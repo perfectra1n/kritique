@@ -48,6 +48,7 @@ func TestEnumsValid(t *testing.T) {
 		{"openrouter", ProviderOpenRouter.Valid(), true},
 		{"openai", ProviderOpenAI.Valid(), true},
 		{"anthropic", ProviderAnthropic.Valid(), true},
+		{"opencode", ProviderOpenCode.Valid(), true},
 		{"unknown provider", ProviderType("cohere").Valid(), false},
 		{"empty provider", ProviderType("").Valid(), false},
 		{"user", RoleUser.Valid(), true},
@@ -55,8 +56,6 @@ func TestEnumsValid(t *testing.T) {
 		{"system is not a message role", Role("system").Valid(), false},
 		{"tool choice tool", ToolChoiceTool.Valid(), true},
 		{"tool choice none", ToolChoiceMode("none").Valid(), false},
-		{"stop other", StopOther.Valid(), true},
-		{"stop unknown", StopReason("refusal").Valid(), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

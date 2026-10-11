@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
+
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // OpenAIEmbedder is an Embedder over any OpenAI-compatible embeddings
@@ -22,18 +25,31 @@ type OpenAIEmbedder struct {
 	MaxBatch, MaxBatchChars, MaxItemChars int
 }
 
+// Request bounds an embedder keeps to unless told otherwise, conservative
+// enough for the common OpenAI-compatible servers.
+const (
+	DefaultEmbedMaxBatch      = 64
+	DefaultEmbedMaxBatchChars = 200_000
+	DefaultEmbedMaxItemChars  = 16_000
+)
+
+// EmbedTimeout bounds one embeddings request, a batch of at most MaxBatch
+// short texts. A variable for the tests.
+var EmbedTimeout = time.Minute
+
 // NewOpenAIEmbedder builds an embedder. dims is sent to the server so the
 // vectors match the table; models that ignore it return their native size
 // and the caller must check.
 func NewOpenAIEmbedder(baseURL, apiKey, model string, dims int) *OpenAIEmbedder {
-	opts := make([]option.RequestOption, 0, 2+len(attribution))
-	opts = append(opts, option.WithBaseURL(baseURL), option.WithAPIKey(apiKey))
+	opts := make([]option.RequestOption, 0, 4+len(attribution))
+	opts = append(opts, option.WithBaseURL(baseURL), option.WithAPIKey(apiKey), option.WithHeader("User-Agent", userAgent()),
+		option.WithRequestTimeout(EmbedTimeout))
 	for k, v := range attribution {
 		opts = append(opts, option.WithHeader(k, v))
 	}
 	return &OpenAIEmbedder{
 		client: openai.NewClient(opts...), model: model, dims: int64(dims),
-		MaxBatch: 64, MaxBatchChars: 200_000, MaxItemChars: 16_000,
+		MaxBatch: DefaultEmbedMaxBatch, MaxBatchChars: DefaultEmbedMaxBatchChars, MaxItemChars: DefaultEmbedMaxItemChars,
 	}
 }
 
@@ -54,10 +70,7 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, inputs []string) ([][]float3
 		}
 		batch := make([]string, 0, end-start)
 		for _, s := range inputs[start:end] {
-			if len(s) > e.MaxItemChars {
-				s = s[:e.MaxItemChars]
-			}
-			batch = append(batch, s)
+			batch = append(batch, textcut.Prefix(s, e.MaxItemChars))
 		}
 		params := openai.EmbeddingNewParams{
 			Input: openai.EmbeddingNewParamsInputUnion{OfArrayOfStrings: batch},
@@ -68,7 +81,7 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, inputs []string) ([][]float3
 		}
 		resp, err := e.client.Embeddings.New(ctx, params)
 		if err != nil {
-			return nil, tokens, fmt.Errorf("model: embed batch %d..%d: %w", start, end, err)
+			return nil, tokens, fmt.Errorf("model: embed batch %d..%d: %w", start, end, openAIError(err))
 		}
 		if len(resp.Data) != len(batch) {
 			return nil, tokens, fmt.Errorf("model: embed returned %d vectors for %d inputs", len(resp.Data), len(batch))

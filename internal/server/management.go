@@ -66,22 +66,30 @@ func (m *Management) Handler() http.Handler {
 
 // Run serves until ctx is cancelled, then drains within shutdownTimeout.
 func (m *Management) Run(ctx context.Context) error {
-	return Serve(ctx, m.addr, m.Handler(), m.logger.With("listener", "management"))
+	return Serve(ctx, m.addr, m.Handler(), shutdownTimeout, m.logger.With("listener", "management"))
 }
 
-// Serve runs h on addr until ctx is cancelled, then drains within
-// shutdownTimeout.
-func Serve(ctx context.Context, addr string, h http.Handler, logger *slog.Logger) error {
-	return ServeDrain(ctx, addr, h, shutdownTimeout, logger)
-}
+// readTimeout bounds reading one request, body included, so a client that
+// trickles a body does not hold its connection open. It does not bound the
+// handler: an event stream or a model step runs on past it. idleTimeout is
+// how long a keep-alive connection may wait for its next request. There is
+// no write timeout, which would cut the event streams. Variables for the
+// tests.
+var (
+	readTimeout = time.Minute
+	idleTimeout = 2 * time.Minute
+)
 
-// ServeDrain is Serve with its own drain. Requests still in flight when it
-// runs out are cut: a stopping process is not failing.
-func ServeDrain(ctx context.Context, addr string, h http.Handler, drain time.Duration, logger *slog.Logger) error {
+// Serve runs h on addr until ctx is cancelled, then drains within drain.
+// Requests still in flight when it runs out are cut: a stopping process is
+// not failing.
+func Serve(ctx context.Context, addr string, h http.Handler, drain time.Duration, logger *slog.Logger) error {
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 	errc := make(chan error, 1)
 	go func() {
@@ -96,7 +104,7 @@ func ServeDrain(ctx context.Context, addr string, h http.Handler, drain time.Dur
 		return fmt.Errorf("server: %w", err)
 	case <-ctx.Done():
 	}
-	dctx, cancel := context.WithTimeout(context.Background(), drain)
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drain)
 	defer cancel()
 	if err := srv.Shutdown(dctx); err != nil {
 		logger.Warn("requests cut at shutdown", "drain", drain, "error", err)

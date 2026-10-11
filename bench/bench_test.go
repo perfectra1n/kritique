@@ -3,21 +3,23 @@
 package bench
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/perfectra1n/kritique/internal/agent"
 	"github.com/perfectra1n/kritique/internal/contextpack"
 	"github.com/perfectra1n/kritique/internal/gitfetch"
 	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/runner"
 )
 
 // Modes are the ablations: what the prompt carries beyond the diff.
@@ -102,7 +104,7 @@ func envOr(key, def string) string {
 //	KRITIQUE_BENCH_DRY       1: fetch, build context and prompts, call no model
 //	KRITIQUE_BENCH_OUT       results directory (default bench/results)
 func TestBench(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	dry := os.Getenv("KRITIQUE_BENCH_DRY") == "1"
 	key := os.Getenv("OPENROUTER_API_KEY")
 	if key == "" && !dry {
@@ -134,13 +136,12 @@ func TestBench(t *testing.T) {
 		}
 	}
 	modelID := envOr("KRITIQUE_BENCH_MODEL", "openai/gpt-6-sol")
-	var completer model.Completer
+	var stepper model.Stepper
 	if !dry {
-		s, err := model.NewStepper(model.ProviderOpenRouter, "", key, nil, nil)
-		if err != nil {
+		var err error
+		if stepper, err = model.NewStepper(model.ProviderOpenRouter, "", key, nil, nil); err != nil {
 			t.Fatal(err)
 		}
-		completer = model.Structured{Stepper: s}
 	}
 
 	rep := report{Model: modelID, When: time.Now().UTC(), Dry: dry, Cases: len(cases), Modes: map[string]modeTotals{}}
@@ -167,11 +168,16 @@ func TestBench(t *testing.T) {
 			for _, ch := range selected {
 				cr.Context[ch.Stage]++
 			}
+			// The prompt a review sends when agent.steps is 1: the agentic
+			// system prompt, the user message within its budget, the read-only
+			// tools over the head and the submit_review its one step is told to make. Stage 4 needs
+			// an index, which the bench has none of.
+			system := review.SystemPrompt(nil, nil, nil, nil, false, false, false)
 			msg, _, _ := review.Build(review.Input{
 				Repository: c.Repository, Number: c.PR, Title: c.Title, Author: "author", BaseRef: "main",
-				Changed: res.Changed, Diff: res.Diff, Context: selected,
+				Changed: res.Changed, Diff: res.Diff, Context: selected, BudgetTokens: review.UserBudget(system, 0),
 			})
-			cr.PromptChars = len(msg)
+			cr.PromptChars = len(system) + len(msg)
 			for _, e := range c.Expected {
 				if e.Must {
 					cr.MustTotal++
@@ -180,17 +186,28 @@ func TestBench(t *testing.T) {
 				}
 			}
 			if !dry {
+				tree := agent.NewTree(headTree, nil)
+				limits := agent.Limits{MaxSteps: 1}.WithDefaults()
 				started := time.Now()
-				resp, err := completer.Complete(ctx, model.CompletionRequest{
-					System: review.System, User: msg, Model: modelID, Schema: review.Schema(), SchemaName: "findings", MaxTokens: 4096,
-				})
+				out := agent.Run{
+					Stepper: stepper, Model: modelID, System: system, User: msg,
+					Tools: []agent.Tool{
+						agent.ReadFileTool(tree, limits.MaxToolOutputBytes),
+						agent.GrepTool(tree, limits.MaxToolOutputBytes),
+						agent.ListFilesTool(tree, limits.MaxToolOutputBytes),
+					},
+					Submit: runner.SubmitTool(false, false), Limits: limits,
+				}.Do(ctx)
 				cr.Latency = time.Since(started)
-				if err != nil {
-					cr.Error = err.Error()
-					t.Logf("%s [%s]: model error: %v", c.ID, m, err)
-				} else {
-					cr.Input, cr.Cached, cr.Output, cr.CostUSD = resp.InputTokens, resp.CachedTokens, resp.OutputTokens, resp.CostUSD
-					parsed, dropped, err := review.Parse(resp.Raw, anchors, review.ParseOptions{})
+				cr.Input, cr.Cached, cr.Output, cr.CostUSD = out.Usage.Prompt(), out.Usage.CacheRead, out.Usage.Output, out.CostUSD
+				switch {
+				case out.Stop == agent.StopError:
+					cr.Error = out.Err
+					t.Logf("%s [%s]: model error: %s", c.ID, m, out.Err)
+				case out.Stop != agent.StopSubmitted:
+					cr.Error = "agent stopped: " + string(out.Stop)
+				default:
+					parsed, dropped, err := review.Parse(string(out.Submitted), anchors, review.ParseOptions{})
 					if err != nil {
 						cr.Error = err.Error()
 					} else {
@@ -278,11 +295,7 @@ func totals(results []caseResult, mode string) modeTotals {
 
 func printSummary(t *testing.T, rep report) {
 	t.Helper()
-	names := make([]string, 0, len(rep.Modes))
-	for m := range rep.Modes {
-		names = append(names, m)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(rep.Modes))
 	var b strings.Builder
 	fmt.Fprintf(&b, "\nmodel %s, %d cases%s\n", rep.Model, rep.Cases, map[bool]string{true: " (dry: no model calls)", false: ""}[rep.Dry])
 	fmt.Fprintf(&b, "%-8s %6s %6s %11s %11s %9s %9s %9s %8s\n", "mode", "cases", "errors", "must recall", "nice recall", "findings", "matched", "cost usd", "mean s")

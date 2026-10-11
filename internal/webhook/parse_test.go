@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
 )
@@ -14,7 +15,7 @@ const ghPullRequest = `{
   "number": 42,
   "pull_request": {
     "number": 42, "title": "feat: thing", "body": "a body", "state": "open", "draft": false, "merged": false,
-    "html_url": "https://github.com/onedr0p/home-ops/pull/42", "created_at": "2026-09-24T10:00:00Z",
+    "html_url": "https://github.com/onedr0p/home-ops/pull/42", "created_at": "2026-09-24T10:00:00Z", "updated_at": "2026-09-24T11:30:00Z",
     "user": {"login": "renovate[bot]", "type": "Bot"},
     "head": {"ref": "renovate/x", "sha": "aaa111", "repo": {"full_name": "onedr0p/home-ops"}},
     "base": {"ref": "main", "sha": "bbb222", "repo": {"full_name": "onedr0p/home-ops"}},
@@ -32,14 +33,6 @@ func gh(event string) http.Header {
 	return h
 }
 
-func hdr(kv ...string) http.Header {
-	h := http.Header{}
-	for i := 0; i+1 < len(kv); i += 2 {
-		h.Set(kv[i], kv[i+1])
-	}
-	return h
-}
-
 func TestParseGitHubPullRequest(t *testing.T) {
 	ev, err := Parse(configfile.ForgeGitHub, gh("pull_request"), []byte(ghPullRequest))
 	if err != nil {
@@ -49,7 +42,8 @@ func TestParseGitHubPullRequest(t *testing.T) {
 		t.Fatalf("event = %+v", ev)
 	}
 	pr := ev.PullRequest
-	if pr.Number != 42 || pr.HeadSHA != "aaa111" || pr.BaseRef != "main" || !pr.AuthorIsBot || pr.Fork {
+	if pr.Number != 42 || pr.HeadSHA != "aaa111" || pr.BaseRef != "main" || !pr.AuthorIsBot || pr.Fork ||
+		!pr.UpdatedAt.Equal(time.Date(2026, 9, 24, 11, 30, 0, 0, time.UTC)) {
 		t.Fatalf("pr = %+v", pr)
 	}
 	if ev.Repository.FullName != "onedr0p/home-ops" || ev.Repository.DefaultBranch != "main" {
@@ -62,6 +56,16 @@ func TestParseGitHubPullRequest(t *testing.T) {
 	labels := vars["labels"].([]any)
 	if len(labels) != 1 || labels[0].(map[string]any)["name"] != "area/storage" {
 		t.Fatalf("labels = %v", labels)
+	}
+	if pr.ClosedAt != nil {
+		t.Fatalf("an open pull request's ClosedAt = %v", pr.ClosedAt)
+	}
+	closed := []byte(`{"action":"closed","pull_request":{"number":1,"state":"closed","merged":true,
+	  "closed_at":"2026-09-24T20:00:00Z","user":{"login":"x"}},
+	  "repository":{"full_name":"onedr0p/home-ops","owner":{"login":"onedr0p"}}}`)
+	ev, err = Parse(configfile.ForgeGitHub, gh("pull_request"), closed)
+	if err != nil || ev.PullRequest.ClosedAt == nil || !ev.PullRequest.ClosedAt.Equal(time.Date(2026, 9, 24, 20, 0, 0, 0, time.UTC)) {
+		t.Fatalf("closed PR = %+v, %v; want its closed_at", ev.PullRequest, err)
 	}
 }
 
@@ -86,21 +90,21 @@ func TestParseGitHubForkAndDeletedFork(t *testing.T) {
 
 func TestParseGitHubComments(t *testing.T) {
 	tests := []struct {
-		name    string
-		event   string
-		body    string
-		subject string
-		inline  bool
-		number  int
+		name   string
+		event  string
+		body   string
+		kind   Kind
+		inline bool
+		number int
 	}{
 		{"issue comment on a PR", "issue_comment", `{"action":"created","issue":{"number":7,"pull_request":{"url":"x"}},
 		  "comment":{"id":99,"body":"@bot look","user":{"login":"devin","type":"User"}},
-		  "repository":{"full_name":"a/b","owner":{"login":"a"}}}`, SubjectPull, false, 7},
+		  "repository":{"full_name":"a/b","owner":{"login":"a"}}}`, KindComment, false, 7},
 		{"issue comment on a plain issue", "issue_comment", `{"action":"created","issue":{"number":7},
-		  "comment":{"id":99,"body":"hi","user":{"login":"devin"}},"repository":{"full_name":"a/b","owner":{"login":"a"}}}`, SubjectIssue, false, 7},
+		  "comment":{"id":99,"body":"hi","user":{"login":"devin"}},"repository":{"full_name":"a/b","owner":{"login":"a"}}}`, KindComment, false, 7},
 		{"review comment", "pull_request_review_comment", `{"action":"created","pull_request":{"number":8},
 		  "comment":{"id":100,"body":"@bot why","path":"main.go","line":12,"user":{"login":"devin"}},
-		  "repository":{"full_name":"a/b","owner":{"login":"a"}}}`, SubjectPull, true, 8},
+		  "repository":{"full_name":"a/b","owner":{"login":"a"}}}`, KindComment, true, 8},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -108,17 +112,11 @@ func TestParseGitHubComments(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if ev.Kind != KindComment {
-				t.Fatalf("kind = %s, want %s", ev.Kind, KindComment)
+			if ev.Kind != tt.kind {
+				t.Fatalf("kind = %s, want %s", ev.Kind, tt.kind)
 			}
-			if *ev.Subject != (Subject{Kind: tt.subject, Number: tt.number}) {
-				t.Fatalf("subject = %+v", ev.Subject)
-			}
-			if ev.Comment.Inline != tt.inline || ev.Comment.Number != tt.number {
+			if tt.kind == KindComment && (ev.Comment.Inline != tt.inline || ev.Comment.Number != tt.number) {
 				t.Fatalf("comment = %+v", ev.Comment)
-			}
-			if tt.inline && (ev.Comment.Path != "main.go" || ev.Comment.Line != 12) {
-				t.Fatalf("inline position = %+v", ev.Comment)
 			}
 		})
 	}
@@ -133,7 +131,7 @@ func TestParseGitHubPushInstallationPingAndUnknown(t *testing.T) {
 	inst := `{"action":"added","installation":{"id":42,"account":{"login":"onedr0p","type":"User"}},
 	  "repositories_added":[{"full_name":"onedr0p/home-ops"}],"repositories_removed":[]}`
 	ev, err = Parse(configfile.ForgeGitHub, gh("installation_repositories"), []byte(inst))
-	if err != nil || ev.Kind != KindInstallation || ev.Account != "onedr0p" || ev.Installation.ID != 42 || len(ev.Installation.Repositories) != 1 {
+	if err != nil || ev.Kind != KindInstallation || ev.Account != "onedr0p" || len(ev.Installation.Repositories) != 1 {
 		t.Fatalf("installation = %+v %v", ev, err)
 	}
 	ev, _ = Parse(configfile.ForgeGitHub, gh("ping"), []byte(`{"zen":"x"}`))
@@ -141,8 +139,107 @@ func TestParseGitHubPushInstallationPingAndUnknown(t *testing.T) {
 		t.Fatalf("ping kind = %s", ev.Kind)
 	}
 	ev, _ = Parse(configfile.ForgeGitHub, gh("workflow_run"), []byte(`{}`))
-	if ev.Kind != KindIgnored || ev.RawEvent != "workflow_run" || ev.Action != "" {
+	if ev.Kind != KindIgnored || ev.RawEvent != "workflow_run" {
 		t.Fatalf("unknown event = %+v", ev)
+	}
+}
+
+func TestParseGitHubRepositoryTraits(t *testing.T) {
+	tests := []struct {
+		name, event, body string
+		kind              Kind
+		traits            configfile.RepoTraits
+	}{
+		{"pull request in an archived fork", "pull_request", `{"action":"opened","pull_request":{"number":1,"user":{"login":"x"}},
+		  "repository":{"full_name":"a/b","archived":true,"fork":true,"owner":{"login":"a"}}}`,
+			KindPullRequest, configfile.RepoTraits{Archived: true, Fork: true}},
+		{"push to a fork", "push", `{"ref":"refs/heads/main","after":"2","repository":{"full_name":"a/b","fork":true,"owner":{"login":"a"}}}`,
+			KindPush, configfile.RepoTraits{Fork: true}},
+		{"repository archived", "repository", `{"action":"archived","repository":{"full_name":"a/b","archived":true,"owner":{"login":"a"}}}`,
+			KindRepository, configfile.RepoTraits{Archived: true}},
+		{"repository unarchived", "repository", `{"action":"unarchived","repository":{"full_name":"a/b","owner":{"login":"a"}}}`,
+			KindRepository, configfile.RepoTraits{}},
+		{"fork created", "repository", `{"action":"created","repository":{"full_name":"a/b","fork":true,"owner":{"login":"a"}}}`,
+			KindRepository, configfile.RepoTraits{Fork: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev, err := Parse(configfile.ForgeGitHub, gh(tt.event), []byte(tt.body))
+			if err != nil || ev.Kind != tt.kind || ev.Account != "a" || ev.Repository == nil || ev.Repository.RepoTraits != tt.traits {
+				t.Fatalf("event = %+v, repository %+v, %v", ev, ev.Repository, err)
+			}
+		})
+	}
+	ev, err := Parse(configfile.ForgeGitHub, gh("repository"), []byte(`{"action":"edited","repository":{"full_name":"a/b"}}`))
+	if err != nil || ev.Kind != KindIgnored || ev.RawEvent != "repository" || ev.Action != "edited" {
+		t.Fatalf("an edit changes nothing kritique keeps: %+v %v", ev, err)
+	}
+}
+
+func TestParseGitHubRepositoryPrevious(t *testing.T) {
+	tests := []struct {
+		name, body, previous string
+	}{
+		{"renamed", `{"action":"renamed","changes":{"repository":{"name":{"from":"old"}}},
+		  "repository":{"full_name":"a/new","owner":{"login":"a"}}}`, "a/old"},
+		{"transferred from a user", `{"action":"transferred","changes":{"owner":{"from":{"user":{"login":"me"}}}},
+		  "repository":{"full_name":"a/b","owner":{"login":"a"}}}`, "me/b"},
+		{"transferred from an organization", `{"action":"transferred","changes":{"owner":{"from":{"organization":{"login":"old-org"}}}},
+		  "repository":{"full_name":"a/b","owner":{"login":"a"}}}`, "old-org/b"},
+		{"deleted", `{"action":"deleted","repository":{"full_name":"a/b","owner":{"login":"a"}}}`, ""},
+		{"archived", `{"action":"archived","repository":{"full_name":"a/b","archived":true,"owner":{"login":"a"}}}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev, err := Parse(configfile.ForgeGitHub, gh("repository"), []byte(tt.body))
+			if err != nil || ev.Kind != KindRepository || ev.Account != "a" || ev.Repository == nil || ev.Previous != tt.previous {
+				t.Fatalf("event = %+v, %v; want previous %q", ev, err, tt.previous)
+			}
+		})
+	}
+}
+
+func TestParseGitHubReviewThread(t *testing.T) {
+	const repo = `"repository":{"full_name":"a/b","owner":{"login":"a"}}`
+	tests := []struct {
+		name string
+		body string
+		kind Kind
+		want Thread
+	}{
+		{"resolved by a person", `{"action":"resolved","pull_request":{"number":8},"sender":{"login":"devin","type":"User"},
+		  "thread":{"comments":[{"id":100,"in_reply_to_id":null,"line":4,"original_line":4},{"id":101,"in_reply_to_id":100}]},` + repo + `}`,
+			KindThread, Thread{Number: 8, CommentID: 100, Resolved: true, Sender: "devin"}},
+		{"resolved after a push changed its lines", `{"action":"resolved","pull_request":{"number":8},"sender":{"login":"devin","type":"User"},
+		  "thread":{"comments":[{"id":100,"in_reply_to_id":null,"line":null,"original_line":9}]},` + repo + `}`,
+			KindThread, Thread{Number: 8, CommentID: 100, Resolved: true, Outdated: true, Sender: "devin"}},
+		{"a file-level comment is not outdated", `{"action":"resolved","pull_request":{"number":8},"sender":{"login":"devin","type":"User"},
+		  "thread":{"comments":[{"id":100,"in_reply_to_id":null,"line":null,"original_line":null}]},` + repo + `}`,
+			KindThread, Thread{Number: 8, CommentID: 100, Resolved: true, Sender: "devin"}},
+		{"unresolved by the bot", `{"action":"unresolved","pull_request":{"number":8},"sender":{"login":"kritique[bot]","type":"Bot"},
+		  "thread":{"comments":[{"id":101,"in_reply_to_id":100},{"id":100}]},` + repo + `}`,
+			KindThread, Thread{Number: 8, CommentID: 100, Sender: "kritique[bot]", SenderIsBot: true}},
+		{"no comments", `{"action":"resolved","pull_request":{"number":8},"sender":{"login":"devin"},"thread":{"comments":[]},` + repo + `}`,
+			KindThread, Thread{Number: 8, Resolved: true, Sender: "devin"}},
+		{"other action", `{"action":"edited","pull_request":{"number":8},"sender":{"login":"devin"},"thread":{},` + repo + `}`,
+			KindIgnored, Thread{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev, err := Parse(configfile.ForgeGitHub, gh("pull_request_review_thread"), []byte(tt.body))
+			if err != nil || ev.Kind != tt.kind {
+				t.Fatalf("event = %+v, %v; want kind %s", ev, err, tt.kind)
+			}
+			if tt.kind == KindIgnored {
+				if ev.RawEvent != "pull_request_review_thread" || ev.Action != "edited" || ev.Thread != nil {
+					t.Fatalf("ignored event = %+v", ev)
+				}
+				return
+			}
+			if *ev.Thread != tt.want || ev.Account != "a" || ev.Repository.FullName != "a/b" {
+				t.Fatalf("thread = %+v (account %q), want %+v", *ev.Thread, ev.Account, tt.want)
+			}
+		})
 	}
 }
 
@@ -165,88 +262,6 @@ func TestParseRejectsMalformedAndOversized(t *testing.T) {
 	}
 }
 
-func TestParseGitLab(t *testing.T) {
-	mr := `{"object_kind":"merge_request","user":{"username":"devin","bot":false},
-	  "project":{"path_with_namespace":"group/repo","default_branch":"main","git_http_url":"https://gl/group/repo.git"},
-	  "object_attributes":{"iid":5,"title":"t","description":"mr body","state":"opened","action":"update","draft":false,"url":"u",
-	    "created_at":"2026-09-24 10:00:00 UTC","source_branch":"f","target_branch":"main",
-	    "source_project_id":1,"target_project_id":1,"last_commit":{"id":"abc"}},
-	  "labels":[{"title":"x","color":"#fff"}]}`
-	ev, err := Parse(configfile.ForgeGitLab, hdr("X-Gitlab-Event-UUID", "u-1"), []byte(mr))
-	if err != nil || ev.Kind != KindPullRequest || ev.Account != "group" || ev.PullRequest.Number != 5 ||
-		ev.PullRequest.State != "open" || ev.PullRequest.HeadSHA != "abc" || ev.PullRequest.Fork || len(ev.PullRequest.Labels) != 1 ||
-		ev.PullRequest.Body != "mr body" {
-		t.Fatalf("gitlab mr = %+v %+v %v", ev, ev.PullRequest, err)
-	}
-	//nolint:misspell // GitLab's field is spelled noteable
-	note := `{"object_kind":"note","user":{"username":"devin"},"project":{"path_with_namespace":"group/repo"},
-	  "merge_request":{"iid":5},"object_attributes":{"id":77,"note":"@bot","noteable_type":"MergeRequest",
-	  "position":{"new_path":"a.go","new_line":3}}}`
-	ev, err = Parse(configfile.ForgeGitLab, http.Header{}, []byte(note))
-	if err != nil || ev.Kind != KindComment || !ev.Comment.Inline || ev.Comment.Number != 5 || ev.Comment.Path != "a.go" {
-		t.Fatalf("gitlab note = %+v %+v %v", ev, ev.Comment, err)
-	}
-	push := `{"object_kind":"push","ref":"refs/heads/main","after":"9","project":{"path_with_namespace":"group/repo","default_branch":"main"}}`
-	ev, err = Parse(configfile.ForgeGitLab, http.Header{}, []byte(push))
-	if err != nil || ev.Kind != KindPush || ev.Push.After != "9" {
-		t.Fatalf("gitlab push = %+v %v", ev, err)
-	}
-}
-
-func TestParseForgejo(t *testing.T) {
-	h := hdr("X-Gitea-Event", "pull_request", "X-Gitea-Delivery", "f-1")
-	ev, err := Parse(configfile.ForgeForgejo, h, []byte(ghPullRequest))
-	if err != nil || ev.Kind != KindPullRequest || ev.Delivery != "f-1" || ev.PullRequest.Number != 42 || ev.PullRequest.Body != "a body" || ev.Action != "synchronize" {
-		t.Fatalf("forgejo pr = %+v %v", ev, err)
-	}
-	h.Set("X-Gitea-Event", "issue_comment")
-	ev, err = Parse(configfile.ForgeForgejo, h, []byte(`{"action":"created","is_pull":true,"issue":{"number":3},
-	  "comment":{"id":5,"body":"@bot","user":{"login":"x"}},"repository":{"full_name":"a/b","owner":{"login":"a"}}}`))
-	if err != nil || ev.Kind != KindComment || ev.Comment.Number != 3 {
-		t.Fatalf("forgejo comment = %+v %v", ev, err)
-	}
-}
-
-// TestParseGitea confirms Gitea installations route through the same
-// X-Gitea-* headers and payload parsing as Forgejo.
-func TestParseGitea(t *testing.T) {
-	h := hdr("X-Gitea-Event", "pull_request", "X-Gitea-Delivery", "g-1")
-	ev, err := Parse(configfile.ForgeGitea, h, []byte(ghPullRequest))
-	if err != nil || ev.Kind != KindPullRequest || ev.Delivery != "g-1" || ev.PullRequest.Number != 42 {
-		t.Fatalf("gitea pr = %+v %v", ev, err)
-	}
-}
-
-// TestParseForgejoSynchronizedAction covers the past-tense "synchronized"
-// spelling Forgejo sends for this action, which must normalize to GitHub's
-// "synchronize" so callers can match on one action string regardless of
-// forge.
-func TestParseForgejoSynchronizedAction(t *testing.T) {
-	h := hdr("X-Gitea-Event", "pull_request", "X-Gitea-Delivery", "f-2")
-	body := `{
-	  "action": "synchronized",
-	  "number": 7,
-	  "pull_request": {
-	    "number": 7, "title": "feat: thing", "state": "open",
-	    "user": {"login": "alice"},
-	    "head": {"ref": "topic", "sha": "aaa111", "repo": {"full_name": "acme/widgets"}},
-	    "base": {"ref": "main", "sha": "bbb222", "repo": {"full_name": "acme/widgets"}}
-	  },
-	  "repository": {"full_name": "acme/widgets", "owner": {"login": "acme"}}
-	}`
-	ev, err := Parse(configfile.ForgeForgejo, h, []byte(body))
-	if err != nil || ev.Kind != KindPullRequest || ev.Action != "synchronize" {
-		t.Fatalf("forgejo synchronized pr = %+v %v", ev, err)
-	}
-	// The same raw action, parsed as a GitHub payload, must be left alone:
-	// only the Forgejo path normalizes it.
-	gh := hdr("X-GitHub-Event", "pull_request", "X-GitHub-Delivery", "f-3")
-	ev, err = Parse(configfile.ForgeGitHub, gh, []byte(body))
-	if err != nil || ev.Action != "synchronized" {
-		t.Fatalf("github synchronized pr = %+v %v", ev, err)
-	}
-}
-
 func TestParseIssues(t *testing.T) {
 	const repo = `"repository":{"full_name":"acme/widgets","owner":{"login":"acme"}},"sender":{"login":"devin"}`
 	issue := func(pull string) string {
@@ -260,34 +275,22 @@ func TestParseIssues(t *testing.T) {
 	}
 	tests := []struct {
 		name   string
-		forge  configfile.Forge
-		header http.Header
 		body   string
 		kind   Kind
 		action string
 	}{
-		{"github opened", configfile.ForgeGitHub, gh("issues"),
-			`{"action":"opened",` + issue("") + `,` + repo + `}`, KindIssue, "opened"},
-		{"github labeled", configfile.ForgeGitHub, gh("issues"),
-			`{"action":"labeled","label":{"name":"bug"},` + issue("") + `,` + repo + `}`, KindIssue, "labeled"},
-		{"forgejo opened", configfile.ForgeForgejo, hdr("X-Gitea-Event", "issues"),
-			`{"action":"opened","number":12,` + issue(`,"pull_request":null`) + `,` + repo + `}`, KindIssue, "opened"},
-		{"forgejo label change", configfile.ForgeForgejo, hdr("X-Gitea-Event", "issues", "X-Gitea-Event-Type", "issue_label"),
-			`{"action":"label_updated","number":12,` + issue(`,"pull_request":null`) + `,` + repo + `}`, KindIssue, "labeled"},
-		{"forgejo labels cleared", configfile.ForgeForgejo, hdr("X-Gitea-Event", "issues", "X-Gitea-Event-Type", "issue_label"),
-			`{"action":"label_cleared","number":12,` + issue(`,"pull_request":null`) + `,` + repo + `}`, KindIssue, "unlabeled"},
-		{"forgejo assigned", configfile.ForgeForgejo, hdr("X-Gitea-Event", "issues", "X-Gitea-Event-Type", "issue_assign"),
-			`{"action":"assigned","number":12,` + issue(`,"pull_request":null`) + `,` + repo + `}`, KindIssue, "assigned"},
-		{"forgejo issue that is a pull request", configfile.ForgeForgejo, hdr("X-Gitea-Event", "issues"),
-			`{"action":"label_updated","number":12,` + issue(`,"pull_request":{"merged":false}`) + `,` + repo + `}`, KindIgnored, "label_updated"},
+		{"opened", `{"action":"opened",` + issue("") + `,` + repo + `}`, KindIssue, "opened"},
+		{"labeled", `{"action":"labeled","label":{"name":"bug"},` + issue("") + `,` + repo + `}`, KindIssue, "labeled"},
+		{"an issue that is a pull request", `{"action":"labeled",` + issue(`,"pull_request":{"url":"x"}`) + `,` + repo + `}`,
+			KindIgnored, "labeled"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ev, err := Parse(tt.forge, tt.header, []byte(tt.body))
+			ev, err := Parse(configfile.ForgeGitHub, gh("issues"), []byte(tt.body))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if ev.Kind != tt.kind || ev.Action != tt.action || ev.RawEvent != "issues" || ev.Forge != tt.forge ||
+			if ev.Kind != tt.kind || ev.Action != tt.action || ev.RawEvent != "issues" || ev.Forge != configfile.ForgeGitHub ||
 				ev.Sender != "devin" || ev.Account != "acme" || ev.Repository.FullName != "acme/widgets" || len(ev.Raw) == 0 {
 				t.Fatalf("event = %+v", ev)
 			}
@@ -307,50 +310,30 @@ func TestParseIssues(t *testing.T) {
 	}
 }
 
-func TestParseForgejoComments(t *testing.T) {
+func TestParseCommentSubjects(t *testing.T) {
 	tests := []struct {
-		name    string
-		body    string
-		subject string
+		name, event, body string
+		subject           Subject
 	}{
-		{"on a plain issue", `{"action":"created","is_pull":false,"issue":{"number":3,"pull_request":null},
+		{"on a plain issue", "issue_comment", `{"action":"created","issue":{"number":3},
 		  "comment":{"id":5,"body":"@bot triage","user":{"login":"x"}},"repository":{"full_name":"a/b","owner":{"login":"a"}},
-		  "sender":{"login":"x"}}`, SubjectIssue},
-		{"on a pull request", `{"action":"created","is_pull":true,"issue":{"number":3,"pull_request":{"merged":false}},
+		  "sender":{"login":"x"}}`, Subject{Kind: SubjectIssue, Number: 3}},
+		{"on a pull request", "issue_comment", `{"action":"created","issue":{"number":3,"pull_request":{"url":"x"}},
 		  "comment":{"id":5,"body":"@bot look","user":{"login":"x"}},"repository":{"full_name":"a/b","owner":{"login":"a"}},
-		  "sender":{"login":"x"}}`, SubjectPull},
+		  "sender":{"login":"x"}}`, Subject{Kind: SubjectPull, Number: 3}},
+		{"inline", "pull_request_review_comment", `{"action":"created","pull_request":{"number":3},
+		  "comment":{"id":5,"body":"@bot why","user":{"login":"x"}},"repository":{"full_name":"a/b","owner":{"login":"a"}},
+		  "sender":{"login":"x"}}`, Subject{Kind: SubjectPull, Number: 3}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ev, err := Parse(configfile.ForgeForgejo, hdr("X-Gitea-Event", "issue_comment"), []byte(tt.body))
+			ev, err := Parse(configfile.ForgeGitHub, gh(tt.event), []byte(tt.body))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if ev.Kind != KindComment || *ev.Subject != (Subject{Kind: tt.subject, Number: 3}) ||
-				ev.Comment.Number != 3 || ev.Comment.ID != 5 || ev.Sender != "x" || ev.RawEvent != "issue_comment" {
+			if ev.Kind != KindComment || *ev.Subject != tt.subject || ev.Comment.Number != 3 || ev.Comment.ID != 5 ||
+				ev.Sender != "x" || ev.RawEvent != tt.event {
 				t.Fatalf("event = %+v %+v %+v", ev, ev.Subject, ev.Comment)
-			}
-		})
-	}
-}
-
-func TestParseForgejoPullRequestLabels(t *testing.T) {
-	tests := []struct {
-		action string
-		want   string
-	}{
-		{"label_updated", "labeled"},
-		{"label_cleared", "unlabeled"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.action, func(t *testing.T) {
-			body := `{"action":"` + tt.action + `","number":7,"pull_request":{"number":7,"state":"open","user":{"login":"alice"},
-			  "head":{"ref":"t","sha":"1","repo":{"full_name":"acme/widgets"}},"base":{"ref":"main","sha":"2","repo":{"full_name":"acme/widgets"}}},
-			  "repository":{"full_name":"acme/widgets","owner":{"login":"acme"}},"sender":{"login":"alice"}}`
-			h := hdr("X-Gitea-Event", "pull_request", "X-Gitea-Event-Type", "pull_request_label")
-			ev, err := Parse(configfile.ForgeForgejo, h, []byte(body))
-			if err != nil || ev.Kind != KindPullRequest || ev.Action != tt.want || *ev.Subject != (Subject{Kind: SubjectPull, Number: 7}) {
-				t.Fatalf("forgejo pr label = %+v %v", ev, err)
 			}
 		})
 	}
@@ -359,26 +342,14 @@ func TestParseForgejoPullRequestLabels(t *testing.T) {
 func TestParseKeepsRawDelivery(t *testing.T) {
 	release := `{"action":"published","release":{"tag_name":"v1.2.3"},
 	  "repository":{"full_name":"acme/widgets","owner":{"login":"acme"}},"sender":{"login":"releaser"}}`
-	tests := []struct {
-		name   string
-		forge  configfile.Forge
-		header http.Header
-	}{
-		{"github", configfile.ForgeGitHub, gh("release")},
-		{"forgejo", configfile.ForgeForgejo, hdr("X-Gitea-Event", "release", "X-Gitea-Delivery", "d-1")},
+	ev, err := Parse(configfile.ForgeGitHub, gh("release"), []byte(release))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ev, err := Parse(tt.forge, tt.header, []byte(release))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if ev.Kind != KindIgnored || ev.RawEvent != "release" || ev.Action != "published" || ev.Sender != "releaser" ||
-				ev.Forge != tt.forge || ev.Account != "acme" || ev.Repository == nil || ev.Repository.FullName != "acme/widgets" ||
-				string(ev.Raw) != release {
-				t.Fatalf("event = %+v", ev)
-			}
-		})
+	if ev.Kind != KindIgnored || ev.RawEvent != "release" || ev.Action != "published" || ev.Sender != "releaser" ||
+		ev.Forge != configfile.ForgeGitHub || ev.Account != "acme" || ev.Repository == nil ||
+		ev.Repository.FullName != "acme/widgets" || string(ev.Raw) != release {
+		t.Fatalf("event = %+v", ev)
 	}
 
 	t.Run("form payload keeps the unwrapped JSON", func(t *testing.T) {
@@ -391,9 +362,11 @@ func TestParseKeepsRawDelivery(t *testing.T) {
 	})
 
 	t.Run("modeled events carry the envelope", func(t *testing.T) {
-		ev, err := Parse(configfile.ForgeGitHub, gh("pull_request"), []byte(ghPullRequest))
+		body := `{"action":"opened","pull_request":{"number":42,"user":{"login":"x"}},
+		  "repository":{"full_name":"a/b","owner":{"login":"a"}},"sender":{"login":"x"}}`
+		ev, err := Parse(configfile.ForgeGitHub, gh("pull_request"), []byte(body))
 		if err != nil || ev.RawEvent != "pull_request" || ev.Forge != configfile.ForgeGitHub || len(ev.Raw) == 0 ||
-			*ev.Subject != (Subject{Kind: SubjectPull, Number: 42}) {
+			ev.Sender != "x" || *ev.Subject != (Subject{Kind: SubjectPull, Number: 42}) {
 			t.Fatalf("event = %+v %v", ev, err)
 		}
 	})
@@ -401,15 +374,6 @@ func TestParseKeepsRawDelivery(t *testing.T) {
 	t.Run("an ignored non-JSON body is not an error", func(t *testing.T) {
 		ev, err := Parse(configfile.ForgeGitHub, gh("release"), []byte("not json"))
 		if err != nil || ev.Kind != KindIgnored || ev.RawEvent != "release" || ev.Raw != nil {
-			t.Fatalf("event = %+v %v", ev, err)
-		}
-	})
-
-	t.Run("gitlab", func(t *testing.T) {
-		body := `{"object_kind":"issue","user":{"username":"devin"},"project":{"path_with_namespace":"group/repo"}}`
-		ev, err := Parse(configfile.ForgeGitLab, http.Header{}, []byte(body))
-		if err != nil || ev.Kind != KindIgnored || ev.RawEvent != "issue" || ev.Sender != "devin" ||
-			ev.Forge != configfile.ForgeGitLab || string(ev.Raw) != body {
 			t.Fatalf("event = %+v %v", ev, err)
 		}
 	})

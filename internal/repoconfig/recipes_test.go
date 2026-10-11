@@ -1,6 +1,7 @@
 package repoconfig
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,13 +12,36 @@ import (
 	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
-// TestRecipes checks the task recipes docs/repository-config.md shows:
-// each file is quoted in the reference as it is, parses, prepares against
-// its templates, survives bounds that allow what it uses, and fires on
-// the event it is written for.
+// recipeFiles parses the recipe in docs/recipes/dir and reads the files
+// its tasks name.
+func recipeFiles(t *testing.T, dir string) (doc []byte, f File, files map[string][]byte) {
+	t.Helper()
+	root := filepath.Join("../../docs/recipes", dir)
+	doc, err := os.ReadFile(filepath.Join(root, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, err = Parse(doc); err != nil {
+		t.Fatal(err)
+	}
+	files = map[string][]byte{}
+	for i := range f.Tasks {
+		for _, p := range f.Tasks[i].Files() {
+			if files[p], err = os.ReadFile(filepath.Join(root, p)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return doc, f, files
+}
+
+// TestRecipes checks the task recipes docs/tasks.md shows: each file is
+// included in the reference, parses, prepares against its templates,
+// survives bounds that allow what it uses, and fires on the event it is
+// written for.
 func TestRecipes(t *testing.T) {
 	t.Parallel()
-	ref, err := os.ReadFile("../../docs/repository-config.md")
+	ref, err := os.ReadFile("../../docs/tasks.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,25 +65,11 @@ func TestRecipes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.dir, func(t *testing.T) {
 			t.Parallel()
-			dir := filepath.Join("../../docs/recipes", tt.dir)
-			read := func(p string) []byte {
-				b, err := os.ReadFile(filepath.Join(dir, p))
-				if err != nil {
-					t.Fatal(err)
+			doc, f, files := recipeFiles(t, tt.dir)
+			for _, p := range append([]string{FileName}, slices.Sorted(maps.Keys(files))...) {
+				if link := "](recipes/" + tt.dir + "/" + p + ")"; !strings.Contains(string(ref), link) {
+					t.Errorf("docs/tasks.md does not link docs/recipes/%s/%s", tt.dir, p)
 				}
-				if !strings.Contains(string(ref), string(b)) {
-					t.Errorf("docs/repository-config.md does not quote docs/recipes/%s/%s as it is", tt.dir, p)
-				}
-				return b
-			}
-			doc := read(FileName)
-			f, _, err := Parse(doc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			files := map[string][]byte{}
-			for _, p := range f.Referenced() {
-				files[p] = read(p)
 			}
 			for i := range f.Tasks {
 				if _, err := tasks.Prepare(&f.Tasks[i], files); err != nil {
@@ -67,8 +77,7 @@ func TestRecipes(t *testing.T) {
 				}
 			}
 
-			op := operator()
-			op.Allow.Modes = []configfile.ReviewMode{configfile.ReviewSingle, configfile.ReviewAgentic}
+			op := adminSettings()
 			op.TaskBounds = (&configfile.TaskBounds{Enabled: new(true), Events: tt.events}).Resolve()
 			m, err := Merge(doc, op)
 			if err != nil {
@@ -90,21 +99,7 @@ func TestRecipes(t *testing.T) {
 // labels and comment the reference says it does.
 func TestRecipeTriagePlan(t *testing.T) {
 	t.Parallel()
-	dir := "../../docs/recipes/issue-triage"
-	doc, err := os.ReadFile(filepath.Join(dir, FileName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	f, _, err := Parse(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	files := map[string][]byte{}
-	for _, p := range f.Referenced() {
-		if files[p], err = os.ReadFile(filepath.Join(dir, p)); err != nil {
-			t.Fatal(err)
-		}
-	}
+	_, f, files := recipeFiles(t, "issue-triage")
 	p, err := tasks.Prepare(&f.Tasks[0], files)
 	if err != nil {
 		t.Fatal(err)
@@ -130,5 +125,16 @@ func TestRecipeTriagePlan(t *testing.T) {
 	}
 	if plan.Comment == nil || plan.Comment.Mode != tasks.CommentSticky || !strings.Contains(plan.Comment.Body, "- the version") {
 		t.Errorf("comment = %+v", plan.Comment)
+	}
+
+	// Without needsInfo or a comment, no when condition of the comment
+	// holds.
+	a.Fields["needsInfo"] = false
+	plan, err = p.Plan(in, a, tasks.Facts{RepoLabels: labels, Subject: in.Subject})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Comment != nil {
+		t.Errorf("comment = %+v, want none", plan.Comment)
 	}
 }

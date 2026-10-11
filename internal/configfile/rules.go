@@ -1,0 +1,133 @@
+package configfile
+
+import (
+	"fmt"
+	"regexp"
+	"slices"
+	"strings"
+	"unicode/utf8"
+)
+
+// Rule is a check a review makes, written in the configuration, by an id
+// findings cite it by and narrower scopes replace it by. The check is
+// Rule's text or the content of File, a repository file read from the merge
+// base, exactly one of them. With Paths it applies only when a changed path
+// matches one of them, and with When only to a pull request one of those
+// conditions holds for.
+type Rule struct {
+	ID    string   `yaml:"id" json:"id"`
+	Rule  string   `yaml:"rule,omitempty" json:"rule,omitempty"`
+	File  string   `yaml:"file,omitempty" json:"file,omitempty"`
+	Paths []string `yaml:"paths,omitempty" json:"paths,omitempty"`
+	When  []When   `yaml:"when,omitempty" json:"when,omitempty"`
+}
+
+// When is one condition on the pull requests a rule applies to: Expr, CEL
+// over pr as a trigger condition sees it before the diff is fetched. Name,
+// when set, says what the condition is for.
+type When struct {
+	Name string `yaml:"name,omitempty" json:"name"`
+	Expr string `yaml:"expr" json:"expr"`
+}
+
+// MaxRuleChars bounds one rule's text.
+const MaxRuleChars = 2000
+
+// ruleIDRe is what a rule's id may be.
+var ruleIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+
+// CheckRules rejects a list of rules with an id that is not valid or is
+// listed twice, neither or both of a rule and a file, an overlong rule, a
+// file outside the repository, a glob that is not valid, or a when
+// condition that does not compile or fails against a sample pull request.
+// The error starts with the rule's place in the list, as rules[i].
+func CheckRules(rules []Rule) error {
+	for i, r := range rules {
+		if !ruleIDRe.MatchString(r.ID) {
+			return fmt.Errorf("rules[%d].id %q must be lowercase letters, digits and hyphens, "+
+				"starting with a letter or digit, at most 64 characters", i, r.ID)
+		}
+		if slices.ContainsFunc(rules[:i], func(o Rule) bool { return o.ID == r.ID }) {
+			return fmt.Errorf("rules[%d].id %q is listed twice", i, r.ID)
+		}
+		if (strings.TrimSpace(r.Rule) == "") == (r.File == "") {
+			return fmt.Errorf("rules[%d]: set one of rule or file", i)
+		}
+		if n := utf8.RuneCountInString(r.Rule); n > MaxRuleChars {
+			return fmt.Errorf("rules[%d].rule is %d characters, over the %d allowed", i, n, MaxRuleChars)
+		}
+		if r.File != "" {
+			if err := CheckRepoPath(r.File); err != nil {
+				return fmt.Errorf("rules[%d].file: %w", i, err)
+			}
+		}
+		for j, g := range r.Paths {
+			if !ValidGlob(g) {
+				return fmt.Errorf("rules[%d].paths[%d] %q is not a valid glob", i, j, g)
+			}
+		}
+		if err := checkWhen(r.When); err != nil {
+			return fmt.Errorf("rules[%d].%w", i, err)
+		}
+	}
+	return nil
+}
+
+// checkWhen rejects a rule's conditions with no expression, a name given
+// twice, or an expression that does not compile, fails against a sample
+// pull request or reads pr.lines: a rule is judged before the diff is
+// fetched. The error starts with the condition's place, as when[i].
+func checkWhen(when []When) error {
+	for i, w := range when {
+		if w.Name != "" && slices.ContainsFunc(when[:i], func(o When) bool { return o.Name == w.Name }) {
+			return fmt.Errorf("when[%d]: name %q is given twice", i, w.Name)
+		}
+		prg, err := compileFilter(w.Expr)
+		switch {
+		case err != nil:
+			return fmt.Errorf("when[%d]: %w", i, err)
+		case prg == nil:
+			return fmt.Errorf("when[%d]: expr is required", i)
+		case prg.Uses(linesVar):
+			return fmt.Errorf("when[%d]: pr.%s is known to a trigger condition alone", i, linesVar)
+		}
+	}
+	return nil
+}
+
+// RuleScopes says, by id, which scope writes each rule Settings(a,
+// fullName) runs: the file's own, the account, or its entry for the
+// repository.
+func (f *File) RuleScopes(a *Account, fullName string) map[string]Scope {
+	out := map[string]Scope{}
+	for _, r := range f.Defaults.Rules {
+		out[r.ID] = ScopeDefaults
+	}
+	for _, r := range a.Rules {
+		out[r.ID] = ScopeAccount
+	}
+	if e := a.Repository(fullName); e != nil {
+		for _, r := range e.Rules {
+			out[r.ID] = ScopeRepository
+		}
+	}
+	return out
+}
+
+// WithRules is rules with more laid over them: one of more with an id
+// rules already has replaces that rule where it stands, and the rest
+// follow in order.
+func WithRules(rules, more []Rule) []Rule {
+	if len(more) == 0 {
+		return rules
+	}
+	out := slices.Clone(rules)
+	for _, r := range more {
+		if i := slices.IndexFunc(out, func(o Rule) bool { return o.ID == r.ID }); i >= 0 {
+			out[i] = r
+		} else {
+			out = append(out, r)
+		}
+	}
+	return out
+}

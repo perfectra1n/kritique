@@ -17,16 +17,15 @@ import (
 // closed, merged or not.
 const stateOpen = "open"
 
-// Event names as GitHub and Forgejo put them in the event header. Forgejo's
-// X-Gitea-Event folds its finer event types into these: issue label,
-// assignee and milestone changes arrive as "issues", the pull request ones
-// as "pull_request", told apart by the action (see forgejoActions).
+// Event names as GitHub puts them in the X-GitHub-Event header.
 const (
 	evPullRequest   = "pull_request"
 	evIssues        = "issues"
 	evIssueComment  = "issue_comment"
 	evReviewComment = "pull_request_review_comment"
+	evReviewThread  = "pull_request_review_thread"
 	evPush          = "push"
+	evRepository    = "repository"
 )
 
 // Subject kinds: what an issue, pull request or comment event is about.
@@ -40,13 +39,20 @@ type Kind string
 
 // Event kinds kritique acts on. Anything else parses to KindIgnored.
 const (
-	KindPing         Kind = "ping"
-	KindPullRequest  Kind = "pull_request"
+	KindPing        Kind = "ping"
+	KindPullRequest Kind = "pull_request"
+	// KindIssue is a plain issue opened, edited, labeled, closed and so on;
+	// a pull request's changes arrive as KindPullRequest.
 	KindIssue        Kind = "issue"
 	KindComment      Kind = "comment"
+	KindThread       Kind = "thread"
 	KindPush         Kind = "push"
 	KindInstallation Kind = "installation"
-	KindIgnored      Kind = "ignored"
+	// KindRepository is a repository created, archived, unarchived,
+	// renamed, transferred or deleted; its Repository says what the forge
+	// now says of it.
+	KindRepository Kind = "repository"
+	KindIgnored    Kind = "ignored"
 )
 
 // Event is the forge-neutral view of a verified webhook.
@@ -59,14 +65,16 @@ type Event struct {
 	Delivery string
 	// Repository is the repository the event concerns, when it has one.
 	Repository *Repository
+	// Previous is the full name a repository renamed or transferred had
+	// before.
+	Previous string
 	// Account is the forge account the event concerns: the repository owner,
 	// or the installation account for installation events.
 	Account string
 
 	// Forge is the forge the delivery came from.
 	Forge configfile.Forge
-	// RawEvent is the event header verbatim (X-GitHub-Event, X-Gitea-Event),
-	// or GitLab's object_kind.
+	// RawEvent is the forge's event header verbatim, such as X-GitHub-Event.
 	RawEvent string
 	// Raw is the verified JSON body, unwrapped from a form payload; nil when
 	// the body is not JSON.
@@ -75,12 +83,13 @@ type Event struct {
 	// payload names one.
 	Sender string
 	// Subject is the issue or pull request the event concerns, for
-	// KindIssue, KindPullRequest and KindComment.
+	// KindIssue, KindPullRequest, KindComment and KindThread.
 	Subject *Subject
 
 	PullRequest  *PullRequest
 	Issue        *Issue
 	Comment      *Comment
+	Thread       *Thread
 	Push         *Push
 	Installation *Installation
 }
@@ -108,8 +117,7 @@ type Repository struct {
 	// FullName is "owner/repo".
 	FullName      string
 	DefaultBranch string
-	Private       bool
-	CloneURL      string
+	configfile.RepoTraits
 }
 
 // PullRequest carries the fields the filter and the review pipeline need.
@@ -126,11 +134,16 @@ type PullRequest struct {
 	HeadRef     string
 	HeadSHA     string
 	BaseRef     string
-	BaseSHA     string
 	URL         string
 	Body        string
 	CreatedAt   time.Time
-	Labels      []Label
+	// UpdatedAt is when the forge last changed the pull request, zero when
+	// the payload does not say. The store keeps the newest it has seen, so
+	// an event delivered late or again cannot rewind the pull request.
+	UpdatedAt time.Time
+	// ClosedAt is when a closed pull request was closed, nil while open.
+	ClosedAt *time.Time
+	Labels   []Label
 }
 
 // Label is a PR label.
@@ -180,24 +193,34 @@ type Comment struct {
 	Author      string
 	AuthorIsBot bool
 	Body        string
-	// Inline is set for review comments on a diff line; Path and Line then
-	// identify the finding the reply belongs to.
+	// Inline is set for review comments on a diff line.
 	Inline bool
-	Path   string
-	Line   int
+}
+
+// Thread is an inline review thread someone resolved or unresolved.
+type Thread struct {
+	Number int // the pull request
+	// CommentID is the inline comment that opened the thread, 0 when the
+	// payload lists none.
+	CommentID int64
+	// Resolved is the thread's state now.
+	Resolved bool
+	// Outdated is whether a push had changed the lines that comment was
+	// made on by the time the thread changed state.
+	Outdated    bool
+	Sender      string
+	SenderIsBot bool
 }
 
 // Push is a branch update.
 type Push struct {
-	Ref    string // refs/heads/<branch>
-	Before string
-	After  string
+	Ref   string // refs/heads/<branch>
+	After string
 }
 
 // Installation is a GitHub App installation change: which repositories the
 // App may now see.
 type Installation struct {
-	ID int64
 	// Repositories is the full list on "created", the delta on
 	// "added"/"removed"; the action says which.
 	Repositories []string
@@ -221,12 +244,15 @@ func Parse(forge configfile.Forge, header http.Header, body []byte) (Event, erro
 	)
 	switch forge {
 	case configfile.ForgeGitHub:
-		ev, err = parseGitHub(header.Get("X-GitHub-Event"), header.Get("X-GitHub-Delivery"), body)
+		event := header.Get("X-GitHub-Event")
+		ev, err = parseGitHub(event, header.Get("X-GitHub-Delivery"), body)
+		ev, err = withEnvelope(ev, err, event, body)
 	case configfile.ForgeForgejo, configfile.ForgeGitea:
-		// Gitea uses the same X-Gitea-* headers and payload shapes as Forgejo.
-		ev, err = parseForgejo(header.Get("X-Gitea-Event"), header.Get("X-Gitea-Delivery"), body)
-	case configfile.ForgeGitLab:
-		ev, err = parseGitLab(header.Get("X-Gitlab-Event-UUID"), body)
+		// Gitea sends the X-Gitea-* headers, and Forgejo sends them beside
+		// its own X-Forgejo-* ones, with the same payloads.
+		event := header.Get("X-Gitea-Event")
+		ev, err = parseForgejo(event, header.Get("X-Gitea-Delivery"), body)
+		ev, err = withEnvelope(ev, err, event, body)
 	default:
 		return Event{}, fmt.Errorf("webhook: unsupported forge %q", forge)
 	}
@@ -240,8 +266,8 @@ func Parse(forge configfile.Forge, header http.Header, body []byte) (Event, erro
 	return ev, nil
 }
 
-// envelope is what every GitHub and Forgejo payload shares: enough to say
-// who did what where, whatever the event.
+// envelope is what every GitHub-shaped payload shares: enough to say who
+// did what where, whatever the event.
 type envelope struct {
 	Action     string `json:"action"`
 	Sender     ghUser `json:"sender"`
@@ -249,8 +275,8 @@ type envelope struct {
 }
 
 // withEnvelope stamps the raw event name and the payload's sender on a
-// parsed event. Events kritique does not model also get the payload's action
-// and repository, so a consumer of the raw delivery can still route them.
+// parsed event. An event kritique does not model also gets the payload's
+// action and repository, so a task on the raw delivery can still route it.
 // A body that is not JSON leaves an ignored event bare rather than failing
 // the delivery.
 func withEnvelope(ev Event, err error, event string, body []byte) (Event, error) {
@@ -275,9 +301,9 @@ func withEnvelope(ev Event, err error, event string, body []byte) (Event, error)
 	return ev, nil
 }
 
-// unwrapFormPayload returns the JSON document from a webhook body. GitHub and
-// Forgejo can deliver application/x-www-form-urlencoded, which wraps the JSON
-// in a `payload=` form field. Signature verification runs over the original
+// unwrapFormPayload returns the JSON document from a webhook body. GitHub,
+// Forgejo and Gitea can deliver application/x-www-form-urlencoded, which wraps the JSON in a
+// `payload=` form field. Signature verification runs over the original
 // body upstream, so unwrapping here never affects authentication.
 func unwrapFormPayload(header http.Header, body []byte) []byte {
 	if !strings.HasPrefix(header.Get("Content-Type"), "application/x-www-form-urlencoded") &&
@@ -292,22 +318,32 @@ func unwrapFormPayload(header http.Header, body []byte) []byte {
 	return body
 }
 
-// ghUser is the user shape shared by GitHub and Forgejo payloads.
+// ghUser is a user as GitHub payloads carry one.
 type ghUser struct {
 	Login string `json:"login"`
 	Type  string `json:"type"`
 }
 
-func (u ghUser) isBot() bool {
-	return strings.EqualFold(u.Type, "Bot") || strings.HasSuffix(u.Login, "[bot]")
+func (u ghUser) isBot() bool { return IsBot(u.Type, u.Login) }
+
+// Outdated reports whether a push has changed the lines an inline comment
+// was made on, from GitHub's line and original_line of it: it nulls the
+// line of such a comment and keeps original_line; a file-level comment has
+// neither.
+func Outdated(line, originalLine *int) bool { return line == nil && originalLine != nil }
+
+// IsBot reports whether a GitHub user of userType and login is an App or
+// bot account, as the type says or the "[bot]" suffix of its login does.
+func IsBot(userType, login string) bool {
+	return strings.EqualFold(userType, "Bot") || strings.HasSuffix(login, "[bot]")
 }
 
-// ghRepo is the repository shape shared by GitHub and Forgejo payloads.
+// ghRepo is a repository as GitHub payloads carry one.
 type ghRepo struct {
 	FullName      string `json:"full_name"`
 	DefaultBranch string `json:"default_branch"`
-	Private       bool   `json:"private"`
-	CloneURL      string `json:"clone_url"`
+	Archived      bool   `json:"archived"`
+	Fork          bool   `json:"fork"`
 	Owner         ghUser `json:"owner"`
 }
 
@@ -315,20 +351,22 @@ func (r ghRepo) event() *Repository {
 	if r.FullName == "" {
 		return nil
 	}
-	return &Repository{FullName: r.FullName, DefaultBranch: r.DefaultBranch, Private: r.Private, CloneURL: r.CloneURL}
+	return &Repository{FullName: r.FullName, DefaultBranch: r.DefaultBranch, Archived: r.Archived, Fork: r.Fork}
 }
 
-// ghPR is the pull request shape shared by GitHub and Forgejo payloads.
+// ghPR is a pull request as GitHub payloads carry one.
 type ghPR struct {
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	State     string    `json:"state"`
-	Merged    bool      `json:"merged"`
-	Draft     bool      `json:"draft"`
-	HTMLURL   string    `json:"html_url"`
-	CreatedAt time.Time `json:"created_at"`
-	User      ghUser    `json:"user"`
+	Number    int        `json:"number"`
+	Title     string     `json:"title"`
+	Body      string     `json:"body"`
+	State     string     `json:"state"`
+	Merged    bool       `json:"merged"`
+	Draft     bool       `json:"draft"`
+	HTMLURL   string     `json:"html_url"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	ClosedAt  *time.Time `json:"closed_at"`
+	User      ghUser     `json:"user"`
 	Head      struct {
 		Ref  string `json:"ref"`
 		SHA  string `json:"sha"`
@@ -338,7 +376,6 @@ type ghPR struct {
 	} `json:"head"`
 	Base struct {
 		Ref  string `json:"ref"`
-		SHA  string `json:"sha"`
 		Repo struct {
 			FullName string `json:"full_name"`
 		} `json:"repo"`
@@ -353,8 +390,8 @@ func (p ghPR) event() *PullRequest {
 	pr := &PullRequest{
 		Number: p.Number, Title: p.Title, Author: p.User.Login, AuthorIsBot: p.User.isBot(),
 		State: cmp.Or(p.State, stateOpen), Merged: p.Merged, Draft: p.Draft,
-		HeadRef: p.Head.Ref, HeadSHA: p.Head.SHA, BaseRef: p.Base.Ref, BaseSHA: p.Base.SHA,
-		URL: p.HTMLURL, Body: p.Body, CreatedAt: p.CreatedAt,
+		HeadRef: p.Head.Ref, HeadSHA: p.Head.SHA, BaseRef: p.Base.Ref,
+		URL: p.HTMLURL, Body: p.Body, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt, ClosedAt: p.ClosedAt,
 	}
 	// A fork PR's head lives in a different repository than its base. A
 	// deleted fork leaves head.repo null, which is also not the base repo.
@@ -366,65 +403,28 @@ func (p ghPR) event() *PullRequest {
 }
 
 func parseGitHub(event, delivery string, body []byte) (Event, error) {
-	var (
-		ev  Event
-		err error
-	)
 	switch event {
 	case "ping":
-		ev = Event{Kind: KindPing, Delivery: delivery}
+		return Event{Kind: KindPing, Delivery: delivery}, nil
 	case evPullRequest:
-		ev, err = parsePullRequestEvent(delivery, body)
+		return parsePullRequestEvent(delivery, body)
 	case evIssues:
-		ev, err = parseIssueEvent(delivery, body)
+		return parseIssueEvent(delivery, body)
 	case evIssueComment:
-		ev, err = parseIssueComment(delivery, body)
+		return parseIssueComment(delivery, body)
 	case evReviewComment:
-		ev, err = parseReviewComment(delivery, body)
+		return parseReviewComment(delivery, body)
+	case evReviewThread:
+		return parseReviewThread(delivery, body)
 	case evPush:
-		ev, err = parsePush(delivery, body)
+		return parsePush(delivery, body)
 	case "installation", "installation_repositories":
-		ev, err = parseInstallation(delivery, body)
+		return parseInstallation(delivery, body)
+	case evRepository:
+		return parseRepository(delivery, body)
 	default:
-		ev = Event{Kind: KindIgnored, Delivery: delivery}
+		return Event{Kind: KindIgnored, Delivery: delivery}, nil
 	}
-	return withEnvelope(ev, err, event, body)
-}
-
-// forgejoActions maps Forgejo's action spellings to GitHub's, so downstream
-// action matching does not need to know which forge sent the event.
-// Forgejo sends "label_updated" for a label added or removed alike, with no
-// delta in the payload, so "labeled" here means "labels changed"; only
-// "label_cleared" is known to be a removal.
-var forgejoActions = map[string]string{
-	"synchronized":  "synchronize",
-	"label_updated": "labeled",
-	"label_cleared": "unlabeled",
-}
-
-func parseForgejo(event, delivery string, body []byte) (Event, error) {
-	var (
-		ev  Event
-		err error
-	)
-	switch event {
-	case evPullRequest:
-		ev, err = parsePullRequestEvent(delivery, body)
-	case evIssues:
-		ev, err = parseIssueEvent(delivery, body)
-	case evIssueComment, "pull_request_comment":
-		ev, err = parseIssueComment(delivery, body)
-	case evReviewComment:
-		ev, err = parseReviewComment(delivery, body)
-	case evPush:
-		ev, err = parsePush(delivery, body)
-	default:
-		ev = Event{Kind: KindIgnored, Delivery: delivery}
-	}
-	if a, ok := forgejoActions[ev.Action]; ok && (ev.Kind == KindPullRequest || ev.Kind == KindIssue) {
-		ev.Action = a
-	}
-	return withEnvelope(ev, err, event, body)
 }
 
 func parsePullRequestEvent(delivery string, body []byte) (Event, error) {
@@ -444,10 +444,9 @@ func parsePullRequestEvent(delivery string, body []byte) (Event, error) {
 	}, nil
 }
 
-// parseIssueEvent decodes an "issues" event. Forgejo's issue payload also
-// fits here, with its label and assignee changes as actions. An issue that
-// is really a pull request is ignored: its changes also arrive as
-// pull_request events, which are what kritique models.
+// parseIssueEvent decodes an "issues" event. An issue that is really a
+// pull request is ignored: its changes also arrive as pull_request events,
+// which are what kritique models.
 func parseIssueEvent(delivery string, body []byte) (Event, error) {
 	var p struct {
 		Action     string `json:"action"`
@@ -491,7 +490,8 @@ func parseIssueEvent(delivery string, body []byte) (Event, error) {
 }
 
 // isPull reports whether an issue's pull_request field marks it as a pull
-// request: GitHub omits the field on plain issues, Forgejo sends null.
+// request: GitHub omits the field on plain issues; another forge may send
+// null.
 func isPull(field json.RawMessage) bool {
 	return len(field) > 0 && string(field) != "null"
 }
@@ -509,14 +509,12 @@ func parseIssueComment(delivery string, body []byte) (Event, error) {
 			Body string `json:"body"`
 			User ghUser `json:"user"`
 		} `json:"comment"`
-		// Forgejo puts the pull request under is_pull on the issue instead.
-		IsPull bool `json:"is_pull"`
 	}
 	if err := json.Unmarshal(body, &p); err != nil {
 		return Event{}, fmt.Errorf("webhook: issue_comment payload: %w", err)
 	}
 	subject := &Subject{Kind: SubjectIssue, Number: p.Issue.Number}
-	if isPull(p.Issue.PullRequest) || p.IsPull {
+	if isPull(p.Issue.PullRequest) {
 		subject.Kind = SubjectPull
 	}
 	return Event{
@@ -540,8 +538,6 @@ func parseReviewComment(delivery string, body []byte) (Event, error) {
 		Comment struct {
 			ID   int64  `json:"id"`
 			Body string `json:"body"`
-			Path string `json:"path"`
-			Line int    `json:"line"`
 			User ghUser `json:"user"`
 		} `json:"comment"`
 	}
@@ -555,15 +551,60 @@ func parseReviewComment(delivery string, body []byte) (Event, error) {
 		Comment: &Comment{
 			ID: p.Comment.ID, Number: p.PullRequest.Number, Author: p.Comment.User.Login,
 			AuthorIsBot: p.Comment.User.isBot(), Body: p.Comment.Body,
-			Inline: true, Path: p.Comment.Path, Line: p.Comment.Line,
+			Inline: true,
 		},
+	}, nil
+}
+
+// threadActions are the review thread actions, each with the resolved
+// state it leaves the thread in.
+var threadActions = map[string]bool{"resolved": true, "unresolved": false}
+
+func parseReviewThread(delivery string, body []byte) (Event, error) {
+	var p struct {
+		Action      string `json:"action"`
+		Repository  ghRepo `json:"repository"`
+		PullRequest struct {
+			Number int `json:"number"`
+		} `json:"pull_request"`
+		Sender ghUser `json:"sender"`
+		Thread struct {
+			Comments []struct {
+				ID           int64 `json:"id"`
+				InReplyTo    int64 `json:"in_reply_to_id"`
+				Line         *int  `json:"line"`
+				OriginalLine *int  `json:"original_line"`
+			} `json:"comments"`
+		} `json:"thread"`
+	}
+	if err := json.Unmarshal(body, &p); err != nil {
+		return Event{}, fmt.Errorf("webhook: pull_request_review_thread payload: %w", err)
+	}
+	resolved, ok := threadActions[p.Action]
+	if !ok {
+		return Event{Kind: KindIgnored, Delivery: delivery}, nil
+	}
+	thread := &Thread{Number: p.PullRequest.Number, Resolved: resolved, Sender: p.Sender.Login, SenderIsBot: p.Sender.isBot()}
+	for _, c := range p.Thread.Comments {
+		if c.InReplyTo == 0 {
+			// The payload carries the comment as it is at the state change, so
+			// a push landing before the job runs cannot change the outcome.
+			thread.CommentID = c.ID
+			thread.Outdated = Outdated(c.Line, c.OriginalLine)
+			break
+		}
+	}
+	return Event{
+		Kind: KindThread, Action: p.Action, Delivery: delivery,
+		Repository: p.Repository.event(), Account: p.Repository.Owner.Login,
+		Subject: &Subject{Kind: SubjectPull, Number: p.PullRequest.Number},
+		Thread:  thread,
 	}, nil
 }
 
 func parsePush(delivery string, body []byte) (Event, error) {
 	var p struct {
 		Ref        string `json:"ref"`
-		Before     string `json:"before"`
 		After      string `json:"after"`
 		Repository ghRepo `json:"repository"`
 	}
@@ -573,15 +614,59 @@ func parsePush(delivery string, body []byte) (Event, error) {
 	return Event{
 		Kind: KindPush, Delivery: delivery,
 		Repository: p.Repository.event(), Account: p.Repository.Owner.Login,
-		Push: &Push{Ref: p.Ref, Before: p.Before, After: p.After},
+		Push: &Push{Ref: p.Ref, After: p.After},
 	}, nil
+}
+
+// repositoryActions are the repository event actions that change what
+// kritique records of one; the rest, such as edited, change nothing it keeps.
+var repositoryActions = map[string]bool{
+	"created": true, "archived": true, "unarchived": true, "renamed": true, "transferred": true, "deleted": true,
+}
+
+func parseRepository(delivery string, body []byte) (Event, error) {
+	var p struct {
+		Action     string `json:"action"`
+		Repository ghRepo `json:"repository"`
+		// A rename's changes name the old name, a transfer's the old owner.
+		Changes struct {
+			Repository struct {
+				Name struct {
+					From string `json:"from"`
+				} `json:"name"`
+			} `json:"repository"`
+			Owner struct {
+				From struct {
+					User         ghUser `json:"user"`
+					Organization ghUser `json:"organization"`
+				} `json:"from"`
+			} `json:"owner"`
+		} `json:"changes"`
+	}
+	if err := json.Unmarshal(body, &p); err != nil {
+		return Event{}, fmt.Errorf("webhook: repository payload: %w", err)
+	}
+	if !repositoryActions[p.Action] {
+		return Event{Kind: KindIgnored, Delivery: delivery}, nil
+	}
+	ev := Event{
+		Kind: KindRepository, Action: p.Action, Delivery: delivery,
+		Repository: p.Repository.event(), Account: p.Repository.Owner.Login,
+	}
+	if owner, name, ok := strings.Cut(p.Repository.FullName, "/"); ok {
+		from := p.Changes.Owner.From
+		previous := cmp.Or(from.Organization.Login, from.User.Login, owner) + "/" + cmp.Or(p.Changes.Repository.Name.From, name)
+		if previous != p.Repository.FullName {
+			ev.Previous = previous
+		}
+	}
+	return ev, nil
 }
 
 func parseInstallation(delivery string, body []byte) (Event, error) {
 	var p struct {
 		Action       string `json:"action"`
 		Installation struct {
-			ID      int64  `json:"id"`
 			Account ghUser `json:"account"`
 		} `json:"installation"`
 		Repositories []struct {
@@ -597,7 +682,7 @@ func parseInstallation(delivery string, body []byte) (Event, error) {
 	if err := json.Unmarshal(body, &p); err != nil {
 		return Event{}, fmt.Errorf("webhook: installation payload: %w", err)
 	}
-	inst := &Installation{ID: p.Installation.ID}
+	inst := &Installation{}
 	for _, r := range p.Repositories {
 		inst.Repositories = append(inst.Repositories, r.FullName)
 	}
@@ -611,117 +696,4 @@ func parseInstallation(delivery string, body []byte) (Event, error) {
 		Kind: KindInstallation, Action: p.Action, Delivery: delivery,
 		Account: p.Installation.Account.Login, Installation: inst,
 	}, nil
-}
-
-// parseGitLab routes by object_kind. GitLab's shapes differ from the other
-// two forges throughout, so it has its own decoders.
-func parseGitLab(delivery string, body []byte) (Event, error) {
-	var probe struct {
-		Kind    string `json:"object_kind"`
-		Project struct {
-			PathWithNamespace string `json:"path_with_namespace"`
-			DefaultBranch     string `json:"default_branch"`
-			HTTPURL           string `json:"git_http_url"`
-			Namespace         string `json:"namespace"`
-		} `json:"project"`
-		User struct {
-			Username string `json:"username"`
-			Bot      bool   `json:"bot"`
-		} `json:"user"`
-	}
-	if err := json.Unmarshal(body, &probe); err != nil {
-		return Event{}, fmt.Errorf("webhook: gitlab payload: %w", err)
-	}
-	repo := &Repository{FullName: probe.Project.PathWithNamespace, DefaultBranch: probe.Project.DefaultBranch, CloneURL: probe.Project.HTTPURL}
-	account, _, _ := strings.Cut(probe.Project.PathWithNamespace, "/")
-	base := Event{Delivery: delivery, Repository: repo, Account: account, RawEvent: probe.Kind, Sender: probe.User.Username}
-	switch probe.Kind {
-	case "merge_request":
-		var p struct {
-			ObjectAttributes struct {
-				IID          int    `json:"iid"`
-				Title        string `json:"title"`
-				Description  string `json:"description"`
-				State        string `json:"state"` // opened, closed, merged
-				Action       string `json:"action"`
-				Draft        bool   `json:"draft"`
-				URL          string `json:"url"`
-				CreatedAt    string `json:"created_at"`
-				SourceBranch string `json:"source_branch"`
-				TargetBranch string `json:"target_branch"`
-				SourceProjID int    `json:"source_project_id"`
-				TargetProjID int    `json:"target_project_id"`
-				LastCommit   struct {
-					ID string `json:"id"`
-				} `json:"last_commit"`
-			} `json:"object_attributes"`
-			Labels []struct {
-				Title string `json:"title"`
-				Color string `json:"color"`
-			} `json:"labels"`
-		}
-		if err := json.Unmarshal(body, &p); err != nil {
-			return Event{}, fmt.Errorf("webhook: merge_request payload: %w", err)
-		}
-		a := p.ObjectAttributes
-		created, _ := time.Parse("2006-01-02 15:04:05 MST", a.CreatedAt)
-		pr := &PullRequest{
-			Number: a.IID, Title: a.Title, Author: probe.User.Username, AuthorIsBot: probe.User.Bot,
-			State: map[bool]string{true: stateOpen, false: "closed"}[a.State == "opened"], Merged: a.State == "merged",
-			Draft: a.Draft, Fork: a.SourceProjID != a.TargetProjID,
-			HeadRef: a.SourceBranch, HeadSHA: a.LastCommit.ID, BaseRef: a.TargetBranch, URL: a.URL, Body: a.Description, CreatedAt: created,
-		}
-		for _, l := range p.Labels {
-			pr.Labels = append(pr.Labels, Label{Name: l.Title, Color: l.Color})
-		}
-		base.Kind, base.Action, base.PullRequest = KindPullRequest, a.Action, pr
-		base.Subject = &Subject{Kind: SubjectPull, Number: a.IID}
-		return base, nil
-	case "note":
-		var p struct {
-			ObjectAttributes struct {
-				ID           int64  `json:"id"`
-				Note         string `json:"note"`
-				NoteableType string `json:"noteable_type"` //nolint:misspell // GitLab's field is spelled noteable
-				Position     *struct {
-					NewPath string `json:"new_path"`
-					NewLine int    `json:"new_line"`
-				} `json:"position"`
-			} `json:"object_attributes"`
-			MergeRequest struct {
-				IID int `json:"iid"`
-			} `json:"merge_request"`
-		}
-		if err := json.Unmarshal(body, &p); err != nil {
-			return Event{}, fmt.Errorf("webhook: note payload: %w", err)
-		}
-		if p.ObjectAttributes.NoteableType != "MergeRequest" {
-			base.Kind, base.Action = KindIgnored, "note"
-			return base, nil
-		}
-		c := &Comment{
-			ID: p.ObjectAttributes.ID, Number: p.MergeRequest.IID, Author: probe.User.Username,
-			AuthorIsBot: probe.User.Bot, Body: p.ObjectAttributes.Note,
-		}
-		if pos := p.ObjectAttributes.Position; pos != nil {
-			c.Inline, c.Path, c.Line = true, pos.NewPath, pos.NewLine
-		}
-		base.Kind, base.Action, base.Comment = KindComment, "created", c
-		base.Subject = &Subject{Kind: SubjectPull, Number: p.MergeRequest.IID}
-		return base, nil
-	case "push":
-		var p struct {
-			Ref    string `json:"ref"`
-			Before string `json:"before"`
-			After  string `json:"after"`
-		}
-		if err := json.Unmarshal(body, &p); err != nil {
-			return Event{}, fmt.Errorf("webhook: push payload: %w", err)
-		}
-		base.Kind, base.Push = KindPush, &Push{Ref: p.Ref, Before: p.Before, After: p.After}
-		return base, nil
-	default:
-		base.Kind, base.Action = KindIgnored, probe.Kind
-		return base, nil
-	}
 }

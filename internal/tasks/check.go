@@ -64,9 +64,9 @@ func (t *Task) Check() error {
 			return fmt.Errorf("on[%d]: %w", i, err)
 		}
 	}
-	if _, err := compileGuard(t.If, false); err != nil {
-		if _, aerr := compileGuard(t.If, true); aerr == nil {
-			return errors.New("if cannot use answer; only an action's if sees the model's answer")
+	if _, err := compileGuard(t.When, false); err != nil {
+		if _, aerr := compileGuard(t.When, true); aerr == nil {
+			return errors.New("when cannot use answer; only an action's when sees the model's answer")
 		}
 		return err
 	}

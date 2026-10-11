@@ -4,16 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
 // The dashboard's read queries. Each takes a transaction opened by
-// WithTenant, so row-level security confines it to that tenant; none of
-// them filters by tenant_id itself.
+// WithAccount, so row-level security confines it to that account; none of
+// them filters by account_id itself.
 
 // ReviewStatus is a reviews.status value.
 type ReviewStatus string
@@ -50,11 +51,6 @@ const (
 	IndexSuperseded IndexRunStatus = "superseded"
 )
 
-// Valid reports whether s is an index run status.
-func (s IndexRunStatus) Valid() bool {
-	return s == IndexRunning || s == IndexCompleted || s == IndexFailed || s == IndexSuperseded
-}
-
 // FollowupStatus is a followups.status value.
 type FollowupStatus string
 
@@ -65,11 +61,6 @@ const (
 	FollowupIgnored  FollowupStatus = "ignored"
 	FollowupFailed   FollowupStatus = "failed"
 )
-
-// Valid reports whether s is a follow-up status.
-func (s FollowupStatus) Valid() bool {
-	return s == FollowupAnswered || s == FollowupLimited || s == FollowupIgnored || s == FollowupFailed
-}
 
 // PullState filters pull requests by pull_requests.state.
 type PullState string
@@ -83,6 +74,19 @@ const (
 
 // Valid reports whether s is a pull state filter.
 func (s PullState) Valid() bool { return s == PullOpen || s == PullClosed || s == PullAll }
+
+// PullIs narrows a pull request list to those that are something.
+type PullIs string
+
+// What a list may ask its pull requests to be: with automatic reviews
+// paused, or with a blocking finding in their newest review.
+const (
+	PullPaused   PullIs = "paused"
+	PullBlocking PullIs = "blocking"
+)
+
+// Valid reports whether i is something a list may ask for.
+func (i PullIs) Valid() bool { return i == PullPaused || i == PullBlocking }
 
 // Cursor is the position after the last row of a page: the sort key of that
 // row (T for a time-ordered list, S for a text-ordered one) and its id, the
@@ -102,8 +106,12 @@ type Page struct {
 	Limit int
 }
 
-// ErrPageLimit is a page whose limit is not positive.
-var ErrPageLimit = errors.New("store: page limit must be positive")
+// ErrPageLimit is a page whose limit is not positive, and ErrCursor a
+// cursor whose id is not a row id of the list it pages.
+var (
+	ErrPageLimit = errors.New("store: page limit must be positive")
+	ErrCursor    = errors.New("store: cursor id is not a row id")
+)
 
 // check rejects a page with no room or a cursor whose id is not a row id.
 func (p Page) check() error {
@@ -111,7 +119,7 @@ func (p Page) check() error {
 		return ErrPageLimit
 	}
 	if !p.After.First() && uuid.Validate(p.After.ID) != nil {
-		return ErrFilter
+		return ErrCursor
 	}
 	return nil
 }
@@ -139,33 +147,49 @@ func paged[T any](rows []T, limit int, key func(T) Cursor) ([]T, *Cursor) {
 	return rows, &next
 }
 
-// TenantStats is what the tenant list shows of one tenant.
-type TenantStats struct {
-	Installations int
-	Repositories  int
-	Reviews7d     int
-	Month         MonthUsage
+// AccountStats is what the account list shows of one account.
+type AccountStats struct {
+	Repositories int
+	Reviews7d    int
+	Month        MonthUsage
 }
 
-// MonthUsage is what a tenant's caps count: tokens and spend this calendar
-// month and completed reviews today.
+// MonthUsage is what an account's caps count: tokens and spend this calendar
+// month and completed reviews today; and what the month's spend bought:
+// the reviews that completed, what they cost together (a review's cost is
+// its own usage rows, which follow-ups and indexing have none of) and the
+// median cost of one, nil when none completed.
 type MonthUsage struct {
-	Tokens       int64
-	CostUSD      float64
-	ReviewsToday int64
+	Tokens              int64
+	CostUSD             float64
+	ReviewsToday        int64
+	Reviews             int64
+	ReviewCostUSD       float64
+	MedianReviewCostUSD *float64
 }
 
-// ReadTenantStats reads the tenant's counts. The month and day boundaries
-// are the database's, as the worker's cap checks use.
-func ReadTenantStats(ctx context.Context, tx pgx.Tx) (TenantStats, error) {
-	var s TenantStats
-	err := tx.QueryRow(ctx, `SELECT
-		(SELECT count(*) FROM installations WHERE enabled),
-		(SELECT count(*) FROM repositories WHERE enabled),
-		(SELECT count(*) FROM reviews WHERE created_at >= now() - interval '7 days')`).
-		Scan(&s.Installations, &s.Repositories, &s.Reviews7d)
+// ReadAccountStats reads the account's counts; a repository counts when
+// enabled also admits its full name and traits. The month and day
+// boundaries are the database's, as the worker's cap checks use.
+func ReadAccountStats(ctx context.Context, tx pgx.Tx, enabled func(fullName string, t configfile.RepoTraits) bool) (AccountStats, error) {
+	var s AccountStats
+	rows, err := tx.Query(ctx, `SELECT name, archived, fork, turned_on FROM repositories WHERE enabled`)
 	if err != nil {
-		return s, fmt.Errorf("store: tenant stats: %w", err)
+		return s, fmt.Errorf("store: account stats: %w", err)
+	}
+	var name string
+	var t configfile.RepoTraits
+	if _, err := pgx.ForEachRow(rows, []any{&name, &t.Archived, &t.Fork, &t.TurnedOn}, func() error {
+		if enabled(name, t) {
+			s.Repositories++
+		}
+		return nil
+	}); err != nil {
+		return s, fmt.Errorf("store: account stats: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM reviews WHERE status = 'completed' AND created_at >= now() - interval '7 days'`).
+		Scan(&s.Reviews7d); err != nil {
+		return s, fmt.Errorf("store: account stats: %w", err)
 	}
 	if s.Month, err = ReadMonthUsage(ctx, tx); err != nil {
 		return s, err
@@ -173,7 +197,7 @@ func ReadTenantStats(ctx context.Context, tx pgx.Tx) (TenantStats, error) {
 	return s, nil
 }
 
-// ReadMonthUsage reads the tenant's month-to-date usage.
+// ReadMonthUsage reads the account's month-to-date usage.
 func ReadMonthUsage(ctx context.Context, tx pgx.Tx) (MonthUsage, error) {
 	var m MonthUsage
 	err := tx.QueryRow(ctx, `SELECT coalesce(sum(input_tokens + output_tokens), 0), coalesce(sum(cost_usd), 0)::float8,
@@ -183,18 +207,74 @@ func ReadMonthUsage(ctx context.Context, tx pgx.Tx) (MonthUsage, error) {
 	if err != nil {
 		return m, fmt.Errorf("store: month usage: %w", err)
 	}
+	var median *float64
+	err = tx.QueryRow(ctx, `WITH costs AS (
+			SELECT (SELECT coalesce(sum(cost_usd), 0) FROM usage WHERE review_id = v.id) AS cost
+			FROM reviews v WHERE v.status = 'completed' AND v.created_at >= date_trunc('month', now()))
+		SELECT count(*), coalesce(sum(cost), 0)::float8, percentile_cont(0.5) WITHIN GROUP (ORDER BY cost)::float8 FROM costs`).
+		Scan(&m.Reviews, &m.ReviewCostUSD, &median)
+	if err != nil {
+		return m, fmt.Errorf("store: month review costs: %w", err)
+	}
+	m.MedianReviewCostUSD = median
 	return m, nil
+}
+
+// ReadLastPoll reads when the account was last polled for pull requests,
+// nil when it never was.
+func ReadLastPoll(ctx context.Context, tx pgx.Tx) (*time.Time, error) {
+	var at *time.Time
+	if err := tx.QueryRow(ctx, `SELECT max(last_polled_at) FROM poll_state`).Scan(&at); err != nil {
+		return nil, fmt.Errorf("store: read last poll: %w", err)
+	}
+	return at, nil
+}
+
+// WebhookDeliveries is when a connection's webhook last delivered a
+// verified request and one with no signature, each nil for never.
+type WebhookDeliveries struct {
+	Verified, Unsigned *time.Time
+}
+
+// ReadWebhookDeliveries reads when each connection last received a verified
+// webhook and an unsigned one, keyed by connection id; one that never
+// received either is absent.
+func ReadWebhookDeliveries(ctx context.Context, tx pgx.Tx) (map[string]WebhookDeliveries, error) {
+	rows, err := tx.Query(ctx, `SELECT id::text, last_webhook_at, last_unsigned_webhook_at FROM connections
+		WHERE last_webhook_at IS NOT NULL OR last_unsigned_webhook_at IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("store: webhook deliveries: %w", err)
+	}
+	out := map[string]WebhookDeliveries{}
+	var id string
+	var verified, unsigned *time.Time
+	if _, err := pgx.ForEachRow(rows, []any{&id, &verified, &unsigned}, func() error {
+		out[id] = WebhookDeliveries{Verified: timeCopy(verified), Unsigned: timeCopy(unsigned)}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("store: webhook deliveries: %w", err)
+	}
+	return out, nil
+}
+
+// timeCopy is a copy of *t, nil for nil, so a row's time does not share
+// the scan target the next row overwrites.
+func timeCopy(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	return &c
 }
 
 // RepoRow is one repository as the repository list shows it.
 type RepoRow struct {
-	ID             string
-	FullName       string
-	InstallationID string
-	Installation   string
-	Enabled        bool
-	ManagedBy      string
-	DefaultBranch  string
+	ID            string
+	FullName      string
+	Enabled       bool
+	ManagedBy     string
+	DefaultBranch string
+	configfile.RepoTraits
 	// ActiveCommit and ActiveAt describe the active index generation, empty
 	// when there is none.
 	ActiveCommit string
@@ -212,24 +292,25 @@ type ReviewRef struct {
 	CreatedAt time.Time
 }
 
-const repoColumns = `r.id, r.name, r.installation_id, i.name, r.enabled, r.managed_by, r.default_branch,
+// The last review, lr, is the repository's newest that was not skipped, as
+// a pull request's is.
+const repoColumns = `r.id, r.name, r.enabled, r.managed_by, r.default_branch, r.archived, r.fork, r.turned_on,
 	coalesce(a.commit_sha, ''), coalesce(a.finished_at, a.created_at),
 	coalesce(l.status, ''), l.created_at,
 	lr.id, lr.status, lr.created_at
 	FROM repositories r
-	JOIN installations i ON i.id = r.installation_id
 	LEFT JOIN index_runs a ON a.id = r.active_index_run_id
 	LEFT JOIN LATERAL (SELECT status, created_at FROM index_runs x WHERE x.repository_id = r.id
 		ORDER BY created_at DESC, id DESC LIMIT 1) l ON true
 	LEFT JOIN LATERAL (SELECT v.id, v.status, v.created_at FROM reviews v JOIN pull_requests p ON p.id = v.pull_request_id
-		WHERE p.repository_id = r.id ORDER BY v.created_at DESC, v.id DESC LIMIT 1) lr ON true`
+		WHERE p.repository_id = r.id AND v.status <> 'skipped' ORDER BY v.created_at DESC, v.id DESC LIMIT 1) lr ON true`
 
 func scanRepo(row pgx.CollectableRow) (RepoRow, error) {
 	var r RepoRow
 	var status string
 	var lrID, lrStatus *string
 	var lrAt *time.Time
-	err := row.Scan(&r.ID, &r.FullName, &r.InstallationID, &r.Installation, &r.Enabled, &r.ManagedBy, &r.DefaultBranch,
+	err := row.Scan(&r.ID, &r.FullName, &r.Enabled, &r.ManagedBy, &r.DefaultBranch, &r.Archived, &r.Fork, &r.TurnedOn,
 		&r.ActiveCommit, &r.ActiveAt, &status, &r.LastIndexAt, &lrID, &lrStatus, &lrAt)
 	r.LastIndexStatus = IndexRunStatus(status)
 	if r.ActiveCommit == "" {
@@ -241,15 +322,43 @@ func scanRepo(row pgx.CollectableRow) (RepoRow, error) {
 	return r, err
 }
 
-// ListRepos returns a page of the tenant's repositories ordered by full
-// name.
-func ListRepos(ctx context.Context, tx pgx.Tx, p Page) ([]RepoRow, *Cursor, error) {
+// RepoKind picks which of an account's repositories a list shows.
+type RepoKind string
+
+// Repository kinds. RepoInUse, the default, is the ones kritique can run:
+// neither archived nor a fork, but for the forks an admin turned on.
+// RepoForks is every fork not archived, and RepoArchived every archived
+// repository.
+const (
+	RepoInUse    RepoKind = ""
+	RepoForks    RepoKind = "forks"
+	RepoArchived RepoKind = "archived"
+)
+
+// Valid reports whether k is a kind a list takes.
+func (k RepoKind) Valid() bool {
+	return k == RepoInUse || k == RepoForks || k == RepoArchived
+}
+
+// RepoFilter picks the repositories a list shows: those of Kind.
+type RepoFilter struct {
+	Kind RepoKind
+}
+
+// ListRepos returns a page of the account's repositories f picks, ordered
+// by full name.
+func ListRepos(ctx context.Context, tx pgx.Tx, f RepoFilter, p Page) ([]RepoRow, *Cursor, error) {
 	if err := p.check(); err != nil {
 		return nil, nil, err
 	}
 	rows, err := tx.Query(ctx, `SELECT `+repoColumns+`
-		WHERE $1 OR (r.name, r.id) > ($2, $3::uuid)
-		ORDER BY r.name, r.id LIMIT $4`, p.After.First(), p.After.S, p.afterID(), p.Limit+1)
+		WHERE ($1 OR (r.name, r.id) > ($2, $3::uuid))
+		  AND CASE $5
+			WHEN 'forks' THEN r.fork AND NOT r.archived
+			WHEN 'archived' THEN r.archived
+			ELSE NOT r.archived AND (NOT r.fork OR coalesce(r.turned_on, false))
+		  END
+		ORDER BY r.name, r.id LIMIT $4`, p.After.First(), p.After.S, p.afterID(), p.Limit+1, string(f.Kind))
 	if err != nil {
 		return nil, nil, fmt.Errorf("store: list repositories: %w", err)
 	}
@@ -261,26 +370,10 @@ func ListRepos(ctx context.Context, tx pgx.Tx, p Page) ([]RepoRow, *Cursor, erro
 	return items, next, nil
 }
 
-// AmbiguousRepoError is FindRepo's answer when several installations of
-// the tenant hold a repository of the name asked for and the caller named
-// none of them.
-type AmbiguousRepoError struct {
-	Installations []string
-}
-
-func (e *AmbiguousRepoError) Error() string {
-	return "store: several installations hold this repository: " + strings.Join(e.Installations, ", ")
-}
-
-// FindRepo returns the tenant's repository named fullName, reached through
-// installation when it is set. Without it, a name several installations
-// hold is an *AmbiguousRepoError, except that an enabled repository wins
-// over disabled ones, which a removed or renamed installation leaves
-// behind.
-func FindRepo(ctx context.Context, tx pgx.Tx, fullName, installation string) (RepoRow, error) {
+// FindRepo returns the account's repository named fullName, in any case.
+func FindRepo(ctx context.Context, tx pgx.Tx, fullName string) (RepoRow, error) {
 	rows, err := tx.Query(ctx, `SELECT `+repoColumns+`
-		WHERE r.name = $1 AND ($2 = '' OR i.name = $2)
-		ORDER BY r.enabled DESC, r.created_at, r.id`, fullName, installation)
+		WHERE lower(r.name) = lower($1)`, fullName)
 	if err != nil {
 		return RepoRow{}, fmt.Errorf("store: find repository: %w", err)
 	}
@@ -290,15 +383,6 @@ func FindRepo(ctx context.Context, tx pgx.Tx, fullName, installation string) (Re
 	}
 	if len(repos) == 0 {
 		return RepoRow{}, ErrNotFound
-	}
-	if len(repos) > 1 && repos[1].Enabled == repos[0].Enabled {
-		e := &AmbiguousRepoError{}
-		for _, r := range repos {
-			if r.Enabled == repos[0].Enabled {
-				e.Installations = append(e.Installations, r.Installation)
-			}
-		}
-		return RepoRow{}, e
 	}
 	return repos[0], nil
 }
@@ -357,6 +441,37 @@ type RepoFileRow struct {
 	ReviewID string
 	Commit   string
 	Doc      *string
+}
+
+// LastRepoFiles reads, for each of the account's repositories that has one,
+// the .kritique.yaml its last review with a context pack read, keyed by
+// repository id.
+func LastRepoFiles(ctx context.Context, tx pgx.Tx) (map[string]RepoFileRow, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT ON (p.repository_id) p.repository_id, r.id, c.base_sha, c.repo_files ->> '.kritique.yaml'
+		FROM reviews r JOIN pull_requests p ON p.id = r.pull_request_id
+		JOIN runner_runs rr ON rr.review_id = r.id JOIN context_packs c ON c.runner_run_id = rr.id
+		ORDER BY p.repository_id, c.created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("store: last repository files: %w", err)
+	}
+	type keyed struct {
+		repoID string
+		row    RepoFileRow
+	}
+	list, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (keyed, error) {
+		var k keyed
+		err := r.Scan(&k.repoID, &k.row.ReviewID, &k.row.Commit, &k.row.Doc)
+		return k, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: last repository files: %w", err)
+	}
+	out := make(map[string]RepoFileRow, len(list))
+	for _, k := range list {
+		out[k.repoID] = k.row
+	}
+	return out, nil
 }
 
 // LastRepoFile reads the .kritique.yaml the repository's last review with a

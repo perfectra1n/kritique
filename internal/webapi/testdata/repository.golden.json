@@ -1,10 +1,12 @@
 {
   "id": "repo-1",
   "fullName": "alpha/one",
-  "installation": "alpha-bot",
   "enabled": true,
   "managedBy": "file",
   "defaultBranch": "main",
+  "archived": false,
+  "fork": false,
+  "turnedOn": null,
   "index": {
     "activeCommit": "def456",
     "activeAt": "2026-09-01T12:00:00Z",

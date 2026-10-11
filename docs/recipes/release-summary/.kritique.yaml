@@ -1,8 +1,8 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/perfectra1n/kritique/main/docs/kritique.schema.json
+# yaml-language-server: $schema=https://kritique.perfectra1n.github.io/kritique.schema.json
 tasks:
   - name: release-summary
-    # A forge-specific event; the operator must allow it, e.g. with
-    # "raw:release.*" in allow.tasks.events.
+    # A forge-specific event; an admin must allow it, e.g. with
+    # "raw:release.*" in taskBounds.events.
     on:
       - raw: { event: release, actions: [published] }
     mode: single

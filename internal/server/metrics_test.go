@@ -10,33 +10,24 @@ import (
 func TestConfigErrorGauge(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	g := NewConfigErrorGauge(reg)
-	value := func(stage ConfigErrorStage) float64 { return testutil.ToFloat64(g.g.WithLabelValues(string(stage))) }
-	if n := testutil.CollectAndCount(g.g); n != 2 {
-		t.Fatalf("series before any error = %d, want both stages at 0", n)
+	if v := testutil.ToFloat64(g.g); v != 0 {
+		t.Fatalf("gauge before any error = %v, want 0", v)
 	}
-	steps := []struct {
-		name      string
-		stage     ConfigErrorStage
-		failing   bool
-		wantMerge float64
-		wantApply float64
+	for _, st := range []struct {
+		name    string
+		failing bool
+		want    float64
 	}{
-		{"merge fails", ConfigErrorMerge, true, 1, 0},
-		{"apply fails", ConfigErrorApply, true, 1, 1},
-		{"merge recovers", ConfigErrorMerge, false, 0, 1},
-		{"apply recovers", ConfigErrorApply, false, 0, 0},
-	}
-	for _, st := range steps {
+		{"apply fails", true, 1},
+		{"apply recovers", false, 0},
+	} {
 		t.Run(st.name, func(t *testing.T) {
-			g.Set(st.stage, st.failing)
-			if m, a := value(ConfigErrorMerge), value(ConfigErrorApply); m != st.wantMerge || a != st.wantApply {
-				t.Fatalf("merge=%v apply=%v, want %v %v", m, a, st.wantMerge, st.wantApply)
+			g.Set(st.failing)
+			if v := testutil.ToFloat64(g.g); v != st.want {
+				t.Fatalf("gauge = %v, want %v", v, st.want)
 			}
 		})
 	}
 	var nilGauge *ConfigErrorGauge
-	nilGauge.Set(ConfigErrorMerge, true)
-	if !ConfigErrorMerge.Valid() || ConfigErrorStage("other").Valid() {
-		t.Fatal("Valid is wrong")
-	}
+	nilGauge.Set(true)
 }

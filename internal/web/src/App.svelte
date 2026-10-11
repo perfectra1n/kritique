@@ -1,38 +1,43 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { Dialog, Popover } from 'bits-ui';
   import { basePath } from './lib/base';
   import { router, initRouter, href, navigate, parse, replace } from './lib/router.svelte';
   import { getJSON, sendJSON, ApiError, signinState } from './lib/api.svelte';
-  import { initEvents, closeEvents } from './lib/events.svelte';
-  import { theme, cycleTheme, initTheme } from './lib/theme.svelte';
-  import { initClock } from './lib/time.svelte';
-  import { initKeyboard, help, toggleHelp, togglePalette } from './lib/keyboard.svelte';
+  import { initEvents, closeEvents, stream } from './lib/events.svelte';
+  import { theme, nextTheme, setTheme, initTheme } from './lib/theme.svelte';
+  import { initClock, stamp } from './lib/time.svelte';
+  import { initKeyboard, help, closeOverlays, toggleHelp, togglePalette } from './lib/keyboard.svelte';
   import {
     mdiThemeLightDark,
     mdiWeatherNight,
     mdiWhiteBalanceSunny,
     mdiKeyboardOutline,
     mdiMagnify,
-    mdiViewDashboardOutline,
+    mdiChartBoxOutline,
     mdiViewGridOutline,
-    mdiSourceRepository,
-    mdiSourcePull,
-    mdiTrayFull,
-    mdiCurrencyUsd,
-    mdiClipboardTextClockOutline,
-    mdiCheckboxMarkedCircleAutoOutline,
-    mdiCogOutline,
     mdiConsoleLine,
+    mdiTrayFull,
+    mdiSourcePull,
+    mdiRobotOutline,
+    mdiScaleBalance,
+    mdiCogOutline,
     mdiAccountOutline,
     mdiLogout,
     mdiChevronDown,
+    mdiUnfoldMoreHorizontal,
+    mdiCheck,
   } from './lib/icons';
+  import { INSTANCE_TABS, SECTIONS, SECTION_ORDER, pageIn, pageOfInstance, scopeOf, sectionOf, type Section } from './lib/sections';
+  import type { Route } from './lib/routes';
+  import { revealInNav } from './lib/focus';
   import Icon from './lib/Icon.svelte';
   import Palette from './lib/Palette.svelte';
   import SignIn from './lib/SignIn.svelte';
   import Page from './lib/pages/Page.svelte';
   import Toasts from './lib/components/Toasts.svelte';
-  import { session, loadMeta } from './lib/session.svelte';
+  import SetupBanner from './lib/pages/admin/SetupBanner.svelte';
+  import { session, loadMeta, applySettings, saveSettings } from './lib/session.svelte';
   import type { Me } from './lib/types';
 
   const me = $derived(session.me);
@@ -49,6 +54,7 @@
   async function loadMe(): Promise<void> {
     try {
       session.me = await getJSON<Me>('/api/v1/me');
+      applySettings(session.me.settings);
       initEvents();
     } catch (err) {
       // A 401 already redirected to #/signin (see api.svelte.ts); anything
@@ -78,221 +84,199 @@
     navigate({ name: 'signin' });
   }
 
-  // currentSlug reads the tenant slug off whatever route is active, falling
-  // back to the first tenant so the nav has somewhere to point before the
-  // user has ever picked one explicitly.
-  const currentSlug = $derived('slug' in router.route ? router.route.slug : me?.tenants[0]?.slug);
-  const currentTenant = $derived(me?.tenants.find((t) => t.slug === currentSlug));
+  // The account the route is in the scope of; none in the instance's.
+  const currentSlug = $derived(scopeOf(router.route));
+  const currentSection = $derived(sectionOf(router.route));
+  const instanceTabs = $derived(INSTANCE_TABS.filter((t) => (!t.admin || me?.admin) && (!t.several || (me?.accounts.length ?? 0) > 1)));
 
-  function switchTenant(slug: string): void {
-    navigate({ name: 'tenant', slug });
-  }
+  const instanceIcon: Partial<Record<Route['name'], string>> = {
+    overview: mdiViewGridOutline,
+    instanceQueue: mdiTrayFull,
+    console: mdiConsoleLine,
+  };
+
+  const sectionIcon: Record<Section, string> = {
+    analytics: mdiChartBoxOutline,
+    pulls: mdiSourcePull,
+    tasks: mdiRobotOutline,
+    rules: mdiScaleBalance,
+    settings: mdiCogOutline,
+  };
 
   const themeIconPath = $derived(
     theme.pref === 'auto' ? mdiThemeLightDark : theme.pref === 'dark' ? mdiWeatherNight : mdiWhiteBalanceSunny,
   );
 
-  // Keep the help dialog's Tab from escaping to the page behind the backdrop;
-  // Escape (global handler) and the backdrop close it.
-  function trapTab(e: KeyboardEvent): void {
-    if (e.key === 'Tab') e.preventDefault();
+  // The theme button steps to the next theme, and keeps a light or dark
+  // one with the user; auto is this browser's own to follow its system.
+  function cycleTheme(): void {
+    const next = nextTheme();
+    if (session.me) void saveSettings({ theme: next === 'auto' ? '' : next });
+    else setTheme(next);
   }
 
-  function focusOnMount(node: HTMLElement): void {
-    node.focus();
-  }
+  // The scope and user menus are popovers: Bits UI closes one on Escape or
+  // a click outside, and following a link in one closes it here.
+  let scopeOpen = $state(false);
+  let userOpen = $state(false);
 
-  // A native <details> has no built-in Escape handling and stays open on an
-  // outside click, so both are wired up by hand here.
-  let accountMenuEl = $state<HTMLDetailsElement | undefined>(undefined);
-
-  function closeAccountMenu(): void {
-    if (accountMenuEl) accountMenuEl.open = false;
-  }
-
-  function onAccountMenuKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Escape') {
-      e.stopPropagation();
-      closeAccountMenu();
-    }
-  }
-
-  function onDocumentClick(e: MouseEvent): void {
-    if (accountMenuEl?.open && !accountMenuEl.contains(e.target as Node)) closeAccountMenu();
-  }
+  $effect(() => {
+    void router.route;
+    scopeOpen = false;
+    userOpen = false;
+  });
 </script>
-
-<svelte:window onclick={onDocumentClick} />
 
 {#if router.route.name === 'signin'}
   <SignIn />
 {:else}
   <div class="app">
     <header class="topbar">
-      <a class="brand" href="#/">
-        <img src="{basePath}/favicon.svg" width="22" height="22" alt="" />
-        <span class="wordmark">kritique</span>
-      </a>
+      <div class="topbar-row">
+        <a class="brand" href="#/">
+          <img src="{basePath}/favicon.svg" width="22" height="22" alt="" />
+          <span class="wordmark marked">kritique</span>
+        </a>
 
-      <div class="spacer"></div>
-
-      <div class="actions">
-        <button class="btn btn-icon" onclick={togglePalette} title="Go to (Ctrl/⌘ K)">
-          <Icon path={mdiMagnify} label="Go to" />
-        </button>
-        <button class="btn btn-icon" onclick={toggleHelp} title="Keyboard shortcuts (?)">
-          <Icon path={mdiKeyboardOutline} label="Keyboard shortcuts" />
-        </button>
-        <button class="btn btn-icon" onclick={cycleTheme} title={`Theme: ${theme.pref}`}>
-          <Icon path={themeIconPath} label="Toggle theme" />
-        </button>
-        {#if me}
-          <details class="account-menu" bind:this={accountMenuEl} onkeydown={onAccountMenuKeydown}>
-            <summary class="btn btn-icon" title={me.account.displayName}>
-              <Icon path={mdiAccountOutline} label="Account" />
-              <Icon path={mdiChevronDown} size={12} />
-            </summary>
-            <div class="account-panel">
-              <p class="account-name">{me.account.displayName}</p>
-              <p class="account-email mono">{me.account.email}</p>
-              <button class="btn" onclick={signOut}>
-                <Icon path={mdiLogout} size={14} /> Sign out
-              </button>
-            </div>
-          </details>
+        {#if me && me.accounts.length > 0}
+          <Popover.Root bind:open={scopeOpen}>
+            <Popover.Trigger class="account-button" title="Switch between the instance and an account">
+              {#if currentSlug}
+                <span class="mono">{currentSlug}</span>
+              {:else}
+                <span>All accounts</span>
+              {/if}
+              <Icon path={mdiUnfoldMoreHorizontal} size={14} label="Switch scope" />
+            </Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content class="menu-panel account-panel" align="start" sideOffset={6}>
+                <nav aria-label="Scope">
+              <a
+                class="menu-item"
+                href={href(pageOfInstance(router.route, instanceTabs.some((t) => t.route.name === 'instanceQueue')))}
+                aria-current={currentSlug ? undefined : 'true'}
+              >
+                <span class="menu-check">{#if !currentSlug}<Icon path={mdiCheck} size={14} />{/if}</span>
+                All accounts
+              </a>
+              <p class="menu-heading">Accounts</p>
+              {#each me.accounts as slug (slug)}
+                {@const on = slug === currentSlug}
+                <a class="menu-item mono" href={href(pageIn(router.route, slug))} aria-current={on ? 'true' : undefined}>
+                  <span class="menu-check">{#if on}<Icon path={mdiCheck} size={14} />{/if}</span>
+                  {slug}
+                </a>
+              {/each}
+                </nav>
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
         {/if}
+
+        <div class="spacer"></div>
+
+        <div class="actions">
+          {#if me}
+            <span
+              class="live"
+              class:live-down={stream.down}
+              aria-live="polite"
+              title={stream.down ? `Live updates stopped at ${stamp(stream.since)}; this page may be out of date.` : 'Live updates on'}
+            >
+              <span class="live-dot" aria-hidden="true"></span>
+              {#if stream.down}Reconnecting…{:else}<span class="sr-only">Live updates on</span>{/if}
+            </span>
+          {/if}
+          <button class="btn btn-icon" onclick={togglePalette} title="Go to (Ctrl/⌘ K)">
+            <Icon path={mdiMagnify} label="Go to" />
+          </button>
+          <button class="btn btn-icon keys-button" onclick={toggleHelp} title="Keyboard shortcuts (?)">
+            <Icon path={mdiKeyboardOutline} label="Keyboard shortcuts" />
+          </button>
+          <button class="btn btn-icon" onclick={cycleTheme} title={`Theme: ${theme.pref}`}>
+            <Icon path={themeIconPath} label="Toggle theme" />
+          </button>
+          {#if me}
+            <Popover.Root bind:open={userOpen}>
+              <Popover.Trigger class="btn btn-icon user-button" title={me.user.displayName}>
+                <Icon path={mdiAccountOutline} label="User" />
+                <Icon path={mdiChevronDown} size={12} />
+              </Popover.Trigger>
+              <Popover.Portal>
+                <Popover.Content class="menu-panel user-panel" align="end" sideOffset={6}>
+                <p class="user-name">{me.user.displayName}</p>
+                <p class="user-email">{me.user.email}</p>
+                <a class="btn" href={href({ name: 'preferences' })}><Icon path={mdiCogOutline} size={14} /> Settings</a>
+                <button class="btn" onclick={signOut}>
+                  <Icon path={mdiLogout} size={14} /> Sign out
+                </button>
+                {#if session.meta?.version}
+                  <p class="user-version mono" title="kritique {session.meta.version}">kritique {session.meta.version}</p>
+                {/if}
+                </Popover.Content>
+              </Popover.Portal>
+            </Popover.Root>
+          {/if}
+        </div>
       </div>
+
+      {#if me && !currentSlug}
+        <nav class="sections" aria-label="Instance">
+          {#each instanceTabs as t (t.route.name)}
+            {@const on = router.route.name === t.route.name}
+            <a class="section-tab" class:active={on} aria-current={on ? 'page' : undefined} href={href(t.route)} {@attach on && revealInNav}>
+              <Icon path={instanceIcon[t.route.name] ?? mdiViewGridOutline} size={15} />
+              <span class="section-label" data-label={t.label}>{t.label}</span>
+            </a>
+          {/each}
+        </nav>
+      {:else if me && currentSlug}
+        <nav class="sections" aria-label="Sections">
+          {#each SECTION_ORDER as s (s)}
+            <a
+              class="section-tab"
+              class:active={currentSection === s}
+              aria-current={currentSection === s ? 'page' : undefined}
+              href={href(SECTIONS[s].home(currentSlug))}
+              {@attach currentSection === s && revealInNav}
+            >
+              <Icon path={sectionIcon[s]} size={15} />
+              <span class="section-label" data-label={SECTIONS[s].label}>{SECTIONS[s].label}</span>
+            </a>
+          {/each}
+        </nav>
+      {/if}
     </header>
 
-    <div class="shell">
-      {#if me}
-        <aside class="sidebar" aria-label="Navigation">
-          <nav class="nav" aria-label="Home">
-            <a
-              class:active={router.route.name === 'overview'}
-              aria-current={router.route.name === 'overview' ? 'page' : undefined}
-              href={href({ name: 'overview' })}
-            >
-              <Icon path={mdiViewGridOutline} size={15} /> All tenants
-            </a>
-          </nav>
-          {#if me.tenants.length > 0}
-            <select
-              class="tenant-switch"
-              aria-label="Switch tenant"
-              value={currentSlug}
-              onchange={(e) => switchTenant(e.currentTarget.value)}
-            >
-              {#each me.tenants as t (t.slug)}
-                <option value={t.slug}>{t.slug}</option>
-              {/each}
-            </select>
-          {/if}
-
-          {#if currentSlug}
-            <nav class="nav" aria-label="Tenant">
-              <a
-                class:active={router.route.name === 'tenant'}
-                aria-current={router.route.name === 'tenant' ? 'page' : undefined}
-                href={href({ name: 'tenant', slug: currentSlug })}
-              >
-                <Icon path={mdiViewDashboardOutline} size={15} /> Overview
-              </a>
-              <a
-                class:active={router.route.name === 'repos'}
-                aria-current={router.route.name === 'repos' ? 'page' : undefined}
-                href={href({ name: 'repos', slug: currentSlug })}
-              >
-                <Icon path={mdiSourceRepository} size={15} /> Repos
-              </a>
-              <a
-                class:active={router.route.name === 'pulls'}
-                aria-current={router.route.name === 'pulls' ? 'page' : undefined}
-                href={href({ name: 'pulls', slug: currentSlug })}
-              >
-                <Icon path={mdiSourcePull} size={15} /> Pulls
-              </a>
-              <a
-                class:active={router.route.name === 'queue'}
-                aria-current={router.route.name === 'queue' ? 'page' : undefined}
-                href={href({ name: 'queue', slug: currentSlug })}
-              >
-                <Icon path={mdiTrayFull} size={15} /> Queue
-              </a>
-              <a
-                class:active={router.route.name === 'usage'}
-                aria-current={router.route.name === 'usage' ? 'page' : undefined}
-                href={href({ name: 'usage', slug: currentSlug })}
-              >
-                <Icon path={mdiCurrencyUsd} size={15} /> Usage
-              </a>
-              <a
-                class:active={router.route.name === 'followups'}
-                aria-current={router.route.name === 'followups' ? 'page' : undefined}
-                href={href({ name: 'followups', slug: currentSlug })}
-              >
-                <Icon path={mdiClipboardTextClockOutline} size={15} /> Follow-ups
-              </a>
-              <a
-                class:active={router.route.name === 'taskRuns' || router.route.name === 'taskRun'}
-                aria-current={router.route.name === 'taskRuns' ? 'page' : undefined}
-                href={href({ name: 'taskRuns', slug: currentSlug })}
-              >
-                <Icon path={mdiCheckboxMarkedCircleAutoOutline} size={15} /> Task runs
-              </a>
-              {#if currentTenant?.role === 'admin' || me?.operator}
-                <a
-                  class:active={router.route.name === 'admin'}
-                  aria-current={router.route.name === 'admin' ? 'page' : undefined}
-                  href={href({ name: 'admin', slug: currentSlug })}
-                >
-                  <Icon path={mdiCogOutline} size={15} /> Admin
-                </a>
-              {/if}
-            </nav>
-          {/if}
-          {#if me.operator}
-            <nav class="nav nav-instance" aria-label="Instance">
-              <a
-                class:active={router.route.name === 'operator'}
-                aria-current={router.route.name === 'operator' ? 'page' : undefined}
-                href={href({ name: 'operator' })}
-              >
-                <Icon path={mdiConsoleLine} size={15} /> Operator console
-              </a>
-            </nav>
-          {/if}
-        </aside>
-      {/if}
-
+    <div class="main-col">
+      {#if me?.admin}<SetupBanner />{/if}
       <Page route={router.route} />
     </div>
-
     <Palette {me} />
-
     <Toasts />
-
-    {#if help.open}
-      <div class="help-overlay">
-        <button class="help-backdrop" aria-label="Close keyboard shortcuts" onclick={toggleHelp}></button>
-        <div
-          class="help-card"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Keyboard shortcuts"
-          tabindex="-1"
-          use:focusOnMount
-          onkeydown={trapTab}
-        >
-          <h2>Keyboard shortcuts</h2>
+    <Dialog.Root open={help.open} onOpenChange={(now) => !now && closeOverlays()}>
+      <Dialog.Portal>
+        <Dialog.Overlay class="overlay" />
+        <Dialog.Content class="modal modal-centered help-card">
+          <Dialog.Title>
+            {#snippet child({ props })}<h2 {...props}>Keyboard shortcuts</h2>{/snippet}
+          </Dialog.Title>
           <dl class="help-keys">
             <dt><kbd>Ctrl</kbd>/<kbd>⌘</kbd> <kbd>k</kbd></dt>
             <dd>go to a page</dd>
             <dt><kbd>?</kbd></dt>
             <dd>toggle this help</dd>
+            <dt><kbd>j</kbd> / <kbd>k</kbd></dt>
+            <dd>move down or up a list of pull requests or findings</dd>
+            <dt><kbd>⏎</kbd></dt>
+            <dd>open the row the cursor is on</dd>
+            <dt><kbd>/</kbd></dt>
+            <dd>search the list</dd>
+            <dt><kbd>space</kbd></dt>
+            <dd>select a pull request for a bulk action, as an admin</dd>
           </dl>
-        </div>
-      </div>
-    {/if}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   </div>
 {/if}

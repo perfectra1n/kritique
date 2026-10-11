@@ -20,12 +20,16 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
+	"github.com/perfectra1n/kritique/internal/adapter"
 	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/gateway"
 	"github.com/perfectra1n/kritique/internal/ingest"
 	"github.com/perfectra1n/kritique/internal/jobs"
 	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
 	"github.com/perfectra1n/kritique/internal/tasks"
 	"github.com/perfectra1n/kritique/internal/webhook"
 )
@@ -36,43 +40,34 @@ providers:
     type: openai
     baseUrl: %s/v1
     apiKey: { env: TEST_SECRET }
-defaults:
-  runner:
-    activeDeadlineSeconds: 60
-  models:
-    review: gateway/agent-model
-  limits:
-    concurrency: 1
-  allow:
-    tasks: { enabled: true }
-  tasks:
-    - name: agentic-triage
-      mode: agentic
-      on: [{ issue: [opened] }]
-      promptInline: "Triage issue #{{ .Subject.Number }}: {{ .Subject.Title }}\n{{ range .Context }}{{ . }}\n{{ end }}"
-      agent: { maxSteps: 4, tools: [grep, run], commands: [cat] }
-      context:
-        files: [{ path: main.go }, { glob: "*.go", max: 1 }]
-        commands: [{ name: other, run: "cat other.go" }]
-      fields:
-        priority: { type: string, enum: [low, high] }
-      actions:
-        labels: { propose: { add: [bug, enhancement], remove: [needs-triage] } }
-        comment: { mode: sticky }
-tenants:
-  - slug: initech
-    installations:
-      - name: initech-bot
-        forge: github
-        account: initech
-        app:
-          clientId: Iv1.x
-          privateKey: { env: TEST_PEM }
-          webhookSecret: { env: TEST_SECRET }
-    repositories:
-      - name: initech/widgets
-        agent:
-          commandTimeout: 5s
+review:
+  model: gateway/agent-model
+limits:
+  concurrency: 1
+taskBounds: { enabled: true }
+tasks:
+  - name: agentic-triage
+    mode: agentic
+    on: [{ issue: [opened] }]
+    promptInline: "Triage issue #{{ .Subject.Number }}: {{ .Subject.Title }}\n{{ range .Context }}{{ . }}\n{{ end }}"
+    agent: { steps: 4, tools: [grep, run], commands: [cat] }
+    context:
+      files: [{ path: main.go }, { glob: "*.go", max: 1 }]
+      commands: [{ name: other, run: "cat other.go" }]
+    fields:
+      priority: { type: string, enum: [low, high] }
+    actions:
+      labels: { propose: { add: [bug, enhancement], remove: [needs-triage] } }
+      comment: { mode: sticky }
+apps:
+  initech-bot:
+    accounts: [initech]
+    clientId: Iv1.x
+    privateKey: { env: TEST_PEM }
+    webhookSecret: { env: TEST_SECRET }
+repositories:
+  initech/widgets:
+    agent: { commandTimeout: 5s }
 `
 
 // taskAgentModel is an OpenAI-compatible endpoint that greps, then submits
@@ -152,8 +147,8 @@ type agenticTaskHarness struct {
 	*taskHarness
 	ctx context.Context
 	sm  *taskAgentModel
-	// slug is the harness's tenant's, and the account and owner of its
-	// repository, widgets.
+	// slug is the harness's account's, and the owner of its repository,
+	// widgets.
 	slug string
 }
 
@@ -161,15 +156,8 @@ func newAgenticTaskHarness(t *testing.T, slug, extraContext string, embedder mod
 	t.Helper()
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: env(t, "KRITIQUE_TEST_OWNER_URL"), Logger: logger})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	runnerStore, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: logger})
+	st := storetest.Open(t)
+	runnerStore, err := store.Open(ctx, store.Options{AppURL: storetest.Env(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: logger})
 	if err != nil {
 		t.Fatalf("Open runner: %v", err)
 	}
@@ -179,14 +167,15 @@ func newAgenticTaskHarness(t *testing.T, slug, extraContext string, embedder mod
 	t.Cleanup(srv.Close)
 	t.Setenv("TEST_PEM", "pem")
 	t.Setenv("TEST_SECRET", "model-key")
+	t.Setenv("KRITIQUE_RUNNER_DEADLINE", "60s")
 	doc := strings.ReplaceAll(fmt.Sprintf(agenticTaskConfigYAML, srv.URL), "initech", slug)
-	doc = strings.Replace(doc, `        commands: [{ name: other, run: "cat other.go" }]`,
-		`        commands: [{ name: other, run: "cat other.go" }]`+extraContext, 1)
-	file, err := configfile.Parse([]byte(doc))
-	if err != nil {
-		t.Fatal(err)
+	doc = strings.Replace(doc, `      commands: [{ name: other, run: "cat other.go" }]`,
+		`      commands: [{ name: other, run: "cat other.go" }]`+extraContext, 1)
+	if embedder != nil {
+		doc += "embedding: { model: gateway/fake-embed, dims: 8 }\n"
 	}
-	if err := st.ApplyConfig(ctx, file, "test"); err != nil {
+	file := configfiletest.Load(t, doc)
+	if err := st.ApplyConfig(ctx, file); err != nil {
 		t.Fatal(err)
 	}
 	dir, base, head := testRepo(t)
@@ -197,19 +186,22 @@ func newAgenticTaskHarness(t *testing.T, slug, extraContext string, embedder mod
 		t.Fatal(err)
 	}
 	h := &taskHarness{t: t, st: st, file: file, svc: ingest.NewService(st, insertOnly), tf: tf}
-	h.in, h.tenant, _ = file.Installation(slug + "-bot")
+	h.in, _ = file.Connection(slug + "-bot")
+	h.account, _ = file.Account(configfile.ForgeGitHub, slug)
 	current := configfile.NewCurrent(file)
-	gateway := httptest.NewServer(&Gateway{
-		Store: st, Current: current, Logger: logger, Proxy: http.NotFoundHandler(), Steppers: &Completers{Build: BuildStepper},
+	embedders := &adapter.Embedders{Build: func(configfile.Embedding) model.Embedder { return embedder }}
+	gw := httptest.NewServer(&gateway.Server{
+		Store: st, Current: current, Logger: logger, Proxy: http.NotFoundHandler(),
+		Steppers: &adapter.Steppers{Build: adapter.BuildStepper}, Embedders: embedders,
 	})
-	t.Cleanup(gateway.Close)
+	t.Cleanup(gw.Close)
 	base0 := Base{Store: st, Current: current, Forges: &forges{f: f}, Logger: logger}
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &TaskDispatch{Base: base0})
 	river.AddWorker(workers, &Task{
-		Base: base0, Completers: &completers{c: &taskModel{}}, Executor: &executor.Local{Store: runnerStore},
-		GatewayURL: gateway.URL, GatewayTokenTTL: time.Hour, superviseEvery: 50 * time.Millisecond,
-		Embedder: embedder, EmbedModel: "fake-embed",
+		Base: base0, Steppers: &adapter.Steppers{Build: adapter.BuildStepper}, Embedders: embedders,
+		Executor: &executor.Local{Store: runnerStore}, GatewayURL: gw.URL, GatewayTokenTTL: time.Hour,
+		superviseEvery: 50 * time.Millisecond,
 	})
 	client, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{
 		Queues: map[string]river.QueueConfig{jobs.QueueTask: {MaxWorkers: 2}}, Workers: workers,
@@ -229,7 +221,7 @@ func newAgenticTaskHarness(t *testing.T, slug, extraContext string, embedder mod
 // dispatch delivers the opening of issue #7.
 func (h *agenticTaskHarness) dispatch(delivery string) {
 	h.t.Helper()
-	out, err := h.svc.Dispatch(h.ctx, ingest.Request{File: h.file, Tenant: h.tenant, Installation: h.in, Event: webhook.Event{
+	out, err := h.svc.Dispatch(h.ctx, ingest.Request{File: h.file, Account: h.account, Connection: h.in, Event: webhook.Event{
 		Kind: webhook.KindIssue, Action: "opened", Delivery: delivery, Account: h.slug, Forge: configfile.ForgeGitHub,
 		RawEvent: "issues", Sender: "devin", Raw: json.RawMessage(`{"action":"opened","issue":{"number":7}}`),
 		Repository: &webhook.Repository{FullName: h.slug + "/widgets", DefaultBranch: "main"},
@@ -250,10 +242,10 @@ func TestAgenticTaskEndToEnd(t *testing.T) {
 	var taskRunID string
 	var notes []string
 	waitFor(t, 30*time.Second, "the agentic task run", func() bool {
-		err := st.WithTenant(ctx, h.tenant.ID(), func(tx pgx.Tx) error {
+		err := st.WithAccount(ctx, h.account.ID(), func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT status, reason, model, error, coalesce(fields, 'null'), coalesce(applied, 'null'),
 				coalesce(dropped, 'null'), comment_id, runner_run_id::text, id::text, notes FROM task_runs
-				WHERE tenant_id = $1 AND task = 'agentic-triage'`, h.tenant.ID()).
+				WHERE account_id = $1 AND task = 'agentic-triage'`, h.account.ID()).
 				Scan(&run.status, &run.reason, &run.model, &run.errText, &run.fields, &run.applied, &run.dropped, &run.commentID, &runnerRunID,
 					&taskRunID, &notes)
 		})
@@ -275,7 +267,7 @@ func TestAgenticTaskEndToEnd(t *testing.T) {
 	}
 	checkAgenticTaskRecords(t, h.taskHarness, taskRunID, *runnerRunID)
 	checkRetryWhileAgentRan(t, h, taskRunID)
-	// Retention sweeps across tenants; the event is not left for the next
+	// Retention sweeps across accounts; the event is not left for the next
 	// test's count.
 	if _, err := st.SweepTaskEvents(ctx, time.Nanosecond); err != nil {
 		t.Fatal(err)
@@ -288,12 +280,12 @@ func TestAgenticTaskEndToEnd(t *testing.T) {
 func checkRetryWhileAgentRan(t *testing.T, h *agenticTaskHarness, taskRunID string) {
 	t.Helper()
 	ctx := context.Background()
-	runners := `SELECT count(*) FROM runner_runs WHERE kind = 'task' AND tenant_id = '` + h.tenant.ID() + `'`
+	runners := `SELECT count(*) FROM runner_runs WHERE kind = 'task' AND account_id = '` + h.account.ID() + `'`
 	before := h.count(runners)
 	h.sm.mu.Lock()
 	steps := len(h.sm.users)
 	h.sm.mu.Unlock()
-	if err := h.st.WithTenant(ctx, h.tenant.ID(), func(tx pgx.Tx) error {
+	if err := h.st.WithAccount(ctx, h.account.ID(), func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE task_runs SET status = 'running', finished_at = NULL, answered_at = NULL
 			WHERE id = $1 AND runner_started_at IS NOT NULL`, taskRunID)
 		return err
@@ -311,7 +303,7 @@ func checkRetryWhileAgentRan(t *testing.T, h *agenticTaskHarness, taskRunID stri
 	}
 	var status, errText string
 	waitFor(t, 20*time.Second, "the retried run to end", func() bool {
-		err := h.st.WithTenant(ctx, h.tenant.ID(), func(tx pgx.Tx) error {
+		err := h.st.WithAccount(ctx, h.account.ID(), func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT status, error FROM task_runs WHERE id = $1`, taskRunID).Scan(&status, &errText)
 		})
 		return err == nil && store.TaskRunStatus(status).Terminal()
@@ -366,8 +358,8 @@ func checkAgenticTaskRecords(t *testing.T, h *taskHarness, taskRunID, runnerRunI
 		{"submitted agent runs", `SELECT count(*) FROM agent_runs WHERE stop_reason = 'submitted' AND runner_run_id = '` + runnerRunID + `'`, 1},
 		{"answered runs", `SELECT count(*) FROM task_runs WHERE id = '` + taskRunID + `' AND answered_at IS NOT NULL`, 1},
 		{"done task runner runs", `SELECT count(*) FROM runner_runs WHERE kind = 'task' AND phase = 'done' AND id = '` + runnerRunID + `'`, 1},
-		// usage has no task run column; this test's tenant runs only this task.
-		{"task usage rows, one per step", `SELECT count(*) FROM usage WHERE tenant_id = '` + h.tenant.ID() +
+		// usage has no task run column; this test's account runs only this task.
+		{"task usage rows, one per step", `SELECT count(*) FROM usage WHERE account_id = '` + h.account.ID() +
 			`' AND role = 'task' AND review_id IS NULL`, 2},
 		{"agent step transcripts", `SELECT count(*) FROM model_calls WHERE kind = 'agent_step' AND task_run_id = '` + taskRunID + `'`, 2},
 	} {
@@ -388,34 +380,23 @@ func checkAgenticTaskRecords(t *testing.T, h *taskHarness, taskRunID, runnerRunI
 func TestSearchIndexHits(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: env(t, "KRITIQUE_TEST_OWNER_URL"), Logger: logger})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	if err := st.EnsureIndexSchema(ctx, "kritique_app", "fake-embed", 8, false); err != nil {
-		t.Fatalf("EnsureIndexSchema: %v", err)
-	}
+	st := storetest.Open(t)
 	t.Setenv("TEST_PEM", "pem")
 	t.Setenv("TEST_SECRET", "model-key")
-	file, err := configfile.Parse([]byte(fmt.Sprintf(agenticTaskConfigYAML, "http://unused.invalid")))
-	if err != nil {
+	file := configfiletest.Load(t, fmt.Sprintf(agenticTaskConfigYAML, "http://unused.invalid")+"embedding: { model: gateway/fake-embed, dims: 8 }\n")
+	if err := st.ApplyConfig(ctx, file); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ApplyConfig(ctx, file, "test"); err != nil {
-		t.Fatal(err)
-	}
-	in, tenant, _ := file.Installation("initech-bot")
-	repoID := configfile.RepositoryID(in.ID(), "initech/widgets")
+	account, _ := file.Account(configfile.ForgeGitHub, "initech")
+	repoID := configfile.RepositoryID(account.ID(), "initech/widgets")
 	fe := &fakeEmbedder{}
-	chunks := seedIndex(t, st, tenant.ID(), repoID)
+	chunks := seedTaskIndex(t, st, account.ID(), repoID)
 	r := &taskRunner{
-		w:      &Task{Store: st, Logger: logger, Embedder: fe, EmbedModel: "fake-embed"},
-		tenant: tenant, args: jobs.TaskArgs{RepositoryID: repoID}, settings: configfile.Settings{Limits: configfile.Limits{Concurrency: 1}},
-		logger: logger,
+		w: &Task{
+			Store: st, Logger: logger, Embedders: &adapter.Embedders{Build: func(configfile.Embedding) model.Embedder { return fe }},
+		},
+		file: file, account: account, args: jobs.TaskArgs{RepositoryID: repoID},
+		settings: configfile.Settings{Limits: configfile.Limits{Concurrency: 1}}, logger: logger,
 	}
 	hits, ok, err := r.searchIndex(ctx, tasks.NamedQuery{Name: "code", Query: "crashes on start", K: 2})
 	if err != nil || !ok || len(hits) != 2 || hits[0].Path != "crash.go" || hits[0].Text != chunks[0].text {
@@ -427,26 +408,26 @@ func TestSearchIndexHits(t *testing.T) {
 		t.Fatalf("TakeList = %+v, notes %q", kept, b.Notes)
 	}
 	var embedded int
-	if err := st.WithTenant(ctx, tenant.ID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FROM usage WHERE tenant_id = $1 AND role = 'embedding' AND review_id IS NULL`, tenant.ID()).
+	if err := st.WithAccount(ctx, account.ID(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM usage WHERE account_id = $1 AND role = 'embedding' AND review_id IS NULL`, account.ID()).
 			Scan(&embedded)
 	}); err != nil || embedded != 1 {
 		t.Fatalf("embedding usage rows = %d, %v", embedded, err)
 	}
 }
 
-// indexChunk is a chunk seedIndex writes.
-type indexChunk struct{ path, text string }
+// taskIndexChunk is a chunk seedTaskIndex writes.
+type taskIndexChunk struct{ path, text string }
 
-// seedIndex makes a completed fake-embed index generation of three chunks
+// seedTaskIndex makes a completed fake-embed index generation of three chunks
 // the repository's active one, and returns the chunks.
-func seedIndex(t *testing.T, st *store.Store, tenantID, repoID string) []indexChunk {
+func seedTaskIndex(t *testing.T, st *store.Store, accountID, repoID string) []taskIndexChunk {
 	t.Helper()
 	ctx := context.Background()
-	if err := st.EnsureIndexSchema(ctx, "kritique_app", "fake-embed", 8, false); err != nil {
+	if _, err := st.EnsureIndexSchema(ctx, "kritique_app", "fake-embed", 8); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
-	chunks := []indexChunk{
+	chunks := []taskIndexChunk{
 		{"crash.go", "func crashOnStart() { panic(\"crashes on start\") }"},
 		{"boot.go", "func boot() { start() }"},
 		{"docs.md", "zzzz qqqq xxxx"},
@@ -460,15 +441,15 @@ func seedIndex(t *testing.T, st *store.Store, tenantID, repoID string) []indexCh
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	err = st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		var runID string
-		if err := tx.QueryRow(ctx, `INSERT INTO index_runs (tenant_id, repository_id, commit_sha, embed_model, embed_dims, mode, status)
-			VALUES ($1, $2, 'c0ffee', 'fake-embed', 8, 'full', 'completed') RETURNING id`, tenantID, repoID).Scan(&runID); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO index_runs (account_id, repository_id, commit_sha, embed_model, embed_dims, mode, status)
+			VALUES ($1, $2, 'c0ffee', 'fake-embed', 8, 'full', 'completed') RETURNING id`, accountID, repoID).Scan(&runID); err != nil {
 			return err
 		}
 		for i, c := range chunks {
-			if _, err := tx.Exec(ctx, `INSERT INTO index_chunks (tenant_id, repository_id, index_run_id, path, start_line, end_line, text, embedding)
-				VALUES ($1, $2, $3, $4, 1, 1, $5, $6::halfvec)`, tenantID, repoID, runID, c.path, c.text, model.VectorLiteral(vectors[i])); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO index_chunks (account_id, repository_id, index_run_id, path, start_line, end_line, text, embedding)
+				VALUES ($1, $2, $3, $4, 1, 1, $5, $6::halfvec)`, accountID, repoID, runID, c.path, c.text, model.VectorLiteral(vectors[i])); err != nil {
 				return err
 			}
 		}
@@ -487,13 +468,13 @@ func seedIndex(t *testing.T, st *store.Store, tenantID, repoID string) []indexCh
 func TestAgenticTaskSnoozesBeforeBilling(t *testing.T) {
 	fe := &fakeEmbedder{}
 	h := newAgenticTaskHarness(t, "hooli", `
-        search: [{ name: code, query: "{{ .Subject.Title }}", k: 2 }]`, fe)
+      search: [{ name: code, query: "{{ .Subject.Title }}", k: 2 }]`, fe)
 	ctx := h.ctx
-	seedIndex(t, h.st, h.tenant.ID(), configfile.RepositoryID(h.in.ID(), "hooli/widgets"))
-	// Another job holds the tenant's one slot on the task's model.
-	held, err := takeLease(ctx, h.st, h.tenant.ID(), "gateway/agent-model", 1, -1)
-	if err != nil || held == nil {
-		t.Fatalf("takeLease = %v, %v", held, err)
+	seedTaskIndex(t, h.st, h.account.ID(), configfile.RepositoryID(h.account.ID(), "hooli/widgets"))
+	// Another job holds the account's one slot on the task's model.
+	held, err := h.st.AcquireLease(ctx, h.account.ID(), "gateway/agent-model", 1, -1)
+	if err != nil {
+		t.Fatalf("AcquireLease = %v", err)
 	}
 	h.dispatch("snooze-d-1")
 	waitFor(t, 20*time.Second, "the task job to snooze", func() bool {
@@ -503,7 +484,7 @@ func TestAgenticTaskSnoozesBeforeBilling(t *testing.T) {
 		return err == nil && n == 1
 	})
 	usage := func(role string) int {
-		return h.count(`SELECT count(*) FROM usage WHERE tenant_id = '` + h.tenant.ID() + `' AND role LIKE '` + role + `'`)
+		return h.count(`SELECT count(*) FROM usage WHERE account_id = '` + h.account.ID() + `' AND role LIKE '` + role + `'`)
 	}
 	fe.mu.Lock()
 	calls := fe.calls
@@ -511,13 +492,13 @@ func TestAgenticTaskSnoozesBeforeBilling(t *testing.T) {
 	if n := usage("%"); n != 0 || calls != 0 {
 		t.Fatalf("a snoozed task spent: %d usage rows, %d embedding calls", n, calls)
 	}
-	if err := held.release(ctx); err != nil {
+	if err := held.Release(ctx); err != nil {
 		t.Fatal(err)
 	}
 	var status string
 	waitFor(t, 30*time.Second, "the snoozed task to run", func() bool {
-		err := h.st.WithTenant(ctx, h.tenant.ID(), func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT status FROM task_runs WHERE tenant_id = $1 AND task = 'agentic-triage'`, h.tenant.ID()).Scan(&status)
+		err := h.st.WithAccount(ctx, h.account.ID(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT status FROM task_runs WHERE account_id = $1 AND task = 'agentic-triage'`, h.account.ID()).Scan(&status)
 		})
 		return err == nil && store.TaskRunStatus(status).Terminal()
 	})

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/perfectra1n/kritique/internal/agent"
 	"github.com/perfectra1n/kritique/internal/chunk"
@@ -52,51 +52,93 @@ func runTask(ctx context.Context, st *store.Store, p Spec, secrets Secrets, logg
 	if err := setPhase(ctx, st, p.RunID, "reviewing"); err != nil {
 		return err
 	}
-	stepper, err := gatewayStepper(p, secrets)
+	stepper, err := gatewayStepper(p, secrets, 0)
 	if err != nil {
 		return err
 	}
-	out, timeline, sources, notes := taskAgent(ctx, stepper, p, head, logger)
-	return recordAgent(ctx, st, p, secrets, out, timeline, sources, notes, logger)
+	tree := agent.NewTree(head, p.Ignore)
+	run, _, cleanup := commandTool(ctx, p, tree, secrets.GitToken, p.Agent.limits().MaxToolOutputBytes, logger)
+	defer cleanup()
+	out, timeline, notes, agentRun := taskAgent(ctx, stepper, p, head, tree, run, logger)
+	return recordTask(ctx, st, p, secrets, out, timeline, notes, run, agentRun, logger)
 }
 
 // taskAgent runs the task's agent over head: the worker's user prompt
-// followed by the context gathered here, the tools the task names, and
-// its answer schema as the submit tool's. It returns the sources the
-// commands fetched and notes on what the context left out.
+// followed by the context gathered here with run, the tools the task
+// names, and its answer schema as the submit tool's. It returns notes on
+// what the context left out, and the run tool the agent was offered, nil
+// for none.
 func taskAgent(
-	ctx context.Context, stepper model.Stepper, p Spec, head *object.Tree, logger *slog.Logger,
-) (res agent.Result, timeline []store.TimelineStep, sources, notes []string) {
-	tree := agent.NewTree(head, p.Ignore)
+	ctx context.Context, stepper model.Stepper, p Spec, head *object.Tree, tree *agent.Tree, run *agent.RunTool, logger *slog.Logger,
+) (res agent.Result, timeline []store.TimelineStep, notes []string, agentRun *agent.RunTool) {
 	maxOutput := p.Agent.limits().MaxToolOutputBytes
-	run, cleanup := commandTool(ctx, p, tree, maxOutput, logger)
-	defer cleanup()
 	gathered, notes := gatherTask(ctx, p.Task, head, p.Ignore, run)
 	for _, n := range notes {
 		logger.Info("task context", "note", n)
 	}
 	user := strings.Join(append([]string{p.Task.User}, gathered...), "\n\n")
-	agentRun := run
 	if run != nil {
 		agentRun = run.Only(p.Task.Run)
 	}
 	tools := taskTools(p.Task, tree, maxOutput, agentRun)
 	logger.Info("agent started", "task", p.Task.Name, "model", p.Model.Model, "prompt_chars", len(p.Task.System)+len(user),
 		"tools", len(tools))
-	submit := model.ToolDef{Name: taskSubmit, Description: taskSubmitDescription, InputSchema: p.Task.Schema}
-	res, timeline = agentLoop(ctx, stepper, p, tools, submit, p.Task.System, user, time.Duration(p.Agent.TimeoutSeconds)*time.Second, logger)
-	sources = []string{}
-	if run != nil {
-		sources = run.Sources()
+	prompt := agentPrompt{
+		system: p.Task.System, user: user,
+		submit: model.ToolDef{Name: taskSubmit, Description: taskSubmitDescription, InputSchema: p.Task.Schema},
 	}
-	if agentRun != nil {
-		for _, s := range agentRun.Sources() {
+	res, timeline = agentLoop(ctx, stepper, p, tools, prompt, time.Duration(p.Agent.TimeoutSeconds)*time.Second, logger)
+	return res, timeline, notes, agentRun
+}
+
+// recordTask writes the task agent's agent_runs row, with the sources its
+// commands read and notes on what its context left out, and marks the run
+// done, or failed when ctx ended it.
+func recordTask(
+	ctx context.Context, st *store.Store, p Spec, secrets Secrets, res agent.Result, timeline []store.TimelineStep, notes []string,
+	run, agentRun *agent.RunTool, logger *slog.Logger,
+) error {
+	sources := []string{}
+	for _, rt := range []*agent.RunTool{run, agentRun} {
+		if rt == nil {
+			continue
+		}
+		for _, s := range rt.Sources() {
 			if !slices.Contains(sources, s) {
 				sources = append(sources, s)
 			}
 		}
 	}
-	return res, timeline, sources, notes
+	phase, wctx, cerr := "done", ctx, ctx.Err()
+	if cerr != nil {
+		// The run was cancelled, deleted or ran out of Job time: what the
+		// agent spent so far is still spent, so the row is written on a
+		// context of its own, short enough for the pod's termination grace.
+		res.Stop, phase = agent.StopCanceled, "failed"
+		if res.Err == "" {
+			res.Err = context.Cause(ctx).Error()
+		}
+		var cancel context.CancelFunc
+		wctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), canceledWriteTimeout)
+		defer cancel()
+	}
+	rec, err := newAgentRecord(res, timeline, sources, secrets)
+	if err != nil {
+		return errors.Join(cerr, err)
+	}
+	rec.useTools(agentTools{run: agentRun})
+	rec.notes = make([]string, len(notes))
+	for i, n := range notes {
+		rec.notes[i] = secrets.Mask(n)
+	}
+	logger.Info("agent stopped", "stop", res.Stop, "steps", res.Steps, "tool_calls", res.ToolCalls, "commands", rec.commandsRun,
+		"sources", len(sources), "input_tokens", res.Usage.Prompt(), "output_tokens", res.Usage.Output, "cost_usd", res.CostUSD,
+		"error", rec.err)
+	err = writeAgentRun(wctx, st, p, rec, phase)
+	if cerr != nil {
+		return errors.Join(fmt.Errorf("runner: agent: %w", cerr), err)
+	}
+	return err
 }
 
 // taskTools are the read-only tools the task names and, when it offers
@@ -182,7 +224,7 @@ func globFiles(ctx context.Context, head *object.Tree, ignore []string, f TaskFi
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if ok, _ := doublestar.Match(f.Glob, file.Name); ok && !chunk.Ignored(ignore, file.Name) && file.Size <= repoconfig.MaxFileBytes {
+		if ok, _ := doublestar.Match(f.Glob, file.Name); ok && !chunk.Matches(ignore, file.Name) && file.Size <= repoconfig.MaxFileBytes {
 			matched = append(matched, file)
 		}
 		return nil

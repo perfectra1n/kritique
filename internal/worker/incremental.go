@@ -1,60 +1,151 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // priorReview is a pull request's last completed review; id is "" when it
-// has none.
+// has none. Its findings leave out the ones maintainers dismissed, which
+// dismissed holds: their threads are resolved already, and the next
+// review is told of them apart.
 type priorReview struct {
-	id, headSHA string
-	findings    []priorFinding
+	id, headSHA, trigger string
+	// mergeBase is the merge base it was reviewed against.
+	mergeBase string
+	// changed are the paths the change touched at headSHA, as its context
+	// pack recorded them.
+	changed   []string
+	findings  []priorFinding
+	dismissed []store.Dismissal
+	// diagram is its summary's diagram, "" when it drew none.
+	diagram string
+	// checked are its notes on what it checked and found sound.
+	checked []string
+	// confidence is its confidence score and risk, nil when it was not
+	// scored.
+	confidence *review.Confidence
 }
 
 type priorFinding struct {
 	review.Finding
 	postedInline bool
+	// commentID is the inline comment's id on the forge, 0 when unknown.
+	commentID int64
 }
 
 // lastCompleted loads the pull request's last completed review and its
 // findings.
 func lastCompleted(ctx context.Context, tx pgx.Tx, prID string) (priorReview, error) {
 	var p priorReview
-	err := tx.QueryRow(ctx, `SELECT id, head_sha FROM reviews
-		WHERE pull_request_id = $1 AND status = 'completed' ORDER BY created_at DESC LIMIT 1`, prID).
-		Scan(&p.id, &p.headSHA)
+	var confidence []byte
+	err := tx.QueryRow(ctx, `SELECT id, head_sha, trigger, merge_base_sha, coalesce(summary->>'diagram', ''),
+		ARRAY(SELECT jsonb_array_elements_text(summary->'checked')), confidence FROM reviews
+		WHERE pull_request_id = $1 AND status = 'completed' AND NOT partial ORDER BY created_at DESC LIMIT 1`, prID).
+		Scan(&p.id, &p.headSHA, &p.trigger, &p.mergeBase, &p.diagram, &p.checked, &confidence)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return priorReview{}, nil
 	}
 	if err != nil {
 		return priorReview{}, fmt.Errorf("worker: load last completed review: %w", err)
 	}
-	rows, err := tx.Query(ctx, `SELECT path, line, severity, title, explanation, suggested_fix, posted_inline,
-		end_line, replacement, agent_prompt FROM findings WHERE review_id = $1 ORDER BY path, line`, p.id)
+	if confidence != nil {
+		if err := json.Unmarshal(confidence, &p.confidence); err != nil {
+			return priorReview{}, fmt.Errorf("worker: decode last completed review's confidence: %w", err)
+		}
+	}
+	err = tx.QueryRow(ctx, `SELECT c.changed_paths FROM context_packs c JOIN runner_runs rr ON rr.id = c.runner_run_id
+		WHERE rr.review_id = $1 ORDER BY c.created_at DESC LIMIT 1`, p.id).Scan(&p.changed)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return priorReview{}, fmt.Errorf("worker: load last completed review's paths: %w", err)
+	}
+	rows, err := tx.Query(ctx, `SELECT path, line, severity, category, title, explanation, suggested_fix, posted_inline,
+		end_line, replacement, agent_prompt, coalesce(forge_comment_id, 0), rules, fingerprint
+		FROM findings WHERE review_id = $1 ORDER BY path, line`, p.id)
 	if err != nil {
 		return priorReview{}, fmt.Errorf("worker: load findings: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
+	p.findings, err = pgx.AppendRows(p.findings, rows, func(row pgx.CollectableRow) (priorFinding, error) {
 		var f priorFinding
-		var sev string
-		if err := rows.Scan(&f.Path, &f.Line, &sev, &f.Title, &f.Explanation, &f.SuggestedFix, &f.postedInline,
-			&f.EndLine, &f.Replacement, &f.AgentPrompt); err != nil {
-			return priorReview{}, fmt.Errorf("worker: scan finding: %w", err)
-		}
-		f.Severity = review.Severity(sev)
-		p.findings = append(p.findings, f)
-	}
-	if err := rows.Err(); err != nil {
+		var sev, cat string
+		err := row.Scan(&f.Path, &f.Line, &sev, &cat, &f.Title, &f.Explanation, &f.SuggestedFix, &f.postedInline,
+			&f.EndLine, &f.Replacement, &f.AgentPrompt, &f.commentID, &f.Rules, &f.Fingerprint)
+		f.Severity, f.Category = review.Severity(sev), review.Category(cat)
+		return f, err
+	})
+	if err != nil {
 		return priorReview{}, fmt.Errorf("worker: load findings: %w", err)
 	}
 	return p, nil
+}
+
+// withDismissals gives p the pull request's dismissals and drops the
+// findings they name from its findings.
+func (p *priorReview) withDismissals(dismissed []store.Dismissal) {
+	p.dismissed = dismissed
+	gone := make(map[string]bool, len(dismissed))
+	for _, d := range dismissed {
+		gone[d.Fingerprint] = true
+	}
+	p.findings = slices.DeleteFunc(p.findings, func(f priorFinding) bool { return gone[review.Fingerprint(f.Finding)] })
+}
+
+// dismissedFindings is what the prompt is told of the dismissals.
+func dismissedFindings(dismissed []store.Dismissal) []review.DismissedFinding {
+	out := make([]review.DismissedFinding, len(dismissed))
+	for i, d := range dismissed {
+		out[i] = review.DismissedFinding{Finding: d.Finding, Reason: d.Reason}
+	}
+	return out
+}
+
+// dropDismissed leaves out the findings maintainers dismissed on the pull
+// request, should the model raise one again, and counts them. A dismissed
+// finding is not among the prior findings a raised one carries a
+// fingerprint on from, so it is also known by the path and title it was
+// dismissed under, which may not be the ones its fingerprint was made of.
+func dropDismissed(findings []review.Finding, dismissed []store.Dismissal) ([]review.Finding, int) {
+	if len(dismissed) == 0 {
+		return findings, 0
+	}
+	gone := make(map[string]bool, 2*len(dismissed))
+	for _, d := range dismissed {
+		gone[d.Fingerprint] = true
+		gone[review.Fingerprint(review.Finding{Path: d.Finding.Path, Title: d.Finding.Title})] = true
+	}
+	kept := slices.DeleteFunc(slices.Clone(findings), func(f review.Finding) bool { return gone[review.Fingerprint(f)] })
+	return kept, len(findings) - len(kept)
+}
+
+// carriedDiagram is the diagram a review's summary keeps: drawn, what
+// Parse kept of answer's, or prior when an incremental re-review's answer
+// has no diagram at all. The re-review is asked to keep or update the last
+// diagram, but it looks mostly at the commits since, and may not have been
+// shown the last one, so it may still leave out one that describes the
+// whole change. An empty diagram is its answer that the flow is gone, and
+// stands, as a full review's does whatever it is.
+func carriedDiagram(answer json.RawMessage, drawn, prior string, incremental bool) string {
+	if drawn != "" || !incremental {
+		return drawn
+	}
+	var a struct {
+		Summary struct {
+			Diagram *string `json:"diagram"`
+		} `json:"summary"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(answer)).Decode(&a); err != nil || a.Summary.Diagram != nil {
+		return drawn
+	}
+	return prior
 }
 
 // reviewFindings drops the bookkeeping from prior findings.
@@ -66,17 +157,17 @@ func reviewFindings(prior []priorFinding) []review.Finding {
 	return out
 }
 
-// alreadyInline reports, per finding, whether a prior finding with the
-// same fingerprint already has an inline comment on the forge, in which
-// case it is not posted again.
-func alreadyInline(findings []review.Finding, prior []priorFinding) []bool {
-	posted := map[string]bool{}
+// alreadyInline reports, per finding, the inline comment a prior finding
+// with the same fingerprint already has on the forge, in which case it is
+// not posted again and its thread carries on.
+func alreadyInline(findings []review.Finding, prior []priorFinding) []store.InlinePosted {
+	posted := map[string]store.InlinePosted{}
 	for _, p := range prior {
 		if p.postedInline {
-			posted[review.Fingerprint(p.Finding)] = true
+			posted[review.Fingerprint(p.Finding)] = store.InlinePosted{Posted: true, ID: p.commentID}
 		}
 	}
-	out := make([]bool, len(findings))
+	out := make([]store.InlinePosted, len(findings))
 	for i, f := range findings {
 		out[i] = posted[review.Fingerprint(f)]
 	}

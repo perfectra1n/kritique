@@ -8,49 +8,53 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/openai/openai-go/v3"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivertype"
 
+	"github.com/perfectra1n/kritique/internal/adapter"
 	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 	"github.com/perfectra1n/kritique/internal/executor"
 	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/gateway"
 	"github.com/perfectra1n/kritique/internal/gitfetch"
+	"github.com/perfectra1n/kritique/internal/gittest"
 	"github.com/perfectra1n/kritique/internal/ingest"
 	"github.com/perfectra1n/kritique/internal/jobs"
 	"github.com/perfectra1n/kritique/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/metrics"
 	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/review"
 	"github.com/perfectra1n/kritique/internal/runner"
 	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
 	"github.com/perfectra1n/kritique/internal/webhook"
 )
-
-func env(t *testing.T, key string) string {
-	t.Helper()
-	v := os.Getenv(key)
-	if v == "" {
-		t.Skipf("%s not set", key)
-	}
-	return v
-}
 
 const configYAML = `
 providers:
@@ -58,25 +62,24 @@ providers:
     type: openai
     baseUrl: http://unused.invalid/v1
     apiKey: { env: TEST_SECRET }
-defaults:
-  runner:
-    activeDeadlineSeconds: 60
-  models:
-    review: test/reviewer
-  limits:
-    concurrency: 1
-tenants:
-  - slug: onedr0p
-    installations:
-      - name: bot-ross
-        forge: github
-        account: onedr0p
-        app:
-          clientId: Iv1.x
-          privateKey: { env: TEST_PEM }
-          webhookSecret: { env: TEST_SECRET }
-    repositories:
-      - name: onedr0p/home-ops
+    retries: 1
+  other:
+    type: anthropic
+    baseUrl: http://unused.invalid
+    apiKey: { env: TEST_SECRET }
+review:
+  model: test/reviewer
+limits:
+  concurrency: 1
+embedding: { model: test/fake-embed, dims: 8 }
+apps:
+  bot-ross:
+    accounts: [onedr0p]
+    clientId: Iv1.x
+    privateKey: { env: TEST_PEM }
+    webhookSecret: { env: TEST_SECRET }
+repositories:
+  onedr0p/home-ops: {}
 `
 
 // localForge stands in for GitHub: the merge-base is known from the test
@@ -89,11 +92,48 @@ type localForge struct {
 	tip      string
 	comments map[int64]string
 	authors  map[int64]string
-	inline   []forge.InlineComment
-	status   string
+	// threads are the inline comments GetComment serves, by id.
+	threads map[int64]forge.Comment
+	inline  []forge.InlineComment
+	status  string
+	// onStatus, when set, runs once as a commit status is set.
+	onStatus func()
+	// approvals are the heads the bot's standing approvals cover, and
+	// dismissals how often they were withdrawn.
+	approvals  []string
+	dismissals int
 	// permissions by login; unknown logins have read access.
 	permissions map[string]forge.Permission
 	replies     []string
+	resolved    []int64
+	// reactions are the bot's reactions on comments, by comment id, and
+	// reacted every comment it has reacted to, in order.
+	reactions map[int64]string
+	reacted   []int64
+	// size is what PullRequest reports, none when it changes no files.
+	size forge.OpenPullRequest
+	// pullReactions are the bot's reactions on each pull request, by
+	// number and content.
+	pullReactions map[int]map[string]bool
+	// publishing, when set, runs once as a review writes its sticky
+	// comment, the first thing publishing does.
+	publishing func()
+}
+
+// onPublish runs fn once as the next review publishes.
+func (l *localForge) onPublish(fn func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.publishing = fn
+}
+
+// published takes the publishing hook; the caller runs it unlocked.
+func (l *localForge) published() func() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fn := l.publishing
+	l.publishing = nil
+	return fn
 }
 
 func (l *localForge) setBase(base string) {
@@ -108,14 +148,14 @@ func (l *localForge) setTip(tip string) {
 	l.tip = tip
 }
 
-func (l *localForge) MergeBase(context.Context, string, string, int, string, string) (string, error) {
+func (l *localForge) MergeBase(context.Context, string, string, string, string) (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.base, nil
 }
 
 // PullRequestDiff is the diff the runner would make of the same commits.
-func (l *localForge) PullRequestDiff(ctx context.Context, _, _ string, _ int, base, head string) (string, error) {
+func (l *localForge) PullRequestDiff(ctx context.Context, _, _, base, head string) (string, error) {
 	res, err := gitfetch.Run(ctx, gitfetch.Fetch{CloneURL: l.dir, Head: head, Base: base})
 	if err != nil {
 		return "", err
@@ -146,11 +186,16 @@ func (l *localForge) FileAt(_ context.Context, _, _, ref, path string) ([]byte, 
 	return []byte(content), err
 }
 
-func (l *localForge) CloneURL(string, string) string           { return l.dir }
-func (l *localForge) GitToken(context.Context) (string, error) { return "", nil }
+func (l *localForge) CloneURL(string, string) string { return l.dir }
+func (l *localForge) Issue(_ context.Context, _, _ string, number int) (forge.Issue, error) {
+	return forge.Issue{}, fmt.Errorf("issue %d: %w", number, fs.ErrNotExist)
+}
+func (l *localForge) GitToken(context.Context, string) (string, error) { return "", nil }
+func (l *localForge) BotLogin(context.Context) (string, error)         { return "kritique[bot]", nil }
 
-func (l *localForge) ReadGitToken(context.Context, string, string) (string, error) { return "", nil }
-func (l *localForge) BotLogin(context.Context) (string, error)                     { return "kritique[bot]", nil }
+func (l *localForge) CommitSubject(context.Context, string, string, string) (string, error) {
+	return "feat(x): the head commit", nil
+}
 
 func (l *localForge) BranchTip(context.Context, string, string, string) (string, string, error) {
 	l.mu.Lock()
@@ -210,6 +255,9 @@ func (l *localForge) FindComment(_ context.Context, _, _ string, _ int, _, marke
 }
 
 func (l *localForge) CreateComment(_ context.Context, _, _ string, _ int, body string) (int64, error) {
+	if fn := l.published(); fn != nil {
+		fn()
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.addComment("kritique[bot]", body), nil
@@ -230,11 +278,17 @@ func (l *localForge) addComment(author, body string) int64 {
 	return id
 }
 
-func (l *localForge) GetComment(_ context.Context, _, _ string, _ int, id int64, inline bool) (forge.Comment, error) {
+func (l *localForge) GetComment(_ context.Context, _, _ string, id int64, inline bool) (forge.Comment, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if inline {
+		if c, ok := l.threads[id]; ok {
+			return c, nil
+		}
+		return forge.Comment{}, fmt.Errorf("inline comment %d does not exist", id)
+	}
 	body, ok := l.comments[id]
-	if !ok || inline {
+	if !ok {
 		return forge.Comment{}, fmt.Errorf("comment %d does not exist", id)
 	}
 	return forge.Comment{ID: id, Author: l.authors[id], Body: body, CreatedAt: time.Unix(id-commentBase, 0)}, nil
@@ -264,6 +318,23 @@ func (l *localForge) Permission(_ context.Context, _, _, login string) (forge.Pe
 	return forge.PermissionRead, nil
 }
 
+func (l *localForge) PullRequest(context.Context, string, string, int) (forge.OpenPullRequest, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.size.ChangedFiles > 0 {
+		return l.size, nil
+	}
+	return forge.OpenPullRequest{}, fs.ErrNotExist
+}
+
+// setSize makes PullRequest report a pull request of size's lines and
+// files; the zero size reports none.
+func (l *localForge) setSize(size forge.OpenPullRequest) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.size = size
+}
+
 func (l *localForge) ListOpenPullRequests(context.Context, string, string, time.Time) ([]forge.OpenPullRequest, error) {
 	return nil, nil
 }
@@ -275,149 +346,250 @@ func (l *localForge) ReplyInline(_ context.Context, _, _ string, _ int, _ forge.
 	return int64(len(l.replies)), nil
 }
 
+func (l *localForge) React(_ context.Context, _, _ string, to forge.Comment, content string) (int64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.reactions == nil {
+		l.reactions = map[int64]string{}
+	}
+	l.reactions[to.ID] = content
+	l.reacted = append(l.reacted, to.ID)
+	return to.ID + 1, nil
+}
+
+func (l *localForge) Unreact(_ context.Context, _, _ string, from forge.Comment, id int64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if id != from.ID+1 {
+		return fmt.Errorf("reaction %d is not on comment %d", id, from.ID)
+	}
+	delete(l.reactions, from.ID)
+	return nil
+}
+
+func (l *localForge) ReactToPullRequest(_ context.Context, _, _ string, number int, content string) (int64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.pullReactions == nil {
+		l.pullReactions = map[int]map[string]bool{}
+	}
+	if l.pullReactions[number] == nil {
+		l.pullReactions[number] = map[string]bool{}
+	}
+	l.pullReactions[number][content] = true
+	return int64(number)*10 + reactionIndex(content), nil
+}
+
+func (l *localForge) UnreactToPullRequest(_ context.Context, _, _ string, number int, id int64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for content, on := range l.pullReactions[number] {
+		if on && id == int64(number)*10+reactionIndex(content) {
+			delete(l.pullReactions[number], content)
+			return nil
+		}
+	}
+	return fmt.Errorf("reaction %d is not on #%d", id, number)
+}
+
+// reactionIndex numbers the reactions the bot leaves, for their fake ids.
+func reactionIndex(content string) int64 {
+	if content == forge.ReactionEyes {
+		return 1
+	}
+	return 2
+}
+
+func (l *localForge) ResolveThread(_ context.Context, _, _ string, _ int, id int64, _ bool) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.resolved = append(l.resolved, id)
+	return true, nil
+}
+
 func (l *localForge) UpdateComment(_ context.Context, _, _ string, id int64, body string) error {
+	if fn := l.published(); fn != nil {
+		fn()
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if _, ok := l.comments[id]; !ok {
-		return fmt.Errorf("comment %d does not exist", id)
+		return fmt.Errorf("local forge: comment %d: %w", id, fs.ErrNotExist)
 	}
 	l.comments[id] = body
 	return nil
 }
 
-func (l *localForge) CreateReview(_ context.Context, _, _ string, _ int, _ string, comments []forge.InlineComment) error {
+// CreateReview numbers each comment by its place among every inline
+// comment posted, from 1001.
+func (l *localForge) CreateReview(_ context.Context, _, _ string, _ int, _ string, comments []forge.InlineComment) ([]int64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	ids := make([]int64, len(comments))
+	for i := range comments {
+		ids[i] = int64(1001 + len(l.inline) + i)
+	}
 	l.inline = append(l.inline, comments...)
-	return nil
+	return ids, nil
 }
 
-func (l *localForge) LineRanges() bool { return true }
+// Approve records the approved head; a head approved once stands.
+func (l *localForge) Approve(_ context.Context, _, _ string, _ int, headSHA, _ string) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if slices.Contains(l.approvals, headSHA) {
+		return false, nil
+	}
+	l.approvals = append(l.approvals, headSHA)
+	return true, nil
+}
+
+func (l *localForge) ChangesRequested(context.Context, string, string, int) (bool, error) {
+	return false, nil
+}
+
+func (l *localForge) DismissApprovals(context.Context, string, string, int, string) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := len(l.approvals)
+	l.approvals = nil
+	l.dismissals++
+	return n, nil
+}
 
 func (l *localForge) FileURL(owner, repo, sha, path string, line, _ int) string {
 	return fmt.Sprintf("local://%s/%s/%s/%s#L%d", owner, repo, sha, path, line)
 }
 
+func (l *localForge) CommitURL(owner, repo, sha string) string {
+	return fmt.Sprintf("local://%s/%s/commit/%s", owner, repo, sha)
+}
+
+func (l *localForge) ThreadURL(owner, repo string, number int, id int64) string {
+	return fmt.Sprintf("local://%s/%s/pull/%d#r%d", owner, repo, number, id)
+}
+
 func (l *localForge) SetStatus(_ context.Context, _, _, _ string, state forge.StatusState, desc string) error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.status = string(state) + ": " + desc
+	hook := l.onStatus
+	l.onStatus = nil
+	l.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return nil
 }
 
-// Issue, RepoLabels, AddLabels, RemoveLabel, SetState, AddAssignees,
-// RequestReviewers, and SearchIssues below are unused, no-op stubs: the
-// review-integration tests in this file never exercise issue triage, but
-// localForge must still satisfy forge.Client.
-func (l *localForge) Issue(context.Context, string, string, int) (forge.Issue, error) {
-	return forge.Issue{}, nil
-}
-
-func (l *localForge) RepoLabels(context.Context, string, string) ([]string, error) {
-	return nil, nil
-}
-
-func (l *localForge) AddLabels(context.Context, string, string, int, []string) error {
-	return nil
-}
-
-func (l *localForge) RemoveLabel(context.Context, string, string, int, string) error {
-	return nil
-}
-
-func (l *localForge) SetState(context.Context, string, string, int, bool) error {
-	return nil
-}
-
-func (l *localForge) AddAssignees(context.Context, string, string, int, []string) error {
-	return nil
-}
-
-func (l *localForge) RequestReviewers(context.Context, string, string, int, []string) error {
-	return nil
-}
-
-func (l *localForge) SearchIssues(context.Context, string, string, string, int) ([]forge.Issue, error) {
-	return nil, nil
-}
-
-// fakeCompleter answers a review with one finding on the first added line
-// of main.go and one that cannot be anchored, and a follow-up with a fixed
-// reply, as the forced tool call a model.Structured makes.
+// fakeCompleter answers a review's first step by submitting one finding on
+// the first added line of main.go and one that cannot be anchored, a
+// follow-up's with a fixed reply, and a confidence call with a full score,
+// as the forced tool call a model.Structured makes.
 type fakeCompleter struct {
-	mu      sync.Mutex
-	calls   int
-	users   []string
-	systems []string
-	block   bool
-	started chan struct{}
-	// answered, if set, runs once a review/findings call has its answer and
-	// before Complete returns it.
-	answered func(ctx context.Context)
+	mu       sync.Mutex
+	calls    int
+	users    []string
+	systems  []string
+	sessions []string
+	efforts  []model.Effort
+	// diagram, when set, is the summary diagram a review submits.
+	diagram string
+	// extra, when set, is one more finding a review submits, as JSON.
+	extra string
+	// again, when set, replaces the first finding's line and title: the
+	// JSON fields a review that reports it again, in other words or
+	// elsewhere, writes instead.
+	again string
+	// scoreFails is how many confidence calls still fail with a 503 before
+	// one is answered; a failed call is not recorded as made.
+	scoreFails int
 }
 
-func (f *fakeCompleter) setAnswered(fn func(ctx context.Context)) {
+// failScore has the next n confidence calls fail in a way a retry gets
+// past.
+func (f *fakeCompleter) failScore(n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.answered = fn
+	f.scoreFails = n
 }
 
-// setBlock arms or disarms blocking the review/findings model call (never
-// the follow-up "reply" call) inside Step until the caller's ctx is done, so
-// a test can cancel a review while it is mid-publish. started, if non-nil,
-// receives a signal once a blocked call is actually in progress.
-func (f *fakeCompleter) setBlock(b bool) {
+// draw sets the summary diagram the reviews that follow submit, "" for
+// none.
+func (f *fakeCompleter) draw(diagram string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.block = b
+	f.diagram = diagram
 }
 
-func (f *fakeCompleter) Step(ctx context.Context, req model.StepRequest) (model.StepResponse, error) {
+// find sets one more finding the reviews that follow submit, as JSON, ""
+// for none.
+func (f *fakeCompleter) find(extra string) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.extra = extra
+}
+
+// reword sets the JSON fields the reviews that follow write in place of
+// the first finding's line and title, "" for them as they are.
+func (f *fakeCompleter) reword(again string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.again = again
+}
+
+func (f *fakeCompleter) Step(_ context.Context, req model.StepRequest) (model.StepResponse, error) {
+	// An agent is offered its read-only tools too; it submits at once.
+	tool := req.Tools[0].Name
+	for _, t := range req.Tools {
+		if t.Name == "submit_review" || t.Name == review.SubmitReply {
+			tool = t.Name
+		}
+	}
+	f.mu.Lock()
+	if tool == "confidence" && f.scoreFails > 0 {
+		f.scoreFails--
+		f.mu.Unlock()
+		return model.StepResponse{}, &openai.Error{StatusCode: http.StatusServiceUnavailable}
+	}
 	f.calls++
 	f.users = append(f.users, req.Messages[0].Text)
 	f.systems = append(f.systems, req.System)
-	isReply := req.Tools[0].Name == "reply"
-	block := f.block && !isReply
-	started := f.started
-	answered := f.answered
-	f.mu.Unlock()
-	if block {
-		if started != nil {
-			select {
-			case started <- struct{}{}:
-			case <-ctx.Done():
-			}
-		}
-		<-ctx.Done()
-		return model.StepResponse{}, context.Cause(ctx)
+	f.sessions = append(f.sessions, req.Session)
+	f.efforts = append(f.efforts, req.Effort)
+	var diagram, extra string
+	if f.diagram != "" {
+		diagram = `,"diagram":` + strconv.Quote(f.diagram)
 	}
+	if f.extra != "" {
+		extra = "," + f.extra
+	}
+	first := `"line":1,"title":"first line"`
+	if f.again != "" {
+		first = f.again
+	}
+	f.mu.Unlock()
 	answer := func(raw string, usage model.Usage, upstream string, cost float64) model.StepResponse {
 		return model.StepResponse{
-			ToolCalls: []model.ToolCall{{ID: "call", Name: req.Tools[0].Name, Input: json.RawMessage(raw)}}, Stop: model.StopToolUse,
+			ToolCalls: []model.ToolCall{{ID: "call", Name: tool, Input: json.RawMessage(raw)}}, Stop: model.StopToolUse,
 			Usage: usage, Model: req.Model, Upstream: upstream, CostUSD: cost,
 		}
 	}
-	if isReply {
+	if tool == review.SubmitReply {
 		return answer(`{"reply":"Because b is new."}`, model.Usage{Input: 20, Output: 5}, "", 0), nil
 	}
-	resp := answer(`{"summary":{"take":"Changes main.go.","praise":["Small and focused"]},"findings":[
-		  {"path":"main.go","line":1,"severity":"important","title":"first line","explanation":"look here","suggested_fix":"do this"},
-		  {"path":"main.go","line":500,"severity":"blocking","title":"off the diff","explanation":"dropped"}]}`,
-		model.Usage{Input: 10, Output: 5}, "test", 0.001)
-	if answered != nil {
-		answered(ctx)
+	if tool == "confidence" {
+		return answer(`{"score":5,"risk":"medium","reason":"Nothing else stands out."}`, model.Usage{Input: 30, Output: 6}, "test", 0.002), nil
 	}
-	return resp, nil
+	return answer(`{"summary":{"take":"Changes main.go.","praise":["Small and focused"],"checked":["main.go: package clause read"]`+diagram+`},"findings":[
+		  {"path":"main.go",`+first+`,"severity":"important","category":"correctness","explanation":"look here","suggested_fix":"do this",
+		   "rules":["no-panics","sql-placeholders"]},
+		  {"path":"main.go","line":500,"severity":"blocking","category":"correctness","title":"off the diff","explanation":"dropped"}`+extra+`]}`,
+		model.Usage{Input: 10, Output: 5}, "test", 0.001), nil
 }
-
-type completers struct{ c model.Stepper }
-
-func (c *completers) Stepper(*configfile.File, string) (model.Stepper, error) { return c.c, nil }
 
 type forges struct{ f forge.Client }
 
-func (f *forges) For(context.Context, *configfile.Installation, int64, string) (forge.Client, error) {
+func (f *forges) For(context.Context, *configfile.Connection, string) (forge.Client, error) {
 	return f.f, nil
 }
 
@@ -429,10 +601,7 @@ func testRepo(t *testing.T) (dir, base, head string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A depth-one fetch of a bare SHA needs the server to allow it. Real git
-	// serves a local path and only advertises the capability when told to,
-	// which is also what GitHub, GitLab and Forgejo do server-side.
-	allowSHAFetch(t, r)
+	gittest.Unsigned(t, r)
 	wt, _ := r.Worktree()
 	commit := func(name, content, msg string) string {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
@@ -446,6 +615,7 @@ func testRepo(t *testing.T) (dir, base, head string) {
 		return h.String()
 	}
 	commit("other.go", "package main\n\nfunc c() {}\n", "other")
+	commit("AGENTS.md", "Keep functions small.\n", "agents")
 	base = commit("main.go", "package main\n", "base")
 	head = commit("main.go", "package main\n\nfunc b() {}\n", "head")
 	// checkActions later resets the branch back to base and commits again to
@@ -468,13 +638,15 @@ func checkWriteBack(t *testing.T, lf *localForge, fc *fakeCompleter) {
 	lf.mu.Unlock()
 	sticky := comments[commentBase+1]
 	if len(comments) != 1 || !strings.HasPrefix(sticky, "<!-- kritique:pr-1 -->\n") ||
-		!strings.Contains(sticky, "- **[important]** [`main.go:1`](local://onedr0p/home-ops/") ||
-		!strings.Contains(sticky, "/main.go#L1) first line") || !strings.Contains(sticky, "**1 finding** · 0 blocking · 1 important · 0 nit") ||
-		!strings.Contains(sticky, "- Small and focused") || !strings.Contains(sticky, "_1 finding(s) were dropped (unanchored: 1)._") {
+		!strings.Contains(sticky, "- **[important · correctness]** [`main.go:1`](local://onedr0p/home-ops/") ||
+		!strings.Contains(sticky, "/main.go#L1) [first line](local://onedr0p/home-ops/pull/1#r1001)") ||
+		!strings.Contains(sticky, "**2 findings** · 1 blocking · 1 important\n") || strings.Contains(sticky, "What's good") ||
+		!strings.Contains(sticky, "**Outside the diff**\n\n- **[blocking · correctness]** `main.go:500` off the diff\n\n  dropped\n") ||
+		strings.Contains(sticky, "were dropped") {
 		t.Fatalf("comments = %v", comments)
 	}
-	if len(inline) != 1 || inline[0].Line != 1 || !strings.Contains(inline[0].Body, "**[important]** **first line**") ||
-		!strings.Contains(inline[0].Body, "do this") || forgeStatus != "success: kritique: 1 finding(s)" {
+	if len(inline) != 1 || inline[0].Line != 1 || !strings.Contains(inline[0].Body, "**[important · correctness]** **first line**") ||
+		!strings.Contains(inline[0].Body, "do this") || forgeStatus != "success: kritique: 2 finding(s)" {
 		t.Fatalf("inline = %+v status = %q", inline, forgeStatus)
 	}
 	fc.mu.Lock()
@@ -492,13 +664,14 @@ func checkWriteBack(t *testing.T, lf *localForge, fc *fakeCompleter) {
 
 // checkReviewRows asserts the findings, usage, lease and model rows a
 // completed review leaves behind.
-func checkReviewRows(ctx context.Context, t *testing.T, st *store.Store, tenantID, head string) {
+func checkReviewRows(ctx context.Context, t *testing.T, st *store.Store, accountID, head string) {
 	t.Helper()
 	var findings, usage, leasesHeld int
 	var modelName, take, explanation, fix, fingerprint string
 	var tokens int64
-	err := st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT count(*), min(explanation), min(suggested_fix), min(fingerprint) FROM findings`).
+	err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*), min(explanation) FILTER (WHERE posted_inline),
+			min(suggested_fix) FILTER (WHERE posted_inline), min(fingerprint) FILTER (WHERE posted_inline) FROM findings`).
 			Scan(&findings, &explanation, &fix, &fingerprint); err != nil {
 			return err
 		}
@@ -513,9 +686,10 @@ func checkReviewRows(ctx context.Context, t *testing.T, st *store.Store, tenantI
 		}
 		return tx.QueryRow(ctx, `SELECT model FROM reviews WHERE head_sha = $1`, head).Scan(&modelName)
 	})
-	// Two usage rows for the review: the completion and the stage 4
-	// embedding; index runs add their own.
-	if err != nil || findings != 1 || usage < 2 || tokens < 15 || leasesHeld != 0 || modelName != "reviewer" {
+	// The finding off the diff is recorded beside the posted one. Two usage
+	// rows for the review: the completion and the stage 4 embedding; index
+	// runs add their own.
+	if err != nil || findings != 2 || usage < 2 || tokens < 15 || leasesHeld != 0 || modelName != "reviewer" {
 		t.Fatalf("rows: err=%v findings=%d usage=%d tokens=%d leases=%d model=%s", err, findings, usage, tokens, leasesHeld, modelName)
 	}
 	wantPrint := review.Fingerprint(review.Finding{Path: "main.go", Title: "first line"})
@@ -532,7 +706,7 @@ func checkReviewRows(ctx context.Context, t *testing.T, st *store.Store, tenantI
 func checkContextPack(
 	ctx context.Context, t *testing.T, appStore *store.Store, lf *localForge, fc *fakeCompleter,
 	dispatch func(headSHA string, bot bool), waitReview func(headSHA string) (status, patchID, mergeBase string),
-	tenantID, head, base string,
+	accountID, head, base string,
 ) {
 	t.Helper()
 	dispatch(head, true)
@@ -540,22 +714,31 @@ func checkContextPack(
 	if status != "completed" || patchID == "" || mergeBase != base {
 		t.Fatalf("status=%s patch=%s base=%s", status, patchID, mergeBase)
 	}
+	// The pull request carried the bot's eyes while the review ran, and
+	// carries its thumbs up now that one is posted.
+	waitFor(t, 5*time.Second, "the pull request to be marked as reviewed", func() bool {
+		lf.mu.Lock()
+		defer lf.mu.Unlock()
+		on := lf.pullReactions[1]
+		return on != nil && !on[forge.ReactionEyes] && on[forge.ReactionDone]
+	})
 	checkWriteBack(t, lf, fc)
-	checkReviewRows(ctx, t, appStore, tenantID, head)
-	checkSingleShotTranscript(ctx, t, appStore, tenantID, head, fc)
+	checkReviewRows(ctx, t, appStore, accountID, head)
+	checkReviewTranscript(ctx, t, appStore, accountID, head, fc)
 	var diff, phase, logTail, stages string
 	var changed []string
 	var heartbeat bool
-	err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT c.diff, c.changed_paths, c.stages::text, r.phase, r.log_tail, r.heartbeat_at IS NOT NULL FROM context_packs c
 			JOIN runner_runs r ON r.id = c.runner_run_id WHERE c.head_sha = $1`, head).Scan(&diff, &changed, &stages, &phase, &logTail, &heartbeat)
 	})
 	if err != nil || phase != "done" || len(changed) != 1 || changed[0] != "main.go" || logTail == "" || !heartbeat {
 		t.Fatalf("pack: err=%v phase=%s changed=%v log=%q heartbeat=%v", err, phase, changed, logTail, heartbeat)
 	}
-	// The whole three-line file is shown by the diff, so the pack is an
-	// empty array rather than the pre-context '{}' default.
-	if stages != "[]" {
+	// The whole three-line file is shown by the diff, so stages 1 to 3
+	// give nothing; the index built earlier gives stage 4, which the pack
+	// records too.
+	if !strings.HasPrefix(stages, "[{") || strings.Count(stages, `"stage": "similar"`) != strings.Count(stages, `"stage"`) {
 		t.Fatalf("stages = %s", stages)
 	}
 	if diff == "" {
@@ -568,7 +751,7 @@ func checkContextPack(
 // joins the running job, which indexes head incrementally once the build
 // is done; it checks the generation, chunk and staging rows after each.
 func checkIndexing(
-	ctx context.Context, t *testing.T, st *store.Store, queue *river.Client[pgx.Tx], lf *localForge, exec *gateExecutor, tenantID, repoID, base, head string,
+	ctx context.Context, t *testing.T, st *store.Store, queue *river.Client[pgx.Tx], lf *localForge, exec *gateExecutor, accountID, repoID, base, head string,
 ) {
 	t.Helper()
 	waitIndex := func(commit string) (status, mode string) {
@@ -579,7 +762,7 @@ func checkIndexing(
 			// before its own row finishes, so only read once no run to the
 			// commit is running; the newest finished row is then the step
 			// itself.
-			err := st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+			err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 				return tx.QueryRow(ctx, `SELECT status, mode FROM index_runs WHERE commit_sha = $1 AND finished_at IS NOT NULL
 					AND NOT EXISTS (SELECT 1 FROM index_runs WHERE status = 'running' AND commit_sha = $1)
 					ORDER BY created_at DESC LIMIT 1`, commit).Scan(&status, &mode)
@@ -592,7 +775,7 @@ func checkIndexing(
 		// Say why: the job's recorded errors and the run rows.
 		var errs, runs string
 		_ = st.App().QueryRow(ctx, `SELECT coalesce(string_agg(e->>'error', ' | '), '') FROM river_job j, jsonb_array_elements(j.errors) e WHERE j.kind = 'index'`).Scan(&errs)
-		_ = st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		_ = st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT coalesce(string_agg(status || '/' || mode || ' ' || error, ' | '), '') FROM index_runs`).Scan(&runs)
 		})
 		t.Fatalf("index of %s never finished; job errors: %s; runs: %s", commit[:7], errs, runs)
@@ -601,7 +784,7 @@ func checkIndexing(
 	// stray counts the chunks outside the active generation.
 	indexRows := func() (active, activeCommit string, chunks, stray int, mainChunks []string) {
 		t.Helper()
-		err := st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			if err := tx.QueryRow(ctx, `SELECT coalesce(r.active_index_run_id::text, ''), coalesce(g.commit_sha, '') FROM repositories r
 				LEFT JOIN index_runs g ON g.id = r.active_index_run_id WHERE r.id = $1`, repoID).Scan(&active, &activeCommit); err != nil {
 				return err
@@ -622,9 +805,9 @@ func checkIndexing(
 		}
 		return active, activeCommit, chunks, stray, mainChunks
 	}
-	pushed, checked := pushDuringBuild(ctx, t, queue, lf, exec, tenantID, repoID, head)
+	pushed, checked := pushDuringBuild(ctx, t, queue, lf, exec, accountID, repoID, head)
 	lf.setTip(base)
-	job, err := queue.Insert(ctx, jobs.IndexArgs{TenantID: tenantID, RepositoryID: repoID, Trigger: jobs.TriggerOnboard}, nil)
+	job, err := queue.Insert(ctx, jobs.IndexArgs{AccountID: accountID, RepositoryID: repoID, Trigger: jobs.TriggerOnboard}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -645,7 +828,7 @@ func checkIndexing(
 	active2, activeCommit, chunks, stray, mainChunks := indexRows()
 	if active2 != active || activeCommit != head || chunks < 2 || stray != 0 || !strings.Contains(strings.Join(mainChunks, ""), "func b") {
 		var packs, logs string
-		_ = st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		_ = st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			_ = tx.QueryRow(ctx, `SELECT string_agg(mode || ':' || array_to_string(changed_paths, ','), ' | ') FROM index_packs`).Scan(&packs)
 			return tx.QueryRow(ctx, `SELECT string_agg(right(log_tail, 600), ' || ') FROM runner_runs WHERE kind = 'index'`).Scan(&logs)
 		})
@@ -653,7 +836,7 @@ func checkIndexing(
 			active2, active, activeCommit, chunks, stray, mainChunks, packs, logs)
 	}
 	var staged int
-	_ = st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	_ = st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT count(*) FROM index_staging`).Scan(&staged)
 	})
 	if staged != 0 {
@@ -680,7 +863,7 @@ func checkIndexing(
 // result it sends on pushed; the second, the incremental step to head,
 // waits until checked closes, so the full build's rows can be read first.
 func pushDuringBuild(
-	ctx context.Context, t *testing.T, queue *river.Client[pgx.Tx], lf *localForge, exec *gateExecutor, tenantID, repoID, head string,
+	ctx context.Context, t *testing.T, queue *river.Client[pgx.Tx], lf *localForge, exec *gateExecutor, accountID, repoID, head string,
 ) (pushed <-chan error, checked chan struct{}) {
 	t.Helper()
 	var runs atomic.Int32
@@ -690,7 +873,7 @@ func pushDuringBuild(
 		switch runs.Add(1) {
 		case 1:
 			lf.setTip(head)
-			res, err := queue.Insert(ctx, jobs.IndexArgs{TenantID: tenantID, RepositoryID: repoID, CommitSHA: head, Trigger: jobs.TriggerPush}, nil)
+			res, err := queue.Insert(ctx, jobs.IndexArgs{AccountID: accountID, RepositoryID: repoID, CommitSHA: head, Trigger: jobs.TriggerPush}, nil)
 			if err == nil && !res.UniqueSkippedAsDuplicate {
 				err = errors.New("a push while the repository indexed queued a second job")
 			}
@@ -713,13 +896,13 @@ func pushDuringBuild(
 // cancels the third. It also checks the job drops the chunks a build killed
 // long before left behind, but not those of a build that may still be
 // running beside it.
-func checkIndexRetry(ctx context.Context, t *testing.T, st *store.Store, queue *river.Client[pgx.Tx], exec *gateExecutor, tenantID, repoID string) {
+func checkIndexRetry(ctx context.Context, t *testing.T, st *store.Store, queue *river.Client[pgx.Tx], exec *gateExecutor, accountID, repoID string) {
 	t.Helper()
-	killed := plantBuild(ctx, t, st, tenantID, repoID, jobtimeout.RescueStuckJobsAfter+time.Minute)
-	running := plantBuild(ctx, t, st, tenantID, repoID, 0)
+	killed := plantBuild(ctx, t, st, accountID, repoID, jobtimeout.RescueStuckJobsAfter+time.Minute)
+	running := plantBuild(ctx, t, st, accountID, repoID, 0)
 	exec.setBeforeIndex(func() error { return errors.New("node went away") })
 	t.Cleanup(func() { exec.setBeforeIndex(nil) })
-	job, err := queue.Insert(ctx, jobs.IndexArgs{TenantID: tenantID, RepositoryID: repoID, Trigger: jobs.TriggerReindex, Full: true}, nil)
+	job, err := queue.Insert(ctx, jobs.IndexArgs{AccountID: accountID, RepositoryID: repoID, Trigger: jobs.TriggerReindex, Full: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -736,16 +919,16 @@ func checkIndexRetry(ctx context.Context, t *testing.T, st *store.Store, queue *
 	if attempt != 2 || maxAttempts != 3 {
 		t.Fatalf("failed index job: retryable after attempt %d of %d, want 2 of 3", attempt, maxAttempts)
 	}
-	if err := st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	if err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT count(*) FROM index_runs WHERE repository_id = $1 AND status = 'failed' AND error LIKE '%node went away%'`, repoID).
 			Scan(&failed)
 	}); err != nil || failed != 2 {
 		t.Fatalf("failed index runs = %d, %v; want one per attempt, with the runner's error", failed, err)
 	}
-	if n := runChunks(ctx, t, st, tenantID, killed); n != 0 {
+	if n := runChunks(ctx, t, st, accountID, killed); n != 0 {
 		t.Fatalf("a killed build's %d chunks were left behind", n)
 	}
-	if runChunks(ctx, t, st, tenantID, running) == 0 {
+	if runChunks(ctx, t, st, accountID, running) == 0 {
 		t.Fatal("a build that may still be running lost its chunks")
 	}
 }
@@ -753,18 +936,18 @@ func checkIndexRetry(ctx context.Context, t *testing.T, st *store.Store, queue *
 // plantBuild leaves chunks under an unfinished index run started age ago,
 // as a job killed mid-build or one still embedding would, and returns the
 // run's id. The run goes when the test ends.
-func plantBuild(ctx context.Context, t *testing.T, st *store.Store, tenantID, repoID string, age time.Duration) string {
+func plantBuild(ctx context.Context, t *testing.T, st *store.Store, accountID, repoID string, age time.Duration) string {
 	t.Helper()
 	var runID string
 	var planted int64
-	err := st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `INSERT INTO index_runs (tenant_id, repository_id, commit_sha, embed_model, embed_dims, mode, status, created_at)
+	err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `INSERT INTO index_runs (account_id, repository_id, commit_sha, embed_model, embed_dims, mode, status, created_at)
 			VALUES ($1, $2, 'unfinished', 'fake-embed', 8, 'full', 'running', now() - make_interval(secs => $3)) RETURNING id`,
-			tenantID, repoID, age.Seconds()).Scan(&runID); err != nil {
+			accountID, repoID, age.Seconds()).Scan(&runID); err != nil {
 			return err
 		}
-		tag, err := tx.Exec(ctx, `INSERT INTO index_chunks (tenant_id, repository_id, index_run_id, path, start_line, end_line, text, embedding)
-			SELECT tenant_id, repository_id, $2, path, start_line, end_line, text, embedding FROM index_chunks
+		tag, err := tx.Exec(ctx, `INSERT INTO index_chunks (account_id, repository_id, index_run_id, path, start_line, end_line, text, embedding)
+			SELECT account_id, repository_id, $2, path, start_line, end_line, text, embedding FROM index_chunks
 			WHERE index_run_id = (SELECT active_index_run_id FROM repositories WHERE id = $1)`, repoID, runID)
 		planted = tag.RowsAffected()
 		return err
@@ -773,7 +956,7 @@ func plantBuild(ctx context.Context, t *testing.T, st *store.Store, tenantID, re
 		t.Fatalf("plant an unfinished build's chunks: %d, %v", planted, err)
 	}
 	t.Cleanup(func() {
-		_ = st.WithTenant(context.Background(), tenantID, func(tx pgx.Tx) error {
+		_ = st.WithAccount(context.Background(), accountID, func(tx pgx.Tx) error {
 			_, err := tx.Exec(context.Background(), `DELETE FROM index_runs WHERE id = $1`, runID)
 			return err
 		})
@@ -782,10 +965,10 @@ func plantBuild(ctx context.Context, t *testing.T, st *store.Store, tenantID, re
 }
 
 // runChunks counts the chunks under an index run.
-func runChunks(ctx context.Context, t *testing.T, st *store.Store, tenantID, runID string) int {
+func runChunks(ctx context.Context, t *testing.T, st *store.Store, accountID, runID string) int {
 	t.Helper()
 	var n int
-	if err := st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	if err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT count(*) FROM index_chunks WHERE index_run_id = $1`, runID).Scan(&n)
 	}); err != nil {
 		t.Fatal(err)
@@ -797,14 +980,14 @@ func runChunks(ctx context.Context, t *testing.T, st *store.Store, tenantID, run
 // batch and checks neither the chunks its runner staged nor the ones it
 // embedded are left behind for good, and the live index is untouched.
 func checkIndexEmbedFailure(
-	ctx context.Context, t *testing.T, st *store.Store, queue *river.Client[pgx.Tx], fe *fakeEmbedder, tenantID, repoID string,
+	ctx context.Context, t *testing.T, st *store.Store, queue *river.Client[pgx.Tx], fe *fakeEmbedder, accountID, repoID string,
 ) {
 	t.Helper()
-	active := activeIndexGeneration(ctx, t, st, tenantID, repoID)
-	live := runChunks(ctx, t, st, tenantID, active)
+	active := activeIndexGeneration(ctx, t, st, accountID, repoID)
+	live := runChunks(ctx, t, st, accountID, active)
 	fe.passes.Store(1)
 	fe.fail.Store(true)
-	job, err := queue.Insert(ctx, jobs.IndexArgs{TenantID: tenantID, RepositoryID: repoID, Trigger: jobs.TriggerReindex, Full: true}, nil)
+	job, err := queue.Insert(ctx, jobs.IndexArgs{AccountID: accountID, RepositoryID: repoID, Trigger: jobs.TriggerReindex, Full: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -814,7 +997,7 @@ func checkIndexEmbedFailure(
 	})
 	var packed, staged, embedded int
 	waitFor(t, 20*time.Second, "the failed embedding's staged and embedded chunks to be cleared", func() bool {
-		err := st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT p.chunk_count, (SELECT count(*) FROM index_staging s WHERE s.runner_run_id = r.id),
 				(SELECT count(*) FROM index_chunks c WHERE c.index_run_id = i.id)
 				FROM index_runs i JOIN runner_runs r ON r.index_run_id = i.id JOIN index_packs p ON p.runner_run_id = r.id
@@ -834,18 +1017,52 @@ func checkIndexEmbedFailure(
 	if packed < 2 {
 		t.Fatalf("the runner staged %d chunks, too few for a batch to be written before the failure", packed)
 	}
-	if now := activeIndexGeneration(ctx, t, st, tenantID, repoID); now != active || runChunks(ctx, t, st, tenantID, active) != live {
+	if now := activeIndexGeneration(ctx, t, st, accountID, repoID); now != active || runChunks(ctx, t, st, accountID, active) != live {
 		t.Fatalf("the failed rebuild changed the live index: generation %s, was %s", now, active)
 	}
 }
 
-// checkFollowUps posts mentions as the forge would deliver them and checks
-// qualification, the reply, the thread in the prompt, and the rate limit.
-func checkFollowUps(
-	ctx context.Context, t *testing.T, st *store.Store, svc *ingest.Service, lf *localForge, fc *fakeCompleter, req ingest.Request, tenantID string,
-) {
+// checkOtherReviewRunning: with every review of pull request 1 finished,
+// none is running beside any other; a running one is, except beside
+// itself.
+func checkOtherReviewRunning(ctx context.Context, t *testing.T, b *Base, accountID string) {
 	t.Helper()
-	mention := func(author, body string) int64 {
+	logger := slog.New(slog.DiscardHandler)
+	var prID, running string
+	err := b.Store.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT id FROM pull_requests WHERE number = 1`).Scan(&prID); err != nil {
+			return err
+		}
+		if b.otherReviewRunning(ctx, logger, accountID, prID, "") {
+			return errors.New("a finished review counts as running")
+		}
+		if err := tx.QueryRow(ctx, `INSERT INTO reviews (account_id, pull_request_id, head_sha, status) VALUES ($1, $2, 'other', 'running')
+			RETURNING id`, accountID, prID).Scan(&running); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = b.Store.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `DELETE FROM reviews WHERE id = $1`, running)
+			return err
+		})
+	}()
+	if !b.otherReviewRunning(ctx, logger, accountID, prID, "") || b.otherReviewRunning(ctx, logger, accountID, prID, running) {
+		t.Fatal("a running review counts beside another and not beside itself")
+	}
+}
+
+// followUpHelpers post a mention on pull request 1 as the forge would
+// deliver it, wait for its follow-up's status and reason, and read the
+// last comment on the pull request.
+func followUpHelpers(
+	ctx context.Context, t *testing.T, st *store.Store, svc *ingest.Service, lf *localForge, req ingest.Request, accountID string,
+) (mention func(author, body string) int64, waitFollowUp func(id int64) (string, string), lastComment func() (int, string)) {
+	mention = func(author, body string) int64 {
 		t.Helper()
 		lf.mu.Lock()
 		id := lf.addComment(author, body)
@@ -861,11 +1078,11 @@ func checkFollowUps(
 		}
 		return id
 	}
-	waitFollowUp := func(id int64) (status, reason string) {
+	waitFollowUp = func(id int64) (status, reason string) {
 		t.Helper()
 		deadline := time.Now().Add(20 * time.Second)
 		for time.Now().Before(deadline) {
-			err := st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+			err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 				return tx.QueryRow(ctx, `SELECT status, reason FROM followups WHERE comment_id = $1`, id).Scan(&status, &reason)
 			})
 			if err == nil {
@@ -876,12 +1093,21 @@ func checkFollowUps(
 		t.Fatalf("follow-up for comment %d never recorded", id)
 		return "", ""
 	}
-	lastComment := func() (int, string) {
+	lastComment = func() (int, string) {
 		lf.mu.Lock()
 		defer lf.mu.Unlock()
 		return len(lf.comments), lf.comments[commentBase+int64(len(lf.comments))]
 	}
+	return mention, waitFollowUp, lastComment
+}
 
+// checkFollowUps posts mentions as the forge would deliver them and checks
+// qualification, the reply, the thread in the prompt, and the rate limit.
+func checkFollowUps(
+	ctx context.Context, t *testing.T, st *store.Store, svc *ingest.Service, lf *localForge, fc *fakeCompleter, req ingest.Request, accountID string,
+) {
+	t.Helper()
+	mention, waitFollowUp, lastComment := followUpHelpers(ctx, t, st, svc, lf, req, accountID)
 	id := mention("onedr0p", "@kritique why is b here?")
 	if status, reason := waitFollowUp(id); status != "answered" {
 		t.Fatalf("status = %s (%s), want answered", status, reason)
@@ -889,26 +1115,52 @@ func checkFollowUps(
 	if _, body := lastComment(); !strings.Contains(body, "Because b is new.") || !strings.Contains(body, "kritique follow-up with reviewer") {
 		t.Fatalf("reply = %q", body)
 	}
-	checkFollowUpTranscript(ctx, t, st, tenantID, id, fc)
+	checkFollowUpTranscript(ctx, t, st, accountID, id, fc)
 	fc.mu.Lock()
-	prompt := fc.users[len(fc.users)-1]
+	prompt, system, session := fc.users[len(fc.users)-1], fc.systems[len(fc.systems)-1], fc.sessions[len(fc.sessions)-1]
 	fc.mu.Unlock()
+	if want := fmt.Sprintf("followup-%d", id); session != want {
+		t.Fatalf("follow-up session = %q, want %q: the mention is the conversation", session, want)
+	}
+	// The agent is offered a review's tools; how it answers, submit_reply's
+	// description says.
+	if strings.Contains(system, "submit_reply") || !strings.Contains(system, "read_file, grep and list_files") {
+		t.Fatalf("follow-up system prompt lacks its tools:\n%s", system)
+	}
+	// The root's AGENTS.md, as the review's runner read it.
+	if !strings.Contains(system, "\n\n## Repository instructions\n\n") || !strings.HasSuffix(system, "\n\nKeep functions small.") {
+		t.Fatalf("follow-up system prompt lacks AGENTS.md:\n%s", system)
+	}
 	for _, want := range []string{"Thread, oldest first", "<!-- kritique:pr-1 -->", "--- onedr0p", "[answer this]", "diff --git a/main.go", "Findings kritique posted", "main.go:1 [important] first line: look here", "<description>\nAdds b.\n</description>"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("follow-up prompt missing %q:\n%s", want, prompt)
 		}
 	}
 	var replyID int64
-	_ = st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	_ = st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT reply_comment_id FROM followups WHERE comment_id = $1`, id).Scan(&replyID)
 	})
 	if replyID <= commentBase {
 		t.Fatalf("reply id %d not recorded as a bigint", replyID)
 	}
+	checkFollowUpRun(ctx, t, st, accountID, id)
+	// The mention carried the bot's eyes while its agent worked, and carries
+	// the thumbs up once the reply is up.
+	waitFor(t, 5*time.Second, "the answered mention to be marked as answered", func() bool {
+		lf.mu.Lock()
+		defer lf.mu.Unlock()
+		return slices.Contains(lf.reacted, id) && lf.reactions[id] == forge.ReactionDone
+	})
 
 	id = mention("outsider", "@kritique and me?")
 	if status, reason := waitFollowUp(id); status != "ignored" || !strings.Contains(reason, "write is required") {
 		t.Fatalf("outsider: status = %s (%s)", status, reason)
+	}
+	lf.mu.Lock()
+	marked := slices.Contains(lf.reacted, id)
+	lf.mu.Unlock()
+	if marked {
+		t.Fatal("a mention that is not answered was marked as being answered")
 	}
 	id = mention("onedr0p", "no mention here @someoneelse")
 	if status, reason := waitFollowUp(id); status != "ignored" || !strings.Contains(reason, "does not mention") {
@@ -917,10 +1169,10 @@ func checkFollowUps(
 
 	// Four more answers exhaust the hourly allowance; the next mention gets
 	// one notice, the one after that nothing new.
-	err := st.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO followups (tenant_id, pull_request_id, comment_id, status)
+	err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO followups (account_id, pull_request_id, comment_id, status)
 			SELECT $1, f.pull_request_id, f.comment_id + 1000 + s, 'answered' FROM followups f, generate_series(1, 4) AS s WHERE f.comment_id = $2`,
-			tenantID, id)
+			accountID, id)
 		return err
 	})
 	if err != nil {
@@ -943,27 +1195,130 @@ func checkFollowUps(
 	}
 }
 
-func TestReviewWorkerEndToEnd(t *testing.T) {
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	appStore, err := store.Open(ctx, store.Options{
-		AppURL: env(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: env(t, "KRITIQUE_TEST_OWNER_URL"),
-		Logger: logger,
+// checkFollowUpRun: the follow-up's agent ran in a runner of its own kind,
+// which submitted the reply, and what it spent is charged as a follow-up's
+// to no review.
+func checkFollowUpRun(ctx context.Context, t *testing.T, st *store.Store, accountID string, commentID int64) {
+	t.Helper()
+	var phase, stop, result string
+	var usage, reviewUsage int
+	err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT r.phase, a.stop_reason, a.result::text FROM model_calls m
+			JOIN runner_runs r ON r.id = m.runner_run_id JOIN agent_runs a ON a.runner_run_id = r.id
+			WHERE m.followup_comment_id = $1 AND r.kind = 'followup' AND r.review_id IS NULL AND r.finished_at IS NOT NULL`, commentID).
+			Scan(&phase, &stop, &result); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE review_id IS NULL), count(*) FILTER (WHERE review_id IS NOT NULL)
+			FROM usage WHERE role = 'followup'`).Scan(&usage, &reviewUsage)
 	})
 	if err != nil {
-		t.Fatalf("Open: %v", err)
+		t.Fatalf("follow-up run: %v", err)
 	}
-	t.Cleanup(appStore.Close)
-	if err := appStore.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
-		t.Fatalf("Migrate: %v", err)
+	if phase != "done" || stop != "submitted" || !strings.Contains(result, "Because b is new.") {
+		t.Fatalf("follow-up run: phase = %s, stop = %s, result = %s", phase, stop, result)
 	}
-	if err := appStore.EnsureIndexSchema(ctx, "kritique_app", "fake-embed", 8, false); err != nil {
+	if usage != 1 || reviewUsage != 0 {
+		t.Fatalf("follow-up usage rows = %d, of them %d charged to a review; want 1 and 0", usage, reviewUsage)
+	}
+	var tokens int
+	err = st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM gateway_tokens WHERE followup_comment_id = $1`, commentID).Scan(&tokens)
+	})
+	if err != nil || tokens != 0 {
+		t.Fatalf("follow-up run tokens left = %d, %v; want them revoked", tokens, err)
+	}
+}
+
+// checkReviewRequest: "@kritique review" queues a review of the head for
+// someone with write access, and replies; anyone else is ignored as for a
+// question. It runs last, as the review it queues changes pull request 1's
+// last review, and first clears the thread's follow-ups, so the hourly
+// limit earlier checks spent does not apply, and reopens the pull request.
+func checkReviewRequest(
+	ctx context.Context, t *testing.T, st *store.Store, svc *ingest.Service, lf *localForge, req ingest.Request, accountID string,
+) {
+	t.Helper()
+	mention, waitFollowUp, lastComment := followUpHelpers(ctx, t, st, svc, lf, req, accountID)
+	manual := func() (all, unfinished int) {
+		t.Helper()
+		if err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE finalized_at IS NULL) FROM river_job
+				WHERE kind = 'review' AND args->>'trigger' = 'manual' AND (args->>'number')::int = 1`).Scan(&all, &unfinished)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return all, unfinished
+	}
+	// Earlier checks' manual reviews run out first, so the request queues
+	// its own.
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if _, unfinished := manual(); unfinished == 0 {
+			break
+		}
+	}
+	before, _ := manual()
+
+	// Earlier checks merge the pull request and leave none of its reviews a
+	// merge base. Once a merge commit puts its head in its base branch,
+	// nothing is left to diff, and the request says so instead of queueing.
+	var head string
+	if err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `DELETE FROM followups`); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT head_sha FROM pull_requests WHERE number = 1 AND merged`).Scan(&head)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lf.mu.Lock()
+	base := lf.base
+	lf.base = head
+	lf.mu.Unlock()
+	id := mention("onedr0p", "@kritique review")
+	if status, reason := waitFollowUp(id); status != "answered" || reason != "nothing to review: the head is already in main" {
+		t.Fatalf("review request on a merged pull request with nothing to diff: status = %s (%s)", status, reason)
+	}
+	if _, body := lastComment(); !strings.Contains(body, "Nothing to review: `"+head[:7]+"` is already in `main`") {
+		t.Fatalf("reply to the review request = %q", body)
+	}
+	if after, _ := manual(); after != before {
+		t.Fatalf("manual review jobs %d -> %d; want none queued", before, after)
+	}
+	lf.mu.Lock()
+	lf.base = base
+	lf.mu.Unlock()
+	if err := st.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE pull_requests SET state = 'open', merged = false WHERE number = 1`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	id = mention("outsider", "@kritique review")
+	if status, reason := waitFollowUp(id); status != "ignored" || !strings.Contains(reason, "write is required") {
+		t.Fatalf("outsider's review request: status = %s (%s)", status, reason)
+	}
+	id = mention("onedr0p", "Can you take another look? @kritique review")
+	if status, reason := waitFollowUp(id); status != "answered" || reason != "review requested" {
+		t.Fatalf("review request: status = %s (%s)", status, reason)
+	}
+	if _, body := lastComment(); !strings.Contains(body, "Reviewing `") {
+		t.Fatalf("reply to the review request = %q", body)
+	}
+	if after, _ := manual(); after != before+1 {
+		t.Fatalf("manual review jobs %d -> %d; want the request to queue one", before, after)
+	}
+}
+
+func TestReviewWorkerEndToEnd(t *testing.T) {
+	ctx := t.Context()
+	logger := slog.New(slog.DiscardHandler)
+	appStore := storetest.Open(t)
+	if _, err := appStore.EnsureIndexSchema(ctx, "kritique_app", "fake-embed", 8); err != nil {
 		t.Fatalf("EnsureIndexSchema: %v", err)
 	}
-	if err := appStore.EnsureIndexSchema(ctx, "kritique_app", "other-model", 8, false); !errors.Is(err, store.ErrIndexSchemaMismatch) {
-		t.Fatalf("a different embedding model must be refused without reindex, got %v", err)
-	}
-	runnerStore, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: logger})
+	runnerStore, err := store.Open(ctx, store.Options{AppURL: storetest.Env(t, "KRITIQUE_TEST_RUNNER_URL"), Logger: logger})
 	if err != nil {
 		t.Fatalf("Open runner: %v", err)
 	}
@@ -973,11 +1328,9 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 	// Long enough that masking it out of the transcripts leaves the prompts
 	// they are checked against intact.
 	t.Setenv("TEST_SECRET", "test-provider-key")
-	file, err := configfile.Parse([]byte(configYAML))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := appStore.ApplyConfig(ctx, file, "test"); err != nil {
+	t.Setenv("KRITIQUE_RUNNER_DEADLINE", "60s")
+	file := configfiletest.Load(t, configYAML)
+	if err := appStore.ApplyConfig(ctx, file); err != nil {
 		t.Fatal(err)
 	}
 	current := configfile.NewCurrent(file)
@@ -990,10 +1343,10 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := ingest.NewService(appStore, insertOnly)
-	in, tenant, _ := file.Installation("bot-ross")
+	account, _ := file.Account(configfile.ForgeGitHub, "onedr0p")
 	dispatchPR := func(number int, headSHA string, bot bool, labels ...string) {
 		t.Helper()
-		out, err := svc.Dispatch(ctx, ingest.Request{File: file, Tenant: tenant, Installation: in, Event: webhook.Event{
+		out, err := svc.Dispatch(ctx, ingest.Request{File: file, Account: account, Event: webhook.Event{
 			Kind: webhook.KindPullRequest, Action: "synchronize", Account: "onedr0p",
 			Repository:  &webhook.Repository{FullName: "onedr0p/home-ops", DefaultBranch: "main"},
 			PullRequest: &webhook.PullRequest{Number: number, Title: "t", Body: "Adds b.", Author: "renovate[bot]", AuthorIsBot: bot, State: "open", HeadRef: "f", HeadSHA: headSHA, BaseRef: "main", Labels: labelled(labels)},
@@ -1005,19 +1358,31 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 	dispatch := func(headSHA string, bot bool) { t.Helper(); dispatchPR(1, headSHA, bot) }
 
 	lf := &localForge{dir: dir, base: base, tip: head, permissions: map[string]forge.Permission{"onedr0p": forge.PermissionAdmin}}
-	fc := &fakeCompleter{started: make(chan struct{}, 1)}
+	fc := &fakeCompleter{}
 	fe := &fakeEmbedder{}
+	embedders := &adapter.Embedders{Build: func(configfile.Embedding) model.Embedder { return fe }}
 	exec := &gateExecutor{inner: &executor.Local{Store: runnerStore}, started: make(chan executor.Spec)}
 	deadline := &jobDeadline{}
 	workers := river.NewWorkers()
-	wb := Base{Store: appStore, Current: current, Forges: &forges{f: lf}, Logger: logger}
-	river.AddWorker(workers, &Review{
-		Base: wb, Completers: &completers{c: fc}, Embedder: fe, EmbedModel: "fake-embed", Executor: exec,
-		superviseEvery: 50 * time.Millisecond,
+	reg := prometheus.NewRegistry()
+	wb := Base{Store: appStore, Current: current, Forges: &forges{f: lf}, Logger: logger, Metrics: metrics.New(reg)}
+	// The runner reaches fc, and the index through fe, by the gateway.
+	steppers := &adapter.Steppers{Build: func(configfile.Provider) (model.Stepper, error) { return fc, nil }}
+	gw := httptest.NewServer(&gateway.Server{
+		Store: wb.Store, Current: wb.Current, Logger: wb.Logger, Metrics: wb.Metrics, Proxy: http.NotFoundHandler(),
+		Embedders: embedders, Steppers: steppers,
 	})
-	river.AddWorker(workers, &FollowUp{Base: wb, Completers: &completers{c: fc}})
+	t.Cleanup(gw.Close)
+	river.AddWorker(workers, &Review{
+		Base: wb, Executor: exec, Steppers: steppers, GatewayURL: gw.URL, GatewayTokenTTL: time.Hour,
+		// A stopped run's runner never started here, so no agent row comes.
+		superviseEvery: 50 * time.Millisecond, rowWait: time.Second,
+	})
+	river.AddWorker(workers, &FollowUp{
+		Base: wb, Executor: exec, GatewayURL: gw.URL, GatewayTokenTTL: time.Hour, superviseEvery: 50 * time.Millisecond, rowWait: time.Second,
+	})
 	river.AddWorker(workers, &Index{
-		Base: wb, Executor: exec, Embedder: fe, EmbedModel: "fake-embed", EmbedDims: 8,
+		Base: wb, Executor: exec, Embedders: embedders,
 		// A chunk a batch, so a build commits several.
 		batch: 1,
 	})
@@ -1040,7 +1405,7 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(20 * time.Second)
 		for time.Now().Before(deadline) {
-			err := appStore.WithTenant(ctx, tenant.ID(), func(tx pgx.Tx) error {
+			err := appStore.WithAccount(ctx, account.ID(), func(tx pgx.Tx) error {
 				return tx.QueryRow(ctx, `SELECT status, patch_id, merge_base_sha FROM reviews WHERE head_sha = $1 AND finished_at IS NOT NULL ORDER BY created_at DESC LIMIT 1`, headSHA).
 					Scan(&status, &patchID, &mergeBase)
 			})
@@ -1063,7 +1428,7 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(20 * time.Second)
 		for time.Now().Before(deadline) {
-			err := appStore.WithTenant(ctx, tenant.ID(), func(tx pgx.Tx) error {
+			err := appStore.WithAccount(ctx, account.ID(), func(tx pgx.Tx) error {
 				var count int
 				if err := tx.QueryRow(ctx,
 					`SELECT count(*) FROM reviews WHERE head_sha = $1 AND finished_at IS NOT NULL`, headSHA).
@@ -1085,46 +1450,54 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 		return "", "", ""
 	}
 
-	repoID := configfile.RepositoryID(in.ID(), "onedr0p/home-ops")
+	repoID := configfile.RepositoryID(account.ID(), "onedr0p/home-ops")
 	t.Run("index builds in full, then advances incrementally", func(t *testing.T) {
-		checkIndexing(ctx, t, appStore, insertOnly, lf, exec, tenant.ID(), repoID, base, head)
+		checkIndexing(ctx, t, appStore, insertOnly, lf, exec, account.ID(), repoID, base, head)
 	})
 
 	t.Run("a failed index runner is retried", func(t *testing.T) {
-		checkIndexRetry(ctx, t, appStore, insertOnly, exec, tenant.ID(), repoID)
+		checkIndexRetry(ctx, t, appStore, insertOnly, exec, account.ID(), repoID)
 	})
 
 	t.Run("a failed embedding leaves no staged chunks", func(t *testing.T) {
-		checkIndexEmbedFailure(ctx, t, appStore, insertOnly, fe, tenant.ID(), repoID)
+		checkIndexEmbedFailure(ctx, t, appStore, insertOnly, fe, account.ID(), repoID)
 	})
 
 	t.Run("completed with a context pack, findings and a sticky comment", func(t *testing.T) {
-		checkContextPack(ctx, t, appStore, lf, fc, dispatch, waitReview, tenant.ID(), head, base)
+		checkContextPack(ctx, t, appStore, lf, fc, dispatch, waitReview, account.ID(), head, base)
+	})
+
+	t.Run("the pull request's eyes stay on while another review of it runs", func(t *testing.T) {
+		checkOtherReviewRunning(ctx, t, &wb, account.ID())
 	})
 
 	t.Run("follow-up answers a qualifying mention and rate-limits the thread", func(t *testing.T) {
-		checkFollowUps(ctx, t, appStore, svc, lf, fc, ingest.Request{File: file, Tenant: tenant, Installation: in}, tenant.ID())
+		checkFollowUps(ctx, t, appStore, svc, lf, fc, ingest.Request{File: file, Account: account}, account.ID())
 	})
 
 	t.Run("bot PR with the same patch id is skipped", func(t *testing.T) {
-		checkBotPatchIDSkip(ctx, t, appStore, dir, base, lf, dispatch, waitReviewCount, insertOnly, tenant.ID(), repoID)
+		checkBotPatchIDSkip(ctx, t, appStore, dir, base, lf, dispatch, waitReviewCount, insertOnly, account.ID(), repoID)
 	})
 
 	t.Run("a review snoozes while every model slot is held", func(t *testing.T) {
-		checkSnoozeWhileSlotsHeld(ctx, t, appStore, dir, base, lf, dispatchPR, tenant.ID(), "test/reviewer")
+		checkSnoozeWhileSlotsHeld(ctx, t, appStore, dir, base, lf, dispatchPR, account.ID(), "test/reviewer")
 	})
 
 	t.Run("the merge-base .kritique.yaml skips, instructs and templates", func(t *testing.T) {
-		checkRepoConfig(ctx, t, appStore, lf, fc, dir, base, dispatchPR, waitReview, tenant.ID())
+		checkRepoConfig(ctx, t, appStore, insertOnly, lf, fc, dir, base, dispatchPR, waitReview, account.ID())
+	})
+
+	t.Run("every scored review is counted by its score and risk", func(t *testing.T) {
+		checkConfidenceCounted(ctx, t, appStore, reg, account.ID(), account.Key())
 	})
 
 	t.Run("re-reviews build on the last reviewed head", func(t *testing.T) {
-		checkIncremental(ctx, t, appStore, lf, fc, dir, base, dispatchPR, waitReview, tenant.ID())
+		checkIncremental(ctx, t, appStore, lf, fc, dir, base, dispatchPR, waitReview, account.ID())
 	})
 
 	t.Run("superseded when the head moves before the job runs", func(t *testing.T) {
 		// Insert a job for a head that is no longer the PR's head.
-		res, err := insertOnly.Insert(ctx, jobs.ReviewArgs{TenantID: tenant.ID(), RepositoryID: configfile.RepositoryID(in.ID(), "onedr0p/home-ops"), Number: 1, HeadSHA: "0000000000000000000000000000000000000000", Trigger: "poll"}, nil)
+		res, err := insertOnly.Insert(ctx, jobs.ReviewArgs{AccountID: account.ID(), RepositoryID: configfile.RepositoryID(account.ID(), "onedr0p/home-ops"), Number: 1, HeadSHA: "0000000000000000000000000000000000000000", Trigger: "poll"}, nil)
 		if err != nil || res.UniqueSkippedAsDuplicate {
 			t.Fatalf("insert = %+v, %v", res, err)
 		}
@@ -1135,15 +1508,19 @@ func TestReviewWorkerEndToEnd(t *testing.T) {
 	})
 
 	t.Run("supervision ends a running review", func(t *testing.T) {
-		checkSupervision(ctx, t, appStore, exec, dispatch, waitReview, tenant.ID(), repoID)
+		checkSupervision(ctx, t, appStore, lf, exec, dispatch, waitReview, account.ID(), repoID)
 	})
 
 	t.Run("a job that ends after the runner still ends its review", func(t *testing.T) {
-		checkJobEnded(ctx, t, appStore, insertOnly, exec, fc, deadline, dispatch, waitReview, dir, base, tenant.ID(), lf)
+		checkJobEnded(ctx, t, appStore, exec, deadline, dispatch, waitReview, dir, base, account.ID(), lf)
 	})
 
 	t.Run("worker actions: rerun, cancel and forced reindex", func(t *testing.T) {
-		checkActions(ctx, t, appStore, insertOnly, exec, dispatch, waitReview, dir, base, head, tenant.ID(), repoID, lf, fc)
+		checkActions(ctx, t, appStore, insertOnly, exec, dispatch, waitReview, dir, base, head, account.ID(), repoID, lf)
+	})
+
+	t.Run("a maintainer's @kritique review queues a review", func(t *testing.T) {
+		checkReviewRequest(ctx, t, appStore, svc, lf, ingest.Request{File: file, Account: account}, account.ID())
 	})
 }
 
@@ -1162,7 +1539,7 @@ func labelled(names []string) []webhook.Label {
 func checkBotPatchIDSkip(
 	ctx context.Context, t *testing.T, appStore *store.Store, dir, base string, lf *localForge,
 	dispatch func(headSHA string, bot bool), waitReviewCount func(headSHA string, min int) (status, patchID, mergeBase string),
-	insertOnly *river.Client[pgx.Tx], tenantID, repoID string,
+	insertOnly *river.Client[pgx.Tx], accountID, repoID string,
 ) {
 	t.Helper()
 	r, _ := git.PlainOpen(dir)
@@ -1177,19 +1554,29 @@ func checkBotPatchIDSkip(
 
 	// The fake forge reports the new merge-base for the rebased head.
 	lf.setBase(newBase.String())
+	lf.mu.Lock()
+	lf.status = ""
+	lf.mu.Unlock()
 	dispatch(newHead.String(), true)
 	status, _, _ := waitReviewCount(newHead.String(), 1)
 	if status != "skipped" {
 		t.Fatalf("status = %s, want skipped for an unchanged bot patch", status)
 	}
+	lf.mu.Lock()
+	forgeStatus := lf.status
+	lf.mu.Unlock()
+	if forgeStatus != "success: kritique: skipped (patch unchanged since the last review)" {
+		t.Fatalf("forge status = %q", forgeStatus)
+	}
 	// The forge's diff told it before any runner was made for the head.
 	var runs int
-	var forgePatch string
-	if err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT forge_patch_id, (SELECT count(*) FROM runner_runs rr WHERE rr.review_id = r.id)
-			FROM reviews r WHERE head_sha = $1`, newHead.String()).Scan(&forgePatch, &runs)
-	}); err != nil || runs != 0 || forgePatch == "" {
-		t.Fatalf("skipped review: forge patch %q, %d runner runs, %v; want a forge patch and no runner", forgePatch, runs, err)
+	var forgePatch, skipReason string
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT forge_patch_id, skip_reason, (SELECT count(*) FROM runner_runs rr WHERE rr.review_id = r.id)
+			FROM reviews r WHERE head_sha = $1`, newHead.String()).Scan(&forgePatch, &skipReason, &runs)
+	}); err != nil || runs != 0 || forgePatch == "" || skipReason != runner.SkipUnchangedPatch {
+		t.Fatalf("skipped review: forge patch %q, reason %q, %d runner runs, %v; want a forge patch, %s and no runner",
+			forgePatch, skipReason, runs, err, runner.SkipUnchangedPatch)
 	}
 
 	// A manual re-run of the same unchanged bot patch must bypass the skip:
@@ -1201,7 +1588,7 @@ func checkBotPatchIDSkip(
 	// dispatch's already-finished row) is required to observe this job's own
 	// outcome rather than the previous one's.
 	res, err := insertOnly.Insert(ctx, jobs.ReviewArgs{
-		TenantID: tenantID, RepositoryID: repoID, Number: 1, HeadSHA: newHead.String(),
+		AccountID: accountID, RepositoryID: repoID, Number: 1, HeadSHA: newHead.String(),
 		Trigger: jobs.TriggerManual, Request: uuid.NewString(),
 	}, nil)
 	if err != nil || res.UniqueSkippedAsDuplicate {
@@ -1213,13 +1600,13 @@ func checkBotPatchIDSkip(
 	}
 }
 
-// checkSnoozeWhileSlotsHeld holds every model slot of the tenant, commits
+// checkSnoozeWhileSlotsHeld holds every model slot of the account, commits
 // a new head on a pull request of its own and dispatches it: the review is
 // snoozed, recording nothing and starting no runner, until the slot is let
 // go, and then completes.
 func checkSnoozeWhileSlotsHeld(
 	ctx context.Context, t *testing.T, appStore *store.Store, dir, base string, lf *localForge,
-	dispatchPR func(int, string, bool, ...string), tenantID, modelKey string,
+	dispatchPR func(int, string, bool, ...string), accountID, modelKey string,
 ) {
 	t.Helper()
 	r, _ := git.PlainOpen(dir)
@@ -1239,11 +1626,11 @@ func checkSnoozeWhileSlotsHeld(
 	lf.setBase(base)
 	setSlots := func(jobID *int64) {
 		t.Helper()
-		if err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `INSERT INTO model_leases (tenant_id, model_key, slot, job_id, expires_at)
+		if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO model_leases (account_id, model_key, slot, job_id, expires_at)
 				VALUES ($1, $2, 1, $3, CASE WHEN $3::bigint IS NULL THEN NULL ELSE now() + interval '1 hour' END)
-				ON CONFLICT (tenant_id, model_key, slot) DO UPDATE SET job_id = excluded.job_id, expires_at = excluded.expires_at`,
-				tenantID, modelKey, jobID)
+				ON CONFLICT (account_id, model_key, slot) DO UPDATE SET job_id = excluded.job_id, expires_at = excluded.expires_at`,
+				accountID, modelKey, jobID)
 			return err
 		}); err != nil {
 			t.Fatal(err)
@@ -1263,7 +1650,7 @@ func checkSnoozeWhileSlotsHeld(
 	}
 	waitFor(t, 30*time.Second, "the review to snooze", func() bool { return snoozes() >= 1 })
 	var reviews, runs int
-	if err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT count(*), (SELECT count(*) FROM runner_runs rr JOIN reviews r2 ON r2.id = rr.review_id
 			WHERE r2.head_sha = $1) FROM reviews WHERE head_sha = $1`, head).Scan(&reviews, &runs)
 	}); err != nil || reviews != 0 || runs != 0 {
@@ -1273,7 +1660,7 @@ func checkSnoozeWhileSlotsHeld(
 	setSlots(nil)
 	var status string
 	waitFor(t, 30*time.Second, "the review to complete once the slot was free", func() bool {
-		err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT status FROM reviews WHERE head_sha = $1 AND finished_at IS NOT NULL`, head).Scan(&status)
 		})
 		return err == nil
@@ -1295,12 +1682,12 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 	}
 }
 
-// checkRepoConfig commits a .kritique.yaml with a skip rule, instructions
-// and a summary template onto a new merge base, then reviews pull requests
-// against it.
+// checkRepoConfig commits a .kritique.yaml with ignore globs, rules, one of
+// them a file, and a summary template onto a new merge base, then reviews
+// pull requests against it.
 func checkRepoConfig(
-	ctx context.Context, t *testing.T, appStore *store.Store, lf *localForge, fc *fakeCompleter, dir, base string,
-	dispatchPR func(int, string, bool, ...string), waitReview func(string) (string, string, string), tenantID string,
+	ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], lf *localForge, fc *fakeCompleter,
+	dir, base string, dispatchPR func(int, string, bool, ...string), waitReview func(string) (string, string, string), accountID string,
 ) {
 	t.Helper()
 	r, _ := git.PlainOpen(dir)
@@ -1328,19 +1715,29 @@ func checkRepoConfig(
 		return h.String()
 	}
 	cfgBase := commit("configure kritique", map[string]string{
-		".kritique.yaml": `filter: '!pr.labels.exists(l, l.name == "skip-review")'
-skip:
-  onlyPaths: ["docs/**", ".kritique.yaml"]
+		".kritique.yaml": `trigger:
+  exclude: [{ name: skip-label, expr: 'pr.labels.exists(l, l.name == "skip-review")' }]
+ignore: ["docs/**", ".kritique.yaml"]
+rules:
+  - { id: todos, file: .kritique/rules.md }
+  - { id: no-panics, rule: Return an error rather than panic. }
+  - { id: sql-placeholders, rule: Use query placeholders., paths: ["**/*.sql"] }
+  - { id: into-main, rule: Keep main releasable., when: [{ expr: 'pr.baseRef == "main"' }] }
+  - { id: renovate, rule: Say what the update breaks., when: [{ expr: 'pr.headRef.startsWith("renovate/")' }] }
+comments:
+  summary: ".kritique/summary.md.tmpl"
+confidence: { model: test/reviewer, fallback: other/judge, effort: low, threshold: 4, gate: true }
 review:
-  instructions: [".kritique/rules.md"]
-  templates:
-    summary: ".kritique/summary.md.tmpl"
+  approve: true
+  effort: xhigh
 `,
 		".kritique/rules.md":        "Flag every TODO left in code.\n",
 		".kritique/summary.md.tmpl": "Custom summary for #{{ .Number }}: {{ .Result.Summary.Take }}\n",
+		"AGENTS.md":                 "Prefer table-driven tests.\n",
+		"web/AGENTS.md":             "Never inline styles.\n",
 	})
 	docsHead := commit("docs", map[string]string{"docs/guide.md": "# Guide\n"})
-	loosened := commit("drop the skip rule", map[string]string{".kritique.yaml": "review: {}\n"})
+	loosened := commit("drop the ignore globs", map[string]string{".kritique.yaml": "rules: []\n"})
 	lf.setBase(cfgBase)
 
 	fc.mu.Lock()
@@ -1348,7 +1745,7 @@ review:
 	fc.mu.Unlock()
 	skipReason := func(head string) string {
 		var reason string
-		if err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT skip_reason FROM reviews WHERE head_sha = $1 AND finished_at IS NOT NULL`, head).Scan(&reason)
 		}); err != nil {
 			t.Fatal(err)
@@ -1358,12 +1755,12 @@ review:
 	for _, head := range []string{docsHead, loosened} {
 		dispatchPR(2, head, false)
 		if status, _, _ := waitReview(head); status != "skipped" {
-			t.Fatalf("status = %s, want skipped: the merge-base skip rule covers every changed path", status)
+			t.Fatalf("status = %s, want skipped: the merge-base ignore globs cover every changed path", status)
 		}
 		lf.mu.Lock()
 		forgeStatus := lf.status
 		lf.mu.Unlock()
-		if forgeStatus != "success: kritique: skipped (only skipped paths changed)" || skipReason(head) != "only_skipped_paths" {
+		if forgeStatus != "success: kritique: skipped (only ignored paths changed)" || skipReason(head) != "only_skipped_paths" {
 			t.Fatalf("status = %q reason = %q", forgeStatus, skipReason(head))
 		}
 	}
@@ -1378,15 +1775,38 @@ review:
 		t.Fatal(err)
 	}
 	codeHead := commit("code", map[string]string{"main.go": "package main\n\nfunc d() {}\n"})
+	// The scorer's first attempt fails; the provider's one retry answers.
+	fc.failScore(1)
 	dispatchPR(3, codeHead, false)
 	if status, _, _ := waitReview(codeHead); status != "completed" {
 		t.Fatalf("status = %s, want completed", status)
 	}
+	// The review's own prompt is the one before its confidence call's.
 	fc.mu.Lock()
-	system := fc.systems[len(fc.systems)-1]
+	system := fc.systems[len(fc.systems)-2]
 	fc.mu.Unlock()
-	if !strings.Contains(system, "\n\n## Repository instructions\n\n") || !strings.HasSuffix(system, "\n\nFlag every TODO left in code.") {
+	// The root's AGENTS.md is the instructions; web/ is untouched.
+	if !strings.Contains(system, "\n\n## Repository instructions\n\n") ||
+		!strings.HasSuffix(system, "\n\nPrefer table-driven tests.") || strings.Contains(system, "inline styles") {
 		t.Fatalf("system prompt does not carry the instructions:\n%s", system)
+	}
+	// Only the rules whose paths the change matches and whose conditions the
+	// pull request meets, the file rule under its own heading.
+	if !strings.Contains(system, "\n\n- no-panics: Return an error rather than panic.\n- into-main: Keep main releasable.\n\n"+
+		"### todos (.kritique/rules.md)\n\nFlag every TODO left in code.\n\n## Repository instructions") ||
+		strings.Contains(system, "sql-placeholders") || strings.Contains(system, "- renovate:") {
+		t.Fatalf("system prompt does not carry the rules:\n%s", system)
+	}
+	// The finding keeps the rule it was given and loses the one it was not.
+	var cited []string
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT f.rules FROM findings f JOIN reviews v ON v.id = f.review_id
+			WHERE v.head_sha = $1 AND f.title = 'first line'`, codeHead).Scan(&cited)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cited, []string{"no-panics"}) {
+		t.Fatalf("finding rules = %q, want [no-panics]", cited)
 	}
 	lf.mu.Lock()
 	var sticky string
@@ -1399,6 +1819,20 @@ review:
 	if !strings.HasPrefix(sticky, "<!-- kritique:pr-3 -->\nCustom summary for #3: Changes main.go.") {
 		t.Fatalf("sticky comment for PR 3 = %q", sticky)
 	}
+	checkWithdrawn(t, lf)
+	checkConfidence(ctx, t, appStore, lf, fc, accountID, codeHead)
+	pushedHead := commit("more code", map[string]string{"main.go": "package main\n\nfunc d() {}\n\nfunc f() {}\n"})
+	// The confidence model fails both its attempts; the fallback on the
+	// other provider scores.
+	fc.failScore(2)
+	dispatchPR(3, pushedHead, false)
+	checkEarlierRisk(t, fc, waitReview, pushedHead, codeHead)
+	checkFallbackScored(ctx, t, appStore, fc, accountID, pushedHead)
+	// Both fail every attempt.
+	unscoredHead := commit("unscored", map[string]string{"main.go": "package main\n\nfunc d() {}\n\nfunc f() {}\n\nfunc h() {}\n"})
+	fc.failScore(3)
+	dispatchPR(3, unscoredHead, false)
+	checkFallbackFailed(ctx, t, appStore, waitReview, accountID, unscoredHead)
 
 	// The same kind of change carrying the label the filter excludes.
 	labelledHead := commit("labelledHead", map[string]string{"main.go": "package main\n\nfunc e() {}\n"})
@@ -1409,18 +1843,281 @@ review:
 	lf.mu.Lock()
 	forgeStatus := lf.status
 	lf.mu.Unlock()
-	if forgeStatus != "success: kritique: skipped (filtered by .kritique.yaml)" {
+	if forgeStatus != "success: kritique: skipped (filtered: skip-label)" {
 		t.Fatalf("status = %q", forgeStatus)
+	}
+	checkLabelRepeat(ctx, t, appStore, insertOnly, accountID, labelledHead)
+
+	// The label comes off while the job that skipped the head under it is
+	// still finishing: the job judges the head again, and reviews it.
+	movedHead := commit("movedHead", map[string]string{"main.go": "package main\n\nfunc g() {}\n"})
+	lf.mu.Lock()
+	lf.onStatus = func() {
+		if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE pull_requests SET labels = '[]' WHERE number = 6`)
+			return err
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	lf.mu.Unlock()
+	dispatchPR(6, movedHead, false, "skip-review")
+	checkStatuses(ctx, t, appStore, accountID, movedHead, "skipped", "completed")
+}
+
+// checkLabelRepeat asserts that a label change the filter still excludes
+// the head under is the skip the head has, not one more, unless a later
+// review of the head ended otherwise.
+func checkLabelRepeat(ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], accountID, head string) {
+	t.Helper()
+	labeled := func(request string) {
+		t.Helper()
+		res, err := insertOnly.Insert(ctx, jobs.ReviewArgs{
+			AccountID: accountID, RepositoryID: configfile.RepositoryID(accountID, "onedr0p/home-ops"), Number: 4, HeadSHA: head,
+			Trigger: "labeled", Request: request,
+		}, nil)
+		if err != nil || res.UniqueSkippedAsDuplicate {
+			t.Fatalf("insert = %+v, %v", res, err)
+		}
+		deadline := time.Now().Add(20 * time.Second)
+		for state := ""; state != "completed"; time.Sleep(100 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("the label change's job is %s, want completed", state)
+			}
+			if err := appStore.App().QueryRow(ctx, `SELECT state FROM river_job WHERE id = $1`, res.Job.ID).Scan(&state); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	labeled("first")
+	checkStatuses(ctx, t, appStore, accountID, head, "skipped")
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO reviews (account_id, pull_request_id, head_sha, status, finished_at)
+			SELECT account_id, id, head_sha, 'failed', now() FROM pull_requests WHERE number = 4`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	labeled("second")
+	checkStatuses(ctx, t, appStore, accountID, head, "skipped", "failed", "skipped")
+}
+
+// checkStatuses waits for the head's reviews to be the ones of want, oldest
+// first.
+func checkStatuses(ctx context.Context, t *testing.T, appStore *store.Store, accountID, head string, want ...string) {
+	t.Helper()
+	var got []string
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, `SELECT status FROM reviews WHERE head_sha = $1 AND finished_at IS NOT NULL ORDER BY created_at`, head)
+			if err != nil {
+				return err
+			}
+			got, err = pgx.CollectRows(rows, pgx.RowTo[string])
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Equal(got, want) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("reviews of %s = %v, want %v", head, got, want)
+}
+
+// checkConfidence asserts what a review does where the merge-base
+// .kritique.yaml asks for a confidence score its findings keep the pull
+// request under: the score is held to the ceiling of the blocking one,
+// though it is outside the diff, recorded with its call and its cost once,
+// whatever attempts the call took, and fails the commit status.
+func checkConfidence(ctx context.Context, t *testing.T, appStore *store.Store, lf *localForge, fc *fakeCompleter, accountID, head string) {
+	t.Helper()
+	fc.mu.Lock()
+	scorer, asked := fc.systems[len(fc.systems)-1], fc.users[len(fc.users)-1]
+	// The review's step, through the gateway, and the confidence call each
+	// carry the .kritique.yaml's effort for their model.
+	efforts := fc.efforts[len(fc.efforts)-2:]
+	fc.mu.Unlock()
+	if scorer != review.ConfidenceSystem || !slices.Equal(efforts, []model.Effort{model.EffortXHigh, model.EffortLow}) {
+		t.Fatalf("the last call was not the confidence model's at the file's efforts (%v):\n%s", efforts, scorer)
+	}
+	// The scorer is shown what the review says it read, and on a first
+	// review no earlier risk.
+	if !strings.Contains(asked, "\nIts summary: Changes main.go.\n") || !strings.Contains(asked, "\n- main.go: package clause read\n") ||
+		strings.Contains(asked, "The last review of this pull request") {
+		t.Fatalf("the scorer was not shown the review's account alone:\n%s", asked)
+	}
+	var confidence string
+	var calls, charged int
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT v.confidence::text,
+				(SELECT count(*) FROM model_calls m WHERE m.review_id = v.id AND m.kind = 'confidence'),
+				(SELECT count(*) FROM usage u WHERE u.review_id = v.id AND u.role = 'confidence' AND u.model = 'reviewer')
+			FROM reviews v WHERE v.head_sha = $1 AND v.status = 'completed'`, head).Scan(&confidence, &calls, &charged)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var got review.Confidence
+	if err := json.Unmarshal([]byte(confidence), &got); err != nil {
+		t.Fatalf("confidence = %s, %v", confidence, err)
+	}
+	want := review.Confidence{
+		Score: 2, Threshold: 4, Reason: "Nothing else stands out.", Risk: review.RiskMedium, Model: "reviewer",
+		Rubric: review.ConfidenceRubric(review.ConfidenceSystem),
+	}
+	if got != want {
+		t.Fatalf("confidence = %+v, want %+v", got, want)
+	}
+	if calls != 1 || charged != 1 {
+		t.Fatalf("%d confidence call(s) recorded and %d charged, want one of each", calls, charged)
+	}
+	lf.mu.Lock()
+	status := lf.status
+	lf.mu.Unlock()
+	if status != "failure: kritique: confidence 2/5, below 4, 2 finding(s)" {
+		t.Fatalf("status = %q", status)
+	}
+}
+
+// checkConfidenceCounted asserts that each completed review the scorer
+// scored was counted once, under its account's key, score and risk.
+func checkConfidenceCounted(ctx context.Context, t *testing.T, appStore *store.Store, reg *prometheus.Registry, accountID, accountKey string) {
+	t.Helper()
+	want := map[string]int{}
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT confidence->>'score' || '/' || (confidence->>'risk'), count(*)::int FROM reviews
+			WHERE status = 'completed' AND confidence IS NOT NULL GROUP BY 1`)
+		if err != nil {
+			return err
+		}
+		var key string
+		var n int
+		_, err = pgx.ForEachRow(rows, []any{&key, &n}, func() error {
+			want[key] = n
+			return nil
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, f := range families {
+		if f.GetName() != "kritique_confidence_scores_total" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["account"] != accountKey {
+				t.Fatalf("a score counted under account %q", labels["account"])
+			}
+			got[labels["score"]+"/"+labels["risk"]] += int(m.GetCounter().GetValue())
+		}
+	}
+	if len(want) == 0 || !maps.Equal(got, want) {
+		t.Fatalf("scores counted = %v, want the scored reviews' %v", got, want)
+	}
+}
+
+// checkEarlierRisk asserts that the review of head, pushed onto the pull
+// request whose review of prior checkConfidence asserted, is scored with
+// the risk that review was rated.
+func checkEarlierRisk(t *testing.T, fc *fakeCompleter, waitReview func(string) (string, string, string), head, prior string) {
+	t.Helper()
+	if status, _, _ := waitReview(head); status != "completed" {
+		t.Fatalf("status = %s, want completed", status)
+	}
+	fc.mu.Lock()
+	asked := fc.users[len(fc.users)-1]
+	fc.mu.Unlock()
+	if want := "\n\nThe last review of this pull request, at " + review.ShortSHA(prior) +
+		", rated its risk medium. Its reason: Nothing else stands out.\n"; !strings.Contains(asked, want) {
+		t.Fatalf("the scorer was not shown the last review's risk:\n%s", asked)
+	}
+}
+
+// checkFallbackScored asserts that the review of head, whose confidence
+// model failed every attempt, was scored by the merge-base .kritique.yaml's
+// confidence.fallback at the scorer's effort, and that the one call is
+// recorded and charged under the model that answered.
+func checkFallbackScored(ctx context.Context, t *testing.T, appStore *store.Store, fc *fakeCompleter, accountID, head string) {
+	t.Helper()
+	fc.mu.Lock()
+	effort := fc.efforts[len(fc.efforts)-1]
+	fc.mu.Unlock()
+	if effort != model.EffortLow {
+		t.Fatalf("the fallback's call reasoned at %q, want the scorer's low", effort)
+	}
+	var scoredBy, recorded string
+	var charged int
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT v.confidence->>'model',
+				(SELECT string_agg(m.model, ',') FROM model_calls m WHERE m.review_id = v.id AND m.kind = 'confidence'),
+				(SELECT count(*) FROM usage u WHERE u.review_id = v.id AND u.role = 'confidence' AND u.model = 'judge')
+			FROM reviews v WHERE v.head_sha = $1 AND v.status = 'completed'`, head).Scan(&scoredBy, &recorded, &charged)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if scoredBy != "judge" || recorded != "judge" || charged != 1 {
+		t.Fatalf("scored by %q, calls recorded under %q, %d charged to judge; want the fallback's one call", scoredBy, recorded, charged)
+	}
+}
+
+// checkFallbackFailed asserts that the review of head, whose confidence
+// model and fallback failed every attempt, completed unscored, its one call
+// recorded under the fallback, the model it last went to.
+func checkFallbackFailed(
+	ctx context.Context, t *testing.T, appStore *store.Store, waitReview func(string) (string, string, string), accountID, head string,
+) {
+	t.Helper()
+	if status, _, _ := waitReview(head); status != "completed" {
+		t.Fatalf("status = %s, want completed", status)
+	}
+	var scored bool
+	var recorded string
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT v.confidence IS NOT NULL,
+				(SELECT string_agg(m.model, ',') FROM model_calls m WHERE m.review_id = v.id AND m.kind = 'confidence')
+			FROM reviews v WHERE v.head_sha = $1 AND v.status = 'completed'`, head).Scan(&scored, &recorded)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if scored || recorded != "judge" {
+		t.Fatalf("scored %v, calls recorded under %q; want it unscored and its one call under the fallback", scored, recorded)
+	}
+}
+
+// checkWithdrawn asserts what a review with an important finding does
+// where the merge-base .kritique.yaml opted in to approvals: no approval,
+// and any standing one withdrawn.
+func checkWithdrawn(t *testing.T, lf *localForge) {
+	t.Helper()
+	lf.mu.Lock()
+	approvals, dismissals := lf.approvals, lf.dismissals
+	lf.mu.Unlock()
+	if len(approvals) != 0 || dismissals != 1 {
+		t.Fatalf("approvals = %v dismissals = %d, want none and one withdrawal", approvals, dismissals)
 	}
 }
 
 // checkIncremental reviews a pull request, pushes a commit on top, and then
-// force-pushes it away: the second review is incremental and does not post
-// the repeated finding inline again, the third is full because the head it
-// would build on is gone.
+// force-pushes it away: the second review is incremental, does not post
+// the repeated finding inline again and holds back a new one far from the
+// pushed lines, the third is full because the head it would build on is
+// gone. The merge base asks for a summary diagram, which only the first
+// review draws: the second is shown it and keeps it, the third's answer
+// without one stands.
 func checkIncremental(
 	ctx context.Context, t *testing.T, appStore *store.Store, lf *localForge, fc *fakeCompleter, dir, base string,
-	dispatchPR func(int, string, bool, ...string), waitReview func(string) (string, string, string), tenantID string,
+	dispatchPR func(int, string, bool, ...string), waitReview func(string) (string, string, string), accountID string,
 ) {
 	t.Helper()
 	const number = 5
@@ -1461,61 +2158,205 @@ func checkIncremental(
 		lf.mu.Lock()
 		newInline := len(lf.inline) - inlineBefore
 		lf.mu.Unlock()
-		return scopeRow(ctx, t, appStore, tenantID, head), prompt, newInline
+		return scopeRow(ctx, t, appStore, accountID, head), prompt, newInline
+	}
+
+	const diagram = "flowchart LR\n  A[Request] --> B[Handler]"
+	wantDiagram := func(reviewID, want string) {
+		t.Helper()
+		checkSummaryDiagram(ctx, t, appStore, accountID, reviewID, want)
 	}
 
 	reset()
+	defer lf.setBase(base)
+	base = commitDiagramConfig(t, dir, wt)
 	lf.setBase(base)
-	first := commit("package main\n\nfunc f1() {}\n")
+	fc.draw(diagram)
+	const firstMain = "package main\n\nfunc f1() {}\n\nfunc g() {}\n\nfunc h() {}\n"
+	first := commit(firstMain)
 	firstRow, prompt, inline := reviewHead(first)
+	fc.draw("")
 	if firstRow.scope != "full" || firstRow.reason != "no completed review to build on" || firstRow.prior != "" || inline != 1 {
 		t.Fatalf("first review = %+v, %d inline comment(s)", firstRow, inline)
 	}
 	if strings.Contains(prompt, "Changed since the last review") {
 		t.Fatalf("a first review has no incremental sections:\n%s", prompt)
 	}
-	if p := postedInline(ctx, t, appStore, tenantID, firstRow.id); len(p) != 1 || !p[0] {
-		t.Fatalf("posted_inline = %v", p)
+	wantDiagram(firstRow.id, diagram)
+	if p := postedInline(ctx, t, appStore, accountID, firstRow.id); len(p) != 1 || !p[0].Posted || p[0].ID == 0 {
+		t.Fatalf("posted_inline, forge_comment_id = %+v", p)
 	}
+	thread := postedInline(ctx, t, appStore, accountID, firstRow.id)[0].ID
 
-	second := commit("package main\n\nfunc f1() {}\n\nfunc f2() {}\n")
+	// The push adds lines 8 and 9; line 3 is further from them than a
+	// new finding may be. The first review's conversation is older than a
+	// provider caches it, so the second review starts afresh.
+	ageConversation(ctx, t, firstRow.id)
+	second := commit(firstMain + "\nfunc f2() {}\n")
+	fc.find(`{"path":"main.go","line":3,"severity":"important","category":"correctness","title":"far from the push","explanation":"held back"}`)
 	secondRow, prompt, inline := reviewHead(second)
+	fc.find("")
 	if secondRow.scope != "incremental" || secondRow.reason != "" || secondRow.prior != firstRow.id || inline != 0 {
 		t.Fatalf("second review = %+v, %d inline comment(s); want incremental on %s with nothing posted inline again",
 			secondRow, inline, firstRow.id)
 	}
 	for _, want := range []string{
 		"Changed since the last review (" + first[:7], "+func f2() {}",
-		"Findings from the last review (verify each; report again only if still present)", "- main.go:1 [important] first line: look here",
+		"Findings from the last review (verify each; report again only if still present)", "main.go:1 [important] first line: look here",
+		"What the last review checked at " + first[:7] + " and found sound", "\n- main.go: package clause read\n",
+		"The last review's summary diagram, of the change at " + first[:7], "<diagram>\n" + diagram + "\n</diagram>\n",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("missing %q in the incremental prompt:\n%s", want, prompt)
 		}
 	}
-	if p := postedInline(ctx, t, appStore, tenantID, secondRow.id); len(p) != 1 || !p[0] {
-		t.Fatalf("a finding carried from the last review keeps posted_inline, got %v", p)
+	// The second review answered with no diagram at all.
+	wantDiagram(secondRow.id, diagram)
+	if p := postedInline(ctx, t, appStore, accountID, secondRow.id); len(p) != 1 || !p[0].Posted || p[0].ID != thread {
+		t.Fatalf("a finding carried from the last review keeps posted_inline and its thread %d, got %+v", thread, p)
 	}
-	checkIncrementalRecord(ctx, t, appStore, lf, tenantID, secondRow.id, first)
+	checkIncrementalRecord(ctx, t, appStore, lf, accountID, secondRow.id, first)
 
-	// Force-push: the second head is no longer reachable from any ref.
+	// Force-push: the second head is no longer reachable from any ref. A gc
+	// drops it too: go-git's upload-pack, unlike git's, serves an object no
+	// ref reaches.
 	reset()
+	if err := r.DeleteObject(plumbing.NewHash(second)); err != nil {
+		t.Fatal(err)
+	}
 	third := commit("package main\n\nfunc f3() {}\n")
+	// The third review reports the first finding again in other words and
+	// at a line the diff does not show, naming its id: the finding keeps
+	// the thread and the fingerprint its first wording opened, and is
+	// recorded off the diff with them.
+	original := review.Finding{Path: "main.go", Title: "first line"}
+	fc.reword(`"line":500,"title":"[important] Line one is wrong","prior":"` + review.PriorID(original) + `"`)
 	thirdRow, prompt, inline := reviewHead(third)
+	fc.reword("")
 	if thirdRow.scope != "full" || thirdRow.reason != "prior head unreachable" || thirdRow.prior != secondRow.id || inline != 0 {
 		t.Fatalf("third review = %+v, %d inline comment(s)", thirdRow, inline)
 	}
-	if strings.Contains(prompt, "Changed since the last review") || strings.Contains(prompt, "Findings from the last review") {
-		t.Fatalf("a full re-review has no incremental sections:\n%s", prompt)
-	}
+	checkEarlierPrompt(t, prompt, second)
+	wantDiagram(thirdRow.id, "")
+	checkReworded(ctx, t, appStore, lf, accountID, thirdRow.id, thread, original)
+	checkBackOnDiff(ctx, t, appStore, accountID, thirdRow, thread, commit, reviewHead)
+}
 
+// checkBackOnDiff pushes once more and asserts the review that builds on
+// third, which reports the finding third recorded off the diff on the diff
+// again under its first title, keeps the thread that record carried and
+// posts nothing twice.
+func checkBackOnDiff(
+	ctx context.Context, t *testing.T, appStore *store.Store, accountID string, third reviewScopeRow, thread int64,
+	commit func(string) string, reviewHead func(string) (reviewScopeRow, string, int),
+) {
+	t.Helper()
+	ageConversation(ctx, t, third.id)
+	fourth := commit("package main\n\nfunc f3() {}\n\nfunc f4() {}\n")
+	fourthRow, _, inline := reviewHead(fourth)
+	if fourthRow.scope != "incremental" || fourthRow.prior != third.id || inline != 0 {
+		t.Fatalf("fourth review = %+v, %d inline comment(s)", fourthRow, inline)
+	}
+	if p := postedInline(ctx, t, appStore, accountID, fourthRow.id); len(p) != 1 || !p[0].Posted || p[0].ID != thread {
+		t.Fatalf("a finding back on the diff keeps the thread %d its report off the diff carried, got %+v", thread, p)
+	}
+}
+
+// ageConversation makes the conversation reviewID's run kept an hour old,
+// as the owner: no role a service runs as may change one.
+func ageConversation(ctx context.Context, t *testing.T, reviewID string) {
+	t.Helper()
+	owner, err := pgxpool.New(ctx, storetest.Env(t, "KRITIQUE_TEST_OWNER_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	tag, err := owner.Exec(ctx, `UPDATE agent_conversations SET created_at = now() - interval '1 hour'
+		WHERE runner_run_id IN (SELECT id FROM runner_runs WHERE review_id = $1)`, reviewID)
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("aged %d conversations of review %s, want its one: %v", tag.RowsAffected(), reviewID, err)
+	}
+}
+
+// checkReworded asserts that a review's one posted finding, which reported
+// original again in other words, kept original's thread and fingerprint
+// under its new title, the severity the model wrote into it stripped.
+func checkReworded(
+	ctx context.Context, t *testing.T, appStore *store.Store, lf *localForge, accountID, reviewID string, thread int64, original review.Finding,
+) {
+	t.Helper()
+	if p := postedInline(ctx, t, appStore, accountID, reviewID); len(p) != 1 || !p[0].Posted || p[0].ID != thread {
+		t.Fatalf("a finding reported again in other words keeps its thread %d, got %+v", thread, p)
+	}
+	// The summary lists it off the diff, linked to that thread.
+	lf.mu.Lock()
+	var sticky string
+	for _, body := range lf.comments {
+		if strings.HasPrefix(body, "<!-- kritique:pr-5 -->\n") {
+			sticky = body
+		}
+	}
+	lf.mu.Unlock()
+	if want := fmt.Sprintf("**Outside the diff**\n\n- **[important · correctness]** `main.go:500` [Line one is wrong](local://onedr0p/home-ops/pull/5#r%d)\n", thread); !strings.Contains(sticky, want) {
+		t.Fatalf("sticky comment lacks %q:\n%s", want, sticky)
+	}
+	var title, fingerprint string
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT title, fingerprint FROM findings WHERE review_id = $1 AND posted_inline`, reviewID).Scan(&title, &fingerprint)
+	}); err != nil || title != "Line one is wrong" || fingerprint != review.Fingerprint(original) {
+		t.Fatalf("the reworded finding = %q, %s, %v; want its new title under the first report's fingerprint", title, fingerprint, err)
+	}
+}
+
+// checkEarlierPrompt asserts a full re-review's prompt: the findings and
+// notes the last review left at prior, to check again, with neither the
+// delta nor the diagram an incremental re-review is shown.
+func checkEarlierPrompt(t *testing.T, prompt, prior string) {
+	t.Helper()
+	if strings.Contains(prompt, "Changed since the last review") || strings.Contains(prompt, "The last review's summary diagram") ||
+		!strings.Contains(prompt, "Findings from the last review (verify each; report again only if still present). "+
+			"They are claims an earlier automated review made about "+prior[:7]) ||
+		!strings.Contains(prompt, "main.go:1 [important] first line: look here") ||
+		!strings.Contains(prompt, "What the last review checked at "+prior[:7]+" and found sound") {
+		t.Fatalf("a full re-review's prompt:\n%s", prompt)
+	}
+}
+
+// checkSummaryDiagram asserts the diagram a review's stored summary keeps.
+func checkSummaryDiagram(ctx context.Context, t *testing.T, appStore *store.Store, accountID, reviewID, want string) {
+	t.Helper()
+	var got string
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT coalesce(summary->>'diagram', '') FROM reviews WHERE id = $1`, reviewID).Scan(&got)
+	}); err != nil || got != want {
+		t.Fatalf("review %s keeps the diagram %q, want %q (err %v)", reviewID, got, want, err)
+	}
+}
+
+// commitDiagramConfig commits a .kritique.yaml that asks for the summary's
+// diagram onto wt's head and returns the commit, a merge base to review
+// against.
+func commitDiagramConfig(t *testing.T, dir string, wt *git.Worktree) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".kritique.yaml"), []byte("review: { diagram: true }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add(".kritique.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	h, err := wt.Commit("draw diagrams", &git.CommitOptions{Author: &object.Signature{Name: "t", Email: "t@x", When: time.Now()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h.String()
 }
 
 type reviewScopeRow struct{ id, scope, reason, prior string }
 
-func scopeRow(ctx context.Context, t *testing.T, appStore *store.Store, tenantID, head string) reviewScopeRow {
+func scopeRow(ctx context.Context, t *testing.T, appStore *store.Store, accountID, head string) reviewScopeRow {
 	t.Helper()
 	var out reviewScopeRow
-	if err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT id, scope, scope_reason, coalesce(prior_review_id::text, '') FROM reviews
 			WHERE head_sha = $1 AND status = 'completed' ORDER BY created_at DESC LIMIT 1`, head).Scan(&out.id, &out.scope, &out.reason, &out.prior)
 	}); err != nil {
@@ -1524,15 +2365,22 @@ func scopeRow(ctx context.Context, t *testing.T, appStore *store.Store, tenantID
 	return out
 }
 
-func postedInline(ctx context.Context, t *testing.T, appStore *store.Store, tenantID, reviewID string) []bool {
+// postedInline is the inline state of a review's findings recorded as
+// posted inline: those the review posted, and those carrying the thread
+// an earlier review opened.
+func postedInline(ctx context.Context, t *testing.T, appStore *store.Store, accountID, reviewID string) []store.InlinePosted {
 	t.Helper()
-	var out []bool
-	if err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT posted_inline FROM findings WHERE review_id = $1`, reviewID)
+	var out []store.InlinePosted
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT posted_inline, coalesce(forge_comment_id, 0) FROM findings WHERE review_id = $1 AND posted_inline`, reviewID)
 		if err != nil {
 			return err
 		}
-		out, err = pgx.CollectRows(rows, pgx.RowTo[bool])
+		out, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (store.InlinePosted, error) {
+			var c store.InlinePosted
+			err := row.Scan(&c.Posted, &c.ID)
+			return c, err
+		})
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -1542,11 +2390,11 @@ func postedInline(ctx context.Context, t *testing.T, appStore *store.Store, tena
 
 // checkIncrementalRecord asserts the context pack and sticky comment of an
 // incremental review of PR 5 that builds on prior.
-func checkIncrementalRecord(ctx context.Context, t *testing.T, appStore *store.Store, lf *localForge, tenantID, reviewID, prior string) {
+func checkIncrementalRecord(ctx context.Context, t *testing.T, appStore *store.Store, lf *localForge, accountID, reviewID, prior string) {
 	t.Helper()
 	var priorHead string
 	var deltaPaths []string
-	if err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT c.prior_head_sha, c.delta_paths FROM context_packs c JOIN runner_runs rr ON rr.id = c.runner_run_id
 			WHERE rr.review_id = $1`, reviewID).Scan(&priorHead, &deltaPaths)
 	}); err != nil || priorHead != prior || len(deltaPaths) != 1 || deltaPaths[0] != "main.go" {
@@ -1559,9 +2407,27 @@ func checkIncrementalRecord(ctx context.Context, t *testing.T, appStore *store.S
 			sticky = body
 		}
 	}
+	resolved := len(lf.resolved)
 	lf.mu.Unlock()
-	if !strings.Contains(sticky, "_Incremental review of the changes since `"+prior[:7]+"`._") ||
-		!strings.Contains(sticky, "/main.go#L1) first line") {
+	// The earlier finding was reported again, so its thread stays open and
+	// the summary lists it once, among this review's findings.
+	if resolved != 0 {
+		t.Fatalf("%d thread(s) resolved; the earlier finding is still open", resolved)
+	}
+	// The footer counts both reviews and names the head by its subject,
+	// and the last review's diagram is still drawn.
+	if !strings.Contains(sticky, "<sub>Reviews (2) · Last reviewed commit: [\"feat(x): the head commit\"](local://onedr0p/home-ops/commit/") ||
+		!strings.Contains(sticky, "\nflowchart LR\n  A[Request] --> B[Handler]\n```") ||
+		strings.Contains(sticky, prior[:7]) || strings.Contains(sticky, "Incremental review") ||
+		!strings.Contains(sticky, "/main.go#L1) [first line](local://onedr0p/home-ops/pull/5#r") ||
+		strings.Contains(sticky, "Earlier findings") {
+		t.Fatalf("sticky comment = %q", sticky)
+	}
+	// The new finding far from the pushed lines is listed apart and
+	// counted nowhere.
+	if !strings.Contains(sticky, "**2 findings** · 1 blocking · 1 important\n") ||
+		!strings.Contains(sticky, "<summary>Held back (1): not on lines changed since the last review</summary>\n\n- **[important · correctness]** [`main.go:3`](") ||
+		!strings.Contains(sticky, ") far from the push\n") {
 		t.Fatalf("sticky comment = %q", sticky)
 	}
 
@@ -1570,8 +2436,8 @@ func checkIncrementalRecord(ctx context.Context, t *testing.T, appStore *store.S
 // checkSupervision holds review runs open and moves the head, then stales
 // the heartbeat, expecting supervision to cancel each run.
 func checkSupervision(
-	ctx context.Context, t *testing.T, appStore *store.Store, exec *gateExecutor, dispatch func(string, bool),
-	waitReview func(string) (string, string, string), tenantID, repoID string,
+	ctx context.Context, t *testing.T, appStore *store.Store, lf *localForge, exec *gateExecutor, dispatch func(string, bool),
+	waitReview func(string) (string, string, string), accountID, repoID string,
 ) {
 	exec.setBlock(true)
 	t.Cleanup(func() { exec.setBlock(false) })
@@ -1588,7 +2454,7 @@ func checkSupervision(
 	reviewError := func(headSHA string) string {
 		t.Helper()
 		var text string
-		err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT error FROM reviews WHERE head_sha = $1 ORDER BY created_at DESC LIMIT 1`, headSHA).Scan(&text)
 		})
 		if err != nil {
@@ -1604,7 +2470,7 @@ func checkSupervision(
 		if spec.Job.Version != runner.SpecVersion || spec.Job.Kind != runner.KindReview || spec.Job.Head != running || spec.Job.Base == "" {
 			t.Fatalf("job = %+v", spec.Job)
 		}
-		err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE pull_requests SET head_sha = $2 WHERE repository_id = $1 AND number = 1`, repoID, newer)
 			return err
 		})
@@ -1618,10 +2484,19 @@ func checkSupervision(
 
 	t.Run("failed when the runner heartbeat goes stale", func(t *testing.T) {
 		const running = "3333333333333333333333333333333333333333"
+		lf.mu.Lock()
+		lf.status = ""
+		lf.mu.Unlock()
 		dispatch(running, false)
 		spec := started()
-		err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `UPDATE runner_runs SET heartbeat_at = now() - interval '5 minutes' WHERE id = $1`, spec.RunID)
+		lf.mu.Lock()
+		forgeStatus := lf.status
+		lf.mu.Unlock()
+		if forgeStatus != "pending: kritique: review running" {
+			t.Fatalf("forge status while the runner works = %q", forgeStatus)
+		}
+		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE runner_runs SET heartbeat_at = now() - interval '5 minutes' WHERE id = $1`, spec.Job.RunID)
 			return err
 		})
 		if err != nil {
@@ -1632,6 +2507,12 @@ func checkSupervision(
 		}
 		if text := reviewError(running); text != "runner heartbeat lost" {
 			t.Fatalf("error = %q", text)
+		}
+		lf.mu.Lock()
+		forgeStatus = lf.status
+		lf.mu.Unlock()
+		if forgeStatus != "error: kritique: review failed" {
+			t.Fatalf("forge status = %q", forgeStatus)
 		}
 	})
 }
@@ -1645,43 +2526,40 @@ func checkSupervision(
 func checkActions(
 	ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], exec *gateExecutor,
 	dispatch func(string, bool), waitReview func(string) (string, string, string),
-	dir, base, head, tenantID, repoID string, lf *localForge, fc *fakeCompleter,
+	dir, base, head, accountID, repoID string, lf *localForge,
 ) {
 	t.Helper()
 
 	var rerunHead string
 	t.Run("EnqueueRerun produces a second completed review of the same head", func(t *testing.T) {
-		rerunHead = checkEnqueueRerun(ctx, t, appStore, insertOnly, dispatch, waitReview, dir, base, tenantID, repoID)
+		rerunHead = checkEnqueueRerun(ctx, t, appStore, insertOnly, dispatch, waitReview, dir, base, accountID, repoID)
 	})
 	t.Run("RequestCancel on a completed review is rejected", func(t *testing.T) {
-		checkRequestCancelRejected(ctx, t, appStore, insertOnly, tenantID, rerunHead)
+		checkRequestCancelRejected(ctx, t, appStore, insertOnly, accountID, rerunHead)
 	})
-	t.Run("RequestCancel on another tenant's review is rejected", func(t *testing.T) {
-		checkRequestCancelCrossTenant(ctx, t, appStore, insertOnly, tenantID, rerunHead)
+	t.Run("RequestCancel on another account's review is rejected", func(t *testing.T) {
+		checkRequestCancelCrossAccount(ctx, t, appStore, insertOnly, accountID, rerunHead)
 	})
 	t.Run("RequestCancel ends a running review as canceled with no retry", func(t *testing.T) {
-		checkRequestCancelRunning(ctx, t, appStore, insertOnly, exec, dispatch, waitReview, tenantID, lf)
-	})
-	t.Run("RequestCancel ends a queued (prepared) review as canceled", func(t *testing.T) {
-		checkRequestCancelPrepared(ctx, t, appStore, insertOnly, fc, dispatch, waitReview, dir, base, tenantID)
+		checkRequestCancelRunning(ctx, t, appStore, insertOnly, exec, dispatch, waitReview, accountID, lf)
 	})
 	t.Run("EnqueueReindex forces a full generation even when one is active", func(t *testing.T) {
-		checkEnqueueReindex(ctx, t, appStore, insertOnly, tenantID, repoID, head)
+		checkEnqueueReindex(ctx, t, appStore, insertOnly, accountID, repoID, head)
 	})
 	t.Run("EnqueueReindex reports the sentinels it branches on", func(t *testing.T) {
-		checkEnqueueReindexSentinels(ctx, t, appStore, insertOnly, tenantID, repoID)
+		checkEnqueueReindexSentinels(ctx, t, appStore, insertOnly, accountID, repoID)
 	})
-	t.Run("EnqueueRerun on a closed pull request is rejected", func(t *testing.T) {
-		checkEnqueueRerunClosed(ctx, t, appStore, insertOnly, tenantID, repoID)
+	t.Run("a closed pull request is reviewed only when someone asks", func(t *testing.T) {
+		checkEnqueueRerunClosed(ctx, t, appStore, insertOnly, accountID, repoID, head, lf)
 	})
 }
 
 // countReviewsByStatus returns how many reviews rows exist for headSHA with
-// exactly status, scoped to the tenant.
-func countReviewsByStatus(ctx context.Context, t *testing.T, appStore *store.Store, tenantID, headSHA, status string) int {
+// exactly status, scoped to the account.
+func countReviewsByStatus(ctx context.Context, t *testing.T, appStore *store.Store, accountID, headSHA, status string) int {
 	t.Helper()
 	var n int
-	err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT count(*) FROM reviews WHERE head_sha = $1 AND status = $2`, headSHA, status).Scan(&n)
 	})
 	if err != nil {
@@ -1691,25 +2569,11 @@ func countReviewsByStatus(ctx context.Context, t *testing.T, appStore *store.Sto
 }
 
 // latestReviewID returns the most recently created review's id for headSHA.
-func latestReviewID(ctx context.Context, t *testing.T, appStore *store.Store, tenantID, headSHA string) string {
+func latestReviewID(ctx context.Context, t *testing.T, appStore *store.Store, accountID, headSHA string) string {
 	t.Helper()
 	var id string
-	err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT id FROM reviews WHERE head_sha = $1 ORDER BY created_at DESC LIMIT 1`, headSHA).Scan(&id)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return id
-}
-
-// newTestAccount inserts a bare accounts row and returns its id, standing in
-// for whichever human account RequestCancel's by should record.
-func newTestAccount(ctx context.Context, t *testing.T, appStore *store.Store, tenantID string) string {
-	t.Helper()
-	var id string
-	err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `INSERT INTO accounts DEFAULT VALUES RETURNING id`).Scan(&id)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1749,7 +2613,7 @@ func commitOnBase(t *testing.T, dir, base, msg, body string) string {
 // asserts a second completed review lands, returning the head it exercised.
 func checkEnqueueRerun(
 	ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx],
-	dispatch func(string, bool), waitReview func(string) (string, string, string), dir, base, tenantID, repoID string,
+	dispatch func(string, bool), waitReview func(string) (string, string, string), dir, base, accountID, repoID string,
 ) string {
 	t.Helper()
 	rerunHead := commitOnBase(t, dir, base, "rerun target", "package main\n\nfunc rerun() {}\n")
@@ -1757,18 +2621,19 @@ func checkEnqueueRerun(
 	if status, _, _ := waitReview(rerunHead); status != "completed" {
 		t.Fatalf("status = %s, want completed", status)
 	}
-	if n := countReviewsByStatus(ctx, t, appStore, tenantID, rerunHead, "completed"); n != 1 {
+	if n := countReviewsByStatus(ctx, t, appStore, accountID, rerunHead, "completed"); n != 1 {
 		t.Fatalf("completed reviews for %s = %d, want 1 before the rerun", rerunHead[:7], n)
 	}
 	// The review row completes just before River records its job
 	// completed, and a re-run is refused while that job is still running.
-	waitRiverJobCompleted(ctx, t, appStore, tenantID, latestReviewID(ctx, t, appStore, tenantID, rerunHead))
+	firstID := latestReviewID(ctx, t, appStore, accountID, rerunHead)
+	waitRiverJobCompleted(ctx, t, appStore, accountID, firstID)
 
 	rerun := func() (int64, error) {
 		var jobID int64
-		err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			var err error
-			jobID, err = jobs.EnqueueRerun(ctx, tx, insertOnly, tenantID, repoID, 1)
+			jobID, err = jobs.EnqueueRerun(ctx, tx, insertOnly, accountID, repoID, 1)
 			return err
 		})
 		return jobID, err
@@ -1781,43 +2646,46 @@ func checkEnqueueRerun(
 	}
 
 	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) && countReviewsByStatus(ctx, t, appStore, tenantID, rerunHead, "completed") < 2 {
+	for time.Now().Before(deadline) && countReviewsByStatus(ctx, t, appStore, accountID, rerunHead, "completed") < 2 {
 		time.Sleep(100 * time.Millisecond)
 	}
-	if n := countReviewsByStatus(ctx, t, appStore, tenantID, rerunHead, "completed"); n != 2 {
+	if n := countReviewsByStatus(ctx, t, appStore, accountID, rerunHead, "completed"); n != 2 {
 		t.Fatalf("completed reviews for %s = %d, want 2 after the rerun", rerunHead[:7], n)
+	}
+	// The head is the one the first review saw, so there is nothing to
+	// review incrementally: the re-run looks at the whole pull request.
+	if row := scopeRow(ctx, t, appStore, accountID, rerunHead); row.scope != "full" || row.reason != "re-run at the reviewed head" || row.prior != firstID {
+		t.Fatalf("rerun review = %+v, want full on %s because the head was already reviewed", row, firstID)
 	}
 	return rerunHead
 }
 
 // checkRequestCancelRejected asserts RequestCancel refuses a review that has
 // already finished.
-func checkRequestCancelRejected(ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], tenantID, headSHA string) {
+func checkRequestCancelRejected(ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], accountID, headSHA string) {
 	t.Helper()
-	id := latestReviewID(ctx, t, appStore, tenantID, headSHA)
-	by := newTestAccount(ctx, t, appStore, tenantID)
-	err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		return jobs.RequestCancel(ctx, tx, insertOnly, id, by)
+	id := latestReviewID(ctx, t, appStore, accountID, headSHA)
+	err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		return jobs.RequestCancel(ctx, tx, insertOnly, id)
 	})
 	if !errors.Is(err, jobs.ErrNotCancelable) {
 		t.Fatalf("RequestCancel on a completed review = %v, want ErrNotCancelable", err)
 	}
 }
 
-// checkRequestCancelCrossTenant asserts RequestCancel refuses a review that
-// belongs to a different tenant than the one the caller's transaction scopes
+// checkRequestCancelCrossAccount asserts RequestCancel refuses a review that
+// belongs to a different account than the one the caller's transaction scopes
 // to: row-level security hides the row entirely, so it surfaces the same as
 // "not found" rather than a distinguishable authorization error.
-func checkRequestCancelCrossTenant(ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], tenantID, headSHA string) {
+func checkRequestCancelCrossAccount(ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], accountID, headSHA string) {
 	t.Helper()
-	id := latestReviewID(ctx, t, appStore, tenantID, headSHA)
-	by := newTestAccount(ctx, t, appStore, tenantID)
+	id := latestReviewID(ctx, t, appStore, accountID, headSHA)
 	other := uuid.NewString()
-	err := appStore.WithTenant(ctx, other, func(tx pgx.Tx) error {
-		return jobs.RequestCancel(ctx, tx, insertOnly, id, by)
+	err := appStore.WithAccount(ctx, other, func(tx pgx.Tx) error {
+		return jobs.RequestCancel(ctx, tx, insertOnly, id)
 	})
 	if !errors.Is(err, jobs.ErrNotCancelable) {
-		t.Fatalf("RequestCancel from another tenant = %v, want ErrNotCancelable", err)
+		t.Fatalf("RequestCancel from another account = %v, want ErrNotCancelable", err)
 	}
 }
 
@@ -1828,7 +2696,7 @@ func checkRequestCancelCrossTenant(ctx context.Context, t *testing.T, appStore *
 // is recorded as failed with the remote-cancellation error.
 func checkRequestCancelRunning(
 	ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], exec *gateExecutor,
-	dispatch func(string, bool), waitReview func(string) (string, string, string), tenantID string, lf *localForge,
+	dispatch func(string, bool), waitReview func(string) (string, string, string), accountID string, lf *localForge,
 ) {
 	t.Helper()
 	const canceling = "4444444444444444444444444444444444444444"
@@ -1841,10 +2709,9 @@ func checkRequestCancelRunning(
 		t.Fatal("the review runner never started")
 	}
 
-	id := latestReviewID(ctx, t, appStore, tenantID, canceling)
-	by := newTestAccount(ctx, t, appStore, tenantID)
-	err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		return jobs.RequestCancel(ctx, tx, insertOnly, id, by)
+	id := latestReviewID(ctx, t, appStore, accountID, canceling)
+	err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		return jobs.RequestCancel(ctx, tx, insertOnly, id)
 	})
 	if err != nil {
 		t.Fatalf("RequestCancel: %v", err)
@@ -1853,7 +2720,7 @@ func checkRequestCancelRunning(
 	if status, _, _ := waitReview(canceling); status != "canceled" {
 		t.Fatalf("status = %s, want canceled", status)
 	}
-	if n := countReviewsByStatus(ctx, t, appStore, tenantID, canceling, "canceled"); n != 1 {
+	if n := countReviewsByStatus(ctx, t, appStore, accountID, canceling, "canceled"); n != 1 {
 		t.Fatalf("canceled reviews for %s = %d, want 1 (no River retry)", canceling, n)
 	}
 
@@ -1869,7 +2736,7 @@ func checkRequestCancelRunning(
 	var attempt int
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		err = appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		err = appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT state, attempt FROM river_job WHERE id = (
 				SELECT river_job_id FROM reviews WHERE id = $1)`, id).Scan(&state, &attempt)
 		})
@@ -1893,10 +2760,8 @@ func checkRequestCancelRunning(
 	}
 
 	var requestedAt sql.NullTime
-	var canceledBy sql.NullString
-	err = appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT cancel_requested_at, canceled_by FROM reviews WHERE id = $1`, id).
-			Scan(&requestedAt, &canceledBy)
+	err = appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT cancel_requested_at FROM reviews WHERE id = $1`, id).Scan(&requestedAt)
 	})
 	if err != nil {
 		t.Fatalf("query reviews: %v", err)
@@ -1904,12 +2769,9 @@ func checkRequestCancelRunning(
 	if !requestedAt.Valid {
 		t.Fatal("cancel_requested_at = NULL, want set")
 	}
-	if canceledBy.String != by {
-		t.Fatalf("canceled_by = %q, want %q", canceledBy.String, by)
-	}
 
 	var phase, runErr string
-	err = appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	err = appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT phase, error FROM runner_runs WHERE review_id = $1
 			ORDER BY created_at DESC LIMIT 1`, id).Scan(&phase, &runErr)
 	})
@@ -1921,74 +2783,173 @@ func checkRequestCancelRunning(
 	}
 }
 
-// checkRequestCancelPrepared cancels a review in its "prepared" state, which
-// RequestCancel also accepts: the runner finishes and records a successful
-// run, afterRun marks the review prepared, and the model call inside publish
-// is what the blocked completer holds open when the cancel arrives. The run
-// itself succeeded, so unlike checkRequestCancelRunning this does not assert
-// on runner_runs.
-func checkRequestCancelPrepared(
-	ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], fc *fakeCompleter,
-	dispatch func(string, bool), waitReview func(string) (string, string, string), dir, base, tenantID string,
+// checkEnqueueRerunClosed asserts what a closed pull request takes: a
+// re-run someone asks for is reviewed, with no commit status and no
+// approval, while a label change queues nothing and an automatic job ends
+// skipped with no runner. dispatchPR always reopens PR #1 (State: "open"),
+// so this closes it directly with SQL rather than through a dispatch, and
+// must run after every other checkActions subtest that dispatches: a later
+// dispatch would silently reopen the row.
+func checkEnqueueRerunClosed(
+	ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], accountID, repoID, head string,
+	lf *localForge,
 ) {
 	t.Helper()
-	head := commitOnBase(t, dir, base, "cancel during prepared", "package main\n\nfunc preparedCancel() {}\n")
-	fc.setBlock(true)
-	t.Cleanup(func() { fc.setBlock(false) })
-	dispatch(head, false)
-	select {
-	case <-fc.started:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the completer never started")
-	}
-
-	id := latestReviewID(ctx, t, appStore, tenantID, head)
-	by := newTestAccount(ctx, t, appStore, tenantID)
-	err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		return jobs.RequestCancel(ctx, tx, insertOnly, id, by)
-	})
-	if err != nil {
-		t.Fatalf("RequestCancel: %v", err)
-	}
-
-	if status, _, _ := waitReview(head); status != "canceled" {
-		t.Fatalf("status = %s, want canceled", status)
-	}
-	if n := countReviewsByStatus(ctx, t, appStore, tenantID, head, "canceled"); n != 1 {
-		t.Fatalf("canceled reviews for %s = %d, want 1 (no River retry)", head, n)
-	}
-}
-
-// checkEnqueueRerunClosed asserts EnqueueRerun refuses a pull request that
-// has no open head to re-review. dispatchPR always reopens PR #1 (State:
-// "open"), so this closes it directly with SQL rather than through a
-// dispatch, and must run after every other checkActions subtest that
-// dispatches: a later dispatch would silently reopen the row.
-func checkEnqueueRerunClosed(ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], tenantID, repoID string) {
-	t.Helper()
-	err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE pull_requests SET state = 'closed' WHERE tenant_id = $1 AND repository_id = $2 AND number = 1`,
-			tenantID, repoID)
+	// The pull request is left at a head the cancel subtests made up; it
+	// is merged at one the repository has, which a review can fetch.
+	err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE pull_requests SET state = 'closed', merged = true, head_sha = $3
+			WHERE account_id = $1 AND repository_id = $2 AND number = 1`, accountID, repoID, head)
 		return err
 	})
 	if err != nil {
 		t.Fatalf("close pull request: %v", err)
 	}
 
-	err = appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-		_, err := jobs.EnqueueRerun(ctx, tx, insertOnly, tenantID, repoID, 1)
+	err = appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		_, err := jobs.EnqueueLabelChange(ctx, tx, insertOnly, accountID, repoID, 1, "labeled")
 		return err
 	})
 	if !errors.Is(err, jobs.ErrNoHead) {
-		t.Fatalf("EnqueueRerun on a closed pull request = %v, want ErrNoHead", err)
+		t.Fatalf("EnqueueLabelChange on a closed pull request = %v, want ErrNoHead", err)
+	}
+
+	// An automatic job queued while the pull request was open, and run once
+	// it is closed, ends as a skipped review with no runner.
+	if _, err := insertOnly.Insert(ctx, jobs.ReviewArgs{
+		AccountID: accountID, RepositoryID: repoID, Number: 1, HeadSHA: head, Trigger: "synchronize", Request: uuid.NewString(),
+	}, nil); err != nil {
+		t.Fatalf("insert review job: %v", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var status string
+		var runs int
+		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT status, (SELECT count(*) FROM runner_runs rr WHERE rr.review_id = r.id)
+				FROM reviews r WHERE head_sha = $1 AND error = 'the pull request was merged'`, head).Scan(&status, &runs)
+		})
+		if err == nil {
+			if status != "skipped" || runs != 0 {
+				t.Fatalf("automatic review of a closed pull request: status %s with %d runner runs, want skipped with none", status, runs)
+			}
+			break
+		}
+		if !errors.Is(err, pgx.ErrNoRows) || time.Now().After(deadline) {
+			t.Fatalf("no skipped review of the closed pull request: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// A re-run someone asks for is a look back: reviewed in full, with no
+	// commit status set and no approval given.
+	lf.mu.Lock()
+	lf.status = "untouched"
+	approvals, base := len(lf.approvals), lf.base
+	lf.mu.Unlock()
+	if got := rerunClosed(ctx, t, appStore, insertOnly, accountID, repoID, head); got.status != "completed" || got.mergeBase != base {
+		t.Fatalf("look back = %+v, want completed against %s", got, base)
+	}
+	lf.mu.Lock()
+	status, approved := lf.status, len(lf.approvals)-approvals
+	lf.mu.Unlock()
+	if status != "untouched" || approved != 0 {
+		t.Fatalf("the closed pull request's review set status %q and gave %d approvals, want none", status, approved)
+	}
+
+	// Merged with a merge commit, the head is in its base branch and is its
+	// own merge base: the last review's merge base shows the change instead.
+	lf.mu.Lock()
+	lf.base = head
+	lf.mu.Unlock()
+	t.Cleanup(func() {
+		lf.mu.Lock()
+		lf.base = base
+		lf.mu.Unlock()
+	})
+	if got := rerunClosed(ctx, t, appStore, insertOnly, accountID, repoID, head); got.status != "completed" || got.mergeBase != base {
+		t.Fatalf("look back at a head in its base branch = %+v, want completed against %s", got, base)
+	}
+
+	// With no earlier review to say where it branched off, nothing is left.
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE reviews SET merge_base_sha = '' WHERE pull_request_id =
+			(SELECT id FROM pull_requests WHERE repository_id = $1 AND number = 1)`, repoID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := rerunClosed(ctx, t, appStore, insertOnly, accountID, repoID, head)
+	if got.status != "skipped" || got.err != "nothing to review: the head is already in main" || got.runs != 0 {
+		t.Fatalf("look back with no merge base = %+v, want skipped with nothing to review and no runner", got)
+	}
+}
+
+// lookBack is what became of a re-run of a closed pull request.
+type lookBack struct {
+	status, mergeBase, err string
+	runs                   int
+}
+
+// rerunClosed asks for a review of PR #1, closed at head, once the job
+// before it lets it queue, and waits for the review it starts to end.
+func rerunClosed(
+	ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], accountID, repoID, head string,
+) lookBack {
+	t.Helper()
+	count := func() int {
+		var n int
+		if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM reviews WHERE head_sha = $1`, head).Scan(&n)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	before := count()
+	var err error
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err = appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+			_, err := jobs.EnqueueRerun(ctx, tx, insertOnly, accountID, repoID, 1)
+			return err
+		})
+		if !errors.Is(err, jobs.ErrRerunQueued) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("EnqueueRerun on a closed pull request: %v", err)
+	}
+	var got lookBack
+	deadline = time.Now().Add(30 * time.Second)
+	for {
+		finished := false
+		if count() > before {
+			if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `SELECT status, merge_base_sha, error, finished_at IS NOT NULL,
+						(SELECT count(*) FROM runner_runs rr WHERE rr.review_id = r.id)
+					FROM reviews r WHERE head_sha = $1 ORDER BY created_at DESC LIMIT 1`, head).
+					Scan(&got.status, &got.mergeBase, &got.err, &finished, &got.runs)
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if finished {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the look back at %s did not end: %+v", head[:7], got)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
 // activeIndexGeneration returns repositories.active_index_run_id for repoID.
-func activeIndexGeneration(ctx context.Context, t *testing.T, appStore *store.Store, tenantID, repoID string) string {
+func activeIndexGeneration(ctx context.Context, t *testing.T, appStore *store.Store, accountID, repoID string) string {
 	t.Helper()
 	var id string
-	err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT coalesce(active_index_run_id::text, '') FROM repositories WHERE id = $1`, repoID).Scan(&id)
 	})
 	if err != nil {
@@ -2006,17 +2967,17 @@ func activeIndexGeneration(ctx context.Context, t *testing.T, appStore *store.St
 // generation drops to 'superseded' at essentially the same time the new one
 // lands. What actually distinguishes "forced a new generation" from "no-op"
 // is the repository's active_index_run_id switching to a different row.
-func checkEnqueueReindex(ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], tenantID, repoID, head string) {
+func checkEnqueueReindex(ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], accountID, repoID, head string) {
 	t.Helper()
-	before := activeIndexGeneration(ctx, t, appStore, tenantID, repoID)
+	before := activeIndexGeneration(ctx, t, appStore, accountID, repoID)
 	if before == "" {
 		t.Fatal("no active index generation before forcing a reindex")
 	}
 
 	var jobID int64
-	err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		var err error
-		jobID, err = jobs.EnqueueReindex(ctx, tx, insertOnly, tenantID, repoID)
+		jobID, err = jobs.EnqueueReindex(ctx, tx, insertOnly, accountID, repoID)
 		return err
 	})
 	if err != nil || jobID == 0 {
@@ -2029,8 +2990,8 @@ func checkEnqueueReindex(ctx context.Context, t *testing.T, appStore *store.Stor
 	after := before
 	var mode, status string
 	for time.Now().Before(deadline) {
-		if after = activeIndexGeneration(ctx, t, appStore, tenantID, repoID); after != "" && after != before {
-			if err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		if after = activeIndexGeneration(ctx, t, appStore, accountID, repoID); after != "" && after != before {
+			if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 				return tx.QueryRow(ctx, `SELECT mode, status FROM index_runs WHERE id = $1`, after).Scan(&mode, &status)
 			}); err != nil {
 				t.Fatal(err)
@@ -2049,7 +3010,7 @@ func checkEnqueueReindex(ctx context.Context, t *testing.T, appStore *store.Stor
 	}
 
 	var priorStatus string
-	if err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	if err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT status FROM index_runs WHERE id = $1`, before).Scan(&priorStatus)
 	}); err != nil {
 		t.Fatal(err)
@@ -2122,18 +3083,6 @@ func (g *gateExecutor) Run(ctx context.Context, spec executor.Spec) executor.Res
 	return executor.Result{JobName: "kritique-run-blocked", Err: context.Cause(ctx)}
 }
 
-func allowSHAFetch(t *testing.T, r *git.Repository) {
-	t.Helper()
-	cfg, err := r.Config()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Raw.SetOption("uploadpack", "", "allowReachableSHA1InWant", "true")
-	if err := r.SetConfig(cfg); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // jobDeadline stands in for River's job timeout, which cancels a job's ctx
 // with context.DeadlineExceeded as its cause: armed, it ends the running
 // review job's ctx that way the moment fire is called.
@@ -2172,12 +3121,11 @@ func (d *jobDeadline) fire() {
 
 // checkJobEnded asserts a review job whose ctx ends after its runner has
 // finished leaves a terminal review and no River retry: a timeout during
-// afterRun fails the review, and a cancel after the model answered keeps
-// the published review completed with its usage recorded.
+// afterRun fails the review, and one while it publishes keeps the review
+// completed with its usage recorded.
 func checkJobEnded(
-	ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], exec *gateExecutor,
-	fc *fakeCompleter, deadline *jobDeadline, dispatch func(string, bool), waitReview func(string) (string, string, string),
-	dir, base, tenantID string, lf *localForge,
+	ctx context.Context, t *testing.T, appStore *store.Store, exec *gateExecutor, deadline *jobDeadline,
+	dispatch func(string, bool), waitReview func(string) (string, string, string), dir, base, accountID string, lf *localForge,
 ) {
 	t.Run("a timeout during afterRun fails the review", func(t *testing.T) {
 		head := commitOnBase(t, dir, base, "timed out after the runner", "package main\n\nfunc timedOut() {}\n")
@@ -2185,19 +3133,19 @@ func checkJobEnded(
 		t.Cleanup(func() { exec.setAfter(nil) })
 		deadline.arm()
 		dispatch(head, false)
-		if status, _, _ := waitReview(head); status != statusFailed {
+		if status, _, _ := waitReview(head); status != string(store.ReviewFailed) {
 			t.Fatalf("status = %s, want failed", status)
 		}
-		id := latestReviewID(ctx, t, appStore, tenantID, head)
+		id := latestReviewID(ctx, t, appStore, accountID, head)
 		var errText string
-		err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT error FROM reviews WHERE id = $1`, id).Scan(&errText)
 		})
 		if err != nil || errText != "review timed out: context deadline exceeded" {
 			t.Fatalf("error = %q, %v; want review timed out: context deadline exceeded", errText, err)
 		}
-		waitRiverJobCompleted(ctx, t, appStore, tenantID, id)
-		if n := countReviewsByStatus(ctx, t, appStore, tenantID, head, "running"); n != 0 {
+		waitRiverJobCompleted(ctx, t, appStore, accountID, id)
+		if n := countReviewsByStatus(ctx, t, appStore, accountID, head, "running"); n != 0 {
 			t.Fatalf("running reviews for %s = %d, want 0", head, n)
 		}
 		if got := lf.lastStatus(); got != "error: kritique: review timed out" {
@@ -2205,38 +3153,24 @@ func checkJobEnded(
 		}
 	})
 
-	t.Run("a cancel after the model answered keeps the review completed", func(t *testing.T) {
-		head := commitOnBase(t, dir, base, "canceled after the answer", "package main\n\nfunc answered() {}\n")
-		by := newTestAccount(ctx, t, appStore, tenantID)
-		fc.setAnswered(func(cctx context.Context) {
-			id := latestReviewID(ctx, t, appStore, tenantID, head)
-			err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-				return jobs.RequestCancel(ctx, tx, insertOnly, id, by)
-			})
-			if err != nil {
-				t.Errorf("RequestCancel: %v", err)
-				return
-			}
-			select {
-			case <-cctx.Done():
-			case <-time.After(10 * time.Second):
-				t.Error("the job's ctx never saw the cancel")
-			}
-		})
-		t.Cleanup(func() { fc.setAnswered(nil) })
+	t.Run("a timeout while publishing keeps the review completed", func(t *testing.T) {
+		head := commitOnBase(t, dir, base, "timed out while publishing", "package main\n\nfunc answered() {}\n")
+		lf.onPublish(deadline.fire)
+		t.Cleanup(func() { lf.onPublish(nil) })
+		deadline.arm()
 		dispatch(head, false)
-		if status, _, _ := waitReview(head); status != statusCompleted {
+		if status, _, _ := waitReview(head); status != string(store.ReviewCompleted) {
 			t.Fatalf("status = %s, want completed", status)
 		}
-		id := latestReviewID(ctx, t, appStore, tenantID, head)
+		id := latestReviewID(ctx, t, appStore, accountID, head)
 		var usage int
-		err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT count(*) FROM usage WHERE review_id = $1 AND role = 'review'`, id).Scan(&usage)
 		})
 		if err != nil || usage != 1 {
 			t.Fatalf("review usage rows = %d, %v; want 1", usage, err)
 		}
-		waitRiverJobCompleted(ctx, t, appStore, tenantID, id)
+		waitRiverJobCompleted(ctx, t, appStore, accountID, id)
 		if got := lf.lastStatus(); !strings.HasPrefix(got, "success: ") {
 			t.Fatalf("commit status = %q, want success", got)
 		}
@@ -2246,13 +3180,13 @@ func checkJobEnded(
 // waitRiverJobCompleted waits for the review's River job to settle as
 // completed on its first attempt: River writes its own row only after Work
 // returns, and a job that returned an error would be retryable instead.
-func waitRiverJobCompleted(ctx context.Context, t *testing.T, appStore *store.Store, tenantID, reviewID string) {
+func waitRiverJobCompleted(ctx context.Context, t *testing.T, appStore *store.Store, accountID, reviewID string) {
 	t.Helper()
 	var state string
 	var attempt int
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT state, attempt FROM river_job WHERE id = (
 				SELECT river_job_id FROM reviews WHERE id = $1)`, reviewID).Scan(&state, &attempt)
 		})
@@ -2278,12 +3212,12 @@ func (l *localForge) lastStatus() string {
 // checkEnqueueReindexSentinels asserts EnqueueReindex's two sentinels. Each
 // case runs in a transaction it rolls back, so no job it inserts outlives it.
 func checkEnqueueReindexSentinels(
-	ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], tenantID, repoID string,
+	ctx context.Context, t *testing.T, appStore *store.Store, insertOnly *river.Client[pgx.Tx], accountID, repoID string,
 ) {
 	errRollback := errors.New("roll back")
-	t.Run("ErrRepositoryNotFound for a repository the tenant does not have", func(t *testing.T) {
-		err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-			_, err := jobs.EnqueueReindex(ctx, tx, insertOnly, tenantID, uuid.NewString())
+	t.Run("ErrRepositoryNotFound for a repository the account does not have", func(t *testing.T) {
+		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+			_, err := jobs.EnqueueReindex(ctx, tx, insertOnly, accountID, uuid.NewString())
 			return errors.Join(err, errRollback)
 		})
 		if !errors.Is(err, jobs.ErrRepositoryNotFound) {
@@ -2303,15 +3237,15 @@ func checkEnqueueReindexSentinels(
 		})
 		var first int64
 		var second error
-		err := appStore.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
-			if _, err := insertOnly.InsertTx(ctx, tx, jobs.IndexArgs{TenantID: tenantID, RepositoryID: repoID, Trigger: jobs.TriggerOnboard}, nil); err != nil {
+		err := appStore.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
+			if _, err := insertOnly.InsertTx(ctx, tx, jobs.IndexArgs{AccountID: accountID, RepositoryID: repoID, Trigger: jobs.TriggerOnboard}, nil); err != nil {
 				return fmt.Errorf("insert onboard job: %w", err)
 			}
 			var err error
-			if first, err = jobs.EnqueueReindex(ctx, tx, insertOnly, tenantID, repoID); err != nil {
+			if first, err = jobs.EnqueueReindex(ctx, tx, insertOnly, accountID, repoID); err != nil {
 				return err
 			}
-			_, second = jobs.EnqueueReindex(ctx, tx, insertOnly, tenantID, repoID)
+			_, second = jobs.EnqueueReindex(ctx, tx, insertOnly, accountID, repoID)
 			return errRollback
 		})
 		if !errors.Is(err, errRollback) || first == 0 {
@@ -2321,4 +3255,85 @@ func checkEnqueueReindexSentinels(
 			t.Fatalf("second EnqueueReindex = %v, want ErrReindexQueued", second)
 		}
 	})
+}
+
+// TestRetriedJobEndsItsEarlierReview: an attempt of a review job ends the
+// review an earlier attempt of the same job left running, and no other.
+func TestRetriedJobEndsItsEarlierReview(t *testing.T) {
+	ctx := t.Context()
+	logger := slog.New(slog.DiscardHandler)
+	st := storetest.Open(t)
+	t.Setenv("TEST_PEM", "pem")
+	t.Setenv("TEST_SECRET", "test-provider-key")
+	t.Setenv("KRITIQUE_RUNNER_DEADLINE", "60s")
+	file := configfiletest.Load(t, configYAML)
+	if err := st.ApplyConfig(ctx, file); err != nil {
+		t.Fatal(err)
+	}
+	insertOnly, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, _ := file.Account(configfile.ForgeGitHub, "onedr0p")
+	out, err := ingest.NewService(st, insertOnly).Dispatch(ctx, ingest.Request{File: file, Account: account, Event: webhook.Event{
+		Kind: webhook.KindPullRequest, Action: "opened", Account: "onedr0p",
+		Repository:  &webhook.Repository{FullName: "onedr0p/home-ops", DefaultBranch: "main"},
+		PullRequest: &webhook.PullRequest{Number: 4242, Title: "t", Author: "a", State: "open", HeadRef: "f", HeadSHA: "abc4242", BaseRef: "main"},
+	}})
+	if err != nil || out.Status != ingest.Enqueued {
+		t.Fatalf("dispatch = %+v, %v", out, err)
+	}
+	repoID := configfile.RepositoryID(account.ID(), "onedr0p/home-ops")
+	pr, err := loadPullRequest(ctx, st, account.ID(), repoID, 4242)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &Review{Store: st, Current: configfile.NewCurrent(file), Logger: logger}
+	args := jobs.ReviewArgs{AccountID: account.ID(), RepositoryID: repoID, Number: 4242, HeadSHA: "abc4242"}
+	attempt := func(jobID int64) string {
+		t.Helper()
+		id, _, _, err := w.start(ctx, args, pr, "base", "", jobID)
+		if err != nil {
+			t.Fatalf("start(%d): %v", jobID, err)
+		}
+		return id
+	}
+	status := func(id string) string {
+		t.Helper()
+		var s string
+		if err := st.WithAccount(ctx, account.ID(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT status FROM reviews WHERE id = $1`, id).Scan(&s)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	first, other := attempt(7001), attempt(7002)
+	retry := attempt(7001)
+	if got := []string{status(first), status(other), status(retry)}; got[0] != "failed" || got[1] != "running" || got[2] != "running" {
+		t.Fatalf("statuses = %v, want the first attempt failed and the others running", got)
+	}
+}
+
+// ReadGitToken, RepoLabels, AddLabels, RemoveLabel, SetState, AddAssignees,
+// RequestReviewers and SearchIssues are no-op stubs: these tests never run
+// a task, but localForge must still satisfy forge.Client.
+func (l *localForge) ReadGitToken(context.Context, string, string) (string, error) { return "", nil }
+
+func (l *localForge) RepoLabels(context.Context, string, string) ([]string, error) { return nil, nil }
+
+func (l *localForge) AddLabels(context.Context, string, string, int, []string) error { return nil }
+
+func (l *localForge) RemoveLabel(context.Context, string, string, int, string) error { return nil }
+
+func (l *localForge) SetState(context.Context, string, string, int, bool) error { return nil }
+
+func (l *localForge) AddAssignees(context.Context, string, string, int, []string) error { return nil }
+
+func (l *localForge) RequestReviewers(context.Context, string, string, int, []string) error {
+	return nil
+}
+
+func (l *localForge) SearchIssues(context.Context, string, string, string, int) ([]forge.Issue, error) {
+	return nil, nil
 }

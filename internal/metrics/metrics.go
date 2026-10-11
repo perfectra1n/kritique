@@ -1,16 +1,17 @@
 // Package metrics is every Prometheus series kritique exports beyond the Go
-// runtime. One Metrics value is registered per process and shared by the
-// roles; a nil *Metrics records nothing, so tests need not register one.
+// runtime. One Metrics value is registered per process and shared by its
+// parts; a nil *Metrics records nothing, so tests need not register one.
 package metrics
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Metrics holds the collectors. Labels are bounded by configuration
-// (tenants, installations, models) or by fixed vocabularies (status,
+// (accounts, connections, models) or by fixed vocabularies (status,
 // stage, outcome); nothing per PR or per commit is ever a label.
 type Metrics struct {
 	webhooks       *prometheus.CounterVec
@@ -19,76 +20,97 @@ type Metrics struct {
 	reviews        *prometheus.CounterVec
 	reviewDuration *prometheus.HistogramVec
 	followups      *prometheus.CounterVec
+	threads        *prometheus.CounterVec
 	findings       *prometheus.CounterVec
-	contextChunks  *prometheus.CounterVec
+	confidence     *prometheus.CounterVec
 	indexRuns      *prometheus.CounterVec
 	indexChunks    *prometheus.CounterVec
+	contextChunks  *prometheus.CounterVec
 	runnerRuns     *prometheus.CounterVec
 	runnerDuration *prometheus.HistogramVec
 	leaseWait      *prometheus.HistogramVec
 	reviewSnoozes  *prometheus.CounterVec
+	jobsRescued    *prometheus.CounterVec
 	modelCalls     *prometheus.CounterVec
 	modelTokens    *prometheus.CounterVec
 	modelCost      *prometheus.CounterVec
 	egress         *prometheus.CounterVec
+	forgeLimits    *prometheus.CounterVec
 	transcripts    *prometheus.CounterVec
+	leader         prometheus.Gauge
 }
 
 // Label names shared across series.
 const (
-	lblTenant       = "tenant"
-	lblModel        = "model"
-	lblRole         = "role"
-	lblOutcome      = "outcome"
-	lblInstallation = "installation"
-	lblKind         = "kind"
+	lblAccount    = "account"
+	lblModel      = "model"
+	lblRole       = "role"
+	lblOutcome    = "outcome"
+	lblConnection = "connection"
+	lblKind       = "kind"
 )
 
 // New registers the collectors on reg.
 func New(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		webhooks: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritique_webhooks_total", Help: "Webhook deliveries by installation and what became of them.",
-		}, []string{lblInstallation, lblOutcome}),
+			Name: "kritique_webhooks_total", Help: "Webhook deliveries by connection and what became of them.",
+		}, []string{lblConnection, lblOutcome}),
 		polls: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritique_polls_total", Help: "Backstop polls per installation, by outcome (ok, error).",
-		}, []string{lblInstallation, lblOutcome}),
+			Name: "kritique_polls_total", Help: "Backstop polls per connection, by outcome (ok, error).",
+		}, []string{lblConnection, lblOutcome}),
 		polled: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kritique_polled_pull_requests_total", Help: "Open pull requests the backstop poll handed to ingest.",
-		}, []string{lblInstallation}),
+		}, []string{lblConnection}),
 		reviews: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kritique_reviews_total", Help: "Reviews finished, by terminal status.",
-		}, []string{lblTenant, "status"}),
+		}, []string{lblAccount, "status"}),
+		forgeLimits: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kritique_forge_rate_limits_total",
+			Help: "Responses the forge refused for a rate limit, by connection and whether the wait was taken.",
+		}, []string{lblConnection, lblOutcome}),
 		egress: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kritique_egress_requests_total",
 			Help: "Requests runner pods made through the gateway, by kind (connect, http) and outcome (allowed, refused, error).",
 		}, []string{lblKind, lblOutcome}),
+		leader: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "kritique_leader", Help: "1 while this replica holds the leader lock, else 0.",
+		}),
 		transcripts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kritique_transcript_writes_total",
-			Help: "Model calls recorded for the transcript view, by kind (agent_step, review, fallback, followup) and outcome (ok, error).",
+			Help: "Model calls recorded for the transcript view, by kind (agent_step, followup, confidence) and outcome (ok, error).",
 		}, []string{lblKind, lblOutcome}),
 		reviewDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "kritique_review_duration_seconds", Help: "Wall time of a review job from pickup to terminal status.",
 			Buckets: []float64{5, 10, 20, 30, 60, 120, 300, 600, 900},
-		}, []string{lblTenant}),
+		}, []string{lblAccount}),
 		followups: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kritique_followups_total", Help: "Follow-up mentions handled, by outcome: answered, limited, ignored, failed.",
-		}, []string{lblTenant, lblOutcome}),
+		}, []string{lblAccount, lblOutcome}),
+		threads: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kritique_threads_total",
+			Help: "Finding threads a person resolved or unresolved, by outcome: dismissed, addressed, restored, ignored, failed.",
+		}, []string{lblAccount, lblOutcome}),
 		findings: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritique_findings_total", Help: "Findings posted, by severity.",
-		}, []string{lblTenant, "severity"}),
-		contextChunks: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritique_context_chunks_total", Help: "Context chunks put in front of the model, by stage.",
-		}, []string{lblTenant, "stage"}),
+			Name: "kritique_findings_total", Help: "Findings posted, by severity and category.",
+		}, []string{lblAccount, "severity", "category"}),
+		confidence: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kritique_confidence_scores_total",
+			Help: "Reviews the confidence model scored, by score (0 to 5) and risk (low, medium, high, critical).",
+		}, []string{lblAccount, "score", "risk"}),
 		indexRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kritique_index_runs_total", Help: "Index runs finished, by mode and status.",
-		}, []string{lblTenant, "mode", "status"}),
+		}, []string{lblAccount, "mode", "status"}),
 		indexChunks: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kritique_index_chunks_total", Help: "Chunks embedded into the index.",
-		}, []string{lblTenant}),
+		}, []string{lblAccount}),
+		contextChunks: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kritique_context_chunks_total",
+			Help: "Context chunks a review's prompt was given, by stage (overlay, definition, caller, similar).",
+		}, []string{lblAccount, "stage"}),
 		runnerRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kritique_runner_runs_total", Help: "Runner Jobs finished, by kind and outcome.",
-		}, []string{lblTenant, "kind", lblOutcome}),
+		}, []string{lblAccount, "kind", lblOutcome}),
 		runnerDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "kritique_runner_duration_seconds", Help: "Runner Job time from start to finish.",
 			Buckets: []float64{2, 5, 10, 20, 30, 60, 120, 300, 600, 900},
@@ -96,88 +118,107 @@ func New(reg prometheus.Registerer) *Metrics {
 		leaseWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "kritique_lease_wait_seconds", Help: "Time spent waiting for a model concurrency slot.",
 			Buckets: []float64{0.01, 0.1, 1, 5, 15, 30, 60, 120, 300},
-		}, []string{lblTenant, lblModel}),
+		}, []string{lblAccount, lblModel}),
 		reviewSnoozes: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kritique_review_snoozes_total", Help: "Reviews put back on the queue because every model slot was held.",
-		}, []string{lblTenant, lblModel}),
+		}, []string{lblAccount, lblModel}),
+		jobsRescued: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "kritique_jobs_rescued_total", Help: "Jobs of a dead replica handed back to the queue by the leader, by kind and state.",
+		}, []string{lblKind, "state"}),
 		modelCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "kritique_model_calls_total", Help: "Model calls, by role and outcome.",
-		}, []string{lblTenant, lblModel, lblRole, lblOutcome}),
+			Name: "kritique_model_calls_total", Help: "Model calls, by the model that answered, role and outcome.",
+		}, []string{lblAccount, lblModel, lblRole, lblOutcome}),
 		modelTokens: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kritique_model_tokens_total",
 			Help: "Tokens spent, by role and direction (input, cached, output); " +
 				"cached is the part of input the provider served from its prompt cache.",
-		}, []string{lblTenant, lblModel, lblRole, "direction"}),
+		}, []string{lblAccount, lblModel, lblRole, "direction"}),
 		modelCost: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kritique_model_cost_usd_total", Help: "Provider-reported cost in US dollars, by role.",
-		}, []string{lblTenant, lblModel, lblRole}),
+		}, []string{lblAccount, lblModel, lblRole}),
 	}
-	reg.MustRegister(m.webhooks, m.polls, m.polled, m.reviews, m.reviewDuration, m.followups, m.findings,
-		m.contextChunks, m.indexRuns, m.indexChunks,
-		m.runnerRuns, m.runnerDuration, m.leaseWait, m.reviewSnoozes, m.modelCalls, m.modelTokens, m.modelCost, m.egress, m.transcripts)
+	reg.MustRegister(m.webhooks, m.polls, m.polled, m.reviews, m.reviewDuration, m.followups, m.threads, m.findings, m.confidence,
+		m.indexRuns, m.indexChunks, m.contextChunks,
+		m.runnerRuns, m.runnerDuration, m.leaseWait, m.reviewSnoozes, m.jobsRescued, m.modelCalls, m.modelTokens, m.modelCost, m.egress,
+		m.forgeLimits, m.transcripts,
+		m.leader)
 	return m
 }
 
 // Webhook counts one delivery.
-func (m *Metrics) Webhook(installation, outcome string) {
+func (m *Metrics) Webhook(connection, outcome string) {
 	if m != nil {
-		m.webhooks.WithLabelValues(installation, outcome).Inc()
+		m.webhooks.WithLabelValues(connection, outcome).Inc()
 	}
 }
 
-// Poll counts one installation poll and the pull requests it handed on.
-func (m *Metrics) Poll(installation, outcome string, pullRequests int) {
+// Poll counts one connection poll and the pull requests it handed on.
+func (m *Metrics) Poll(connection, outcome string, pullRequests int) {
 	if m != nil {
-		m.polls.WithLabelValues(installation, outcome).Inc()
+		m.polls.WithLabelValues(connection, outcome).Inc()
 		if pullRequests > 0 {
-			m.polled.WithLabelValues(installation).Add(float64(pullRequests))
+			m.polled.WithLabelValues(connection).Add(float64(pullRequests))
 		}
 	}
 }
 
 // Review counts a finished review and its duration.
-func (m *Metrics) Review(tenant, status string, took time.Duration) {
+func (m *Metrics) Review(account, status string, took time.Duration) {
 	if m != nil {
-		m.reviews.WithLabelValues(tenant, status).Inc()
-		m.reviewDuration.WithLabelValues(tenant).Observe(took.Seconds())
+		m.reviews.WithLabelValues(account, status).Inc()
+		m.reviewDuration.WithLabelValues(account).Observe(took.Seconds())
 	}
 }
 
 // FollowUp counts one handled mention.
-func (m *Metrics) FollowUp(tenant, outcome string) {
+func (m *Metrics) FollowUp(account, outcome string) {
 	if m != nil {
-		m.followups.WithLabelValues(tenant, outcome).Inc()
+		m.followups.WithLabelValues(account, outcome).Inc()
+	}
+}
+
+// Thread counts one resolved or unresolved finding thread handled.
+func (m *Metrics) Thread(account, outcome string) {
+	if m != nil {
+		m.threads.WithLabelValues(account, outcome).Inc()
 	}
 }
 
 // Findings counts posted findings of one severity.
-func (m *Metrics) Findings(tenant, severity string, n int) {
+func (m *Metrics) Findings(account, severity, category string, n int) {
 	if m != nil && n > 0 {
-		m.findings.WithLabelValues(tenant, severity).Add(float64(n))
+		m.findings.WithLabelValues(account, severity, category).Add(float64(n))
 	}
 }
 
-// ContextChunks counts chunks of one stage put in a prompt.
-func (m *Metrics) ContextChunks(tenant, stage string, n int) {
-	if m != nil && n > 0 {
-		m.contextChunks.WithLabelValues(tenant, stage).Add(float64(n))
+// ConfidenceScored counts a published review's confidence score and risk.
+func (m *Metrics) ConfidenceScored(account string, score int, risk string) {
+	if m != nil {
+		m.confidence.WithLabelValues(account, strconv.Itoa(score), risk).Inc()
 	}
 }
 
 // IndexRun counts a finished index run and the chunks it embedded.
-func (m *Metrics) IndexRun(tenant, mode, status string, chunks int) {
+func (m *Metrics) IndexRun(account, mode, status string, chunks int) {
 	if m != nil {
-		m.indexRuns.WithLabelValues(tenant, mode, status).Inc()
+		m.indexRuns.WithLabelValues(account, mode, status).Inc()
 		if chunks > 0 {
-			m.indexChunks.WithLabelValues(tenant).Add(float64(chunks))
+			m.indexChunks.WithLabelValues(account).Add(float64(chunks))
 		}
 	}
 }
 
+// ContextChunks counts the chunks one stage gave a review's prompt.
+func (m *Metrics) ContextChunks(account, stage string, n int) {
+	if m != nil && n > 0 {
+		m.contextChunks.WithLabelValues(account, stage).Add(float64(n))
+	}
+}
+
 // RunnerRun counts a finished runner Job; took is zero when unknown.
-func (m *Metrics) RunnerRun(tenant, kind, outcome string, took time.Duration) {
+func (m *Metrics) RunnerRun(account, kind, outcome string, took time.Duration) {
 	if m != nil {
-		m.runnerRuns.WithLabelValues(tenant, kind, outcome).Inc()
+		m.runnerRuns.WithLabelValues(account, kind, outcome).Inc()
 		if took > 0 {
 			m.runnerDuration.WithLabelValues(kind).Observe(took.Seconds())
 		}
@@ -185,42 +226,59 @@ func (m *Metrics) RunnerRun(tenant, kind, outcome string, took time.Duration) {
 }
 
 // LeaseWait records how long a lease took to acquire.
-func (m *Metrics) LeaseWait(tenant, model string, took time.Duration) {
+func (m *Metrics) LeaseWait(account, model string, took time.Duration) {
 	if m != nil {
-		m.leaseWait.WithLabelValues(tenant, model).Observe(took.Seconds())
+		m.leaseWait.WithLabelValues(account, model).Observe(took.Seconds())
 	}
 }
 
 // ReviewSnoozed counts a review put back on the queue to wait for a model
 // slot.
-func (m *Metrics) ReviewSnoozed(tenant, model string) {
+func (m *Metrics) ReviewSnoozed(account, model string) {
 	if m != nil {
-		m.reviewSnoozes.WithLabelValues(tenant, model).Inc()
+		m.reviewSnoozes.WithLabelValues(account, model).Inc()
+	}
+}
+
+// JobRescued counts a job of a dead replica handed back to the queue by
+// the leader, by job kind and the state it was handed back in.
+func (m *Metrics) JobRescued(kind, state string) {
+	if m != nil {
+		m.jobsRescued.WithLabelValues(kind, state).Inc()
 	}
 }
 
 // ModelCall records one call: outcome is ok or error; tokens and cost are
 // added only for ok. cachedTokens is the part of inputTokens the provider
 // served from its prompt cache.
-func (m *Metrics) ModelCall(tenant, model, role, outcome string, inputTokens, cachedTokens, outputTokens int64, costUSD float64) {
+func (m *Metrics) ModelCall(account, model, role, outcome string, inputTokens, cachedTokens, outputTokens int64, costUSD float64) {
 	if m == nil {
 		return
 	}
-	m.modelCalls.WithLabelValues(tenant, model, role, outcome).Inc()
+	m.modelCalls.WithLabelValues(account, model, role, outcome).Inc()
 	if outcome != "ok" {
 		return
 	}
 	if inputTokens > 0 {
-		m.modelTokens.WithLabelValues(tenant, model, role, "input").Add(float64(inputTokens))
+		m.modelTokens.WithLabelValues(account, model, role, "input").Add(float64(inputTokens))
 	}
 	if cachedTokens > 0 {
-		m.modelTokens.WithLabelValues(tenant, model, role, "cached").Add(float64(cachedTokens))
+		m.modelTokens.WithLabelValues(account, model, role, "cached").Add(float64(cachedTokens))
 	}
 	if outputTokens > 0 {
-		m.modelTokens.WithLabelValues(tenant, model, role, "output").Add(float64(outputTokens))
+		m.modelTokens.WithLabelValues(account, model, role, "output").Add(float64(outputTokens))
 	}
 	if costUSD > 0 {
-		m.modelCost.WithLabelValues(tenant, model, role).Add(costUSD)
+		m.modelCost.WithLabelValues(account, model, role).Add(costUSD)
+	}
+}
+
+// ForgeRateLimited counts a response the forge refused for a rate limit:
+// outcome is waited when the request waited the limit out and was sent
+// again, refused when the wait was too long or the request could not be.
+func (m *Metrics) ForgeRateLimited(connection, outcome string) {
+	if m != nil {
+		m.forgeLimits.WithLabelValues(connection, outcome).Inc()
 	}
 }
 
@@ -230,6 +288,18 @@ func (m *Metrics) Egress(kind, outcome string) {
 		return
 	}
 	m.egress.WithLabelValues(kind, outcome).Inc()
+}
+
+// Leading records whether this replica holds the leader lock.
+func (m *Metrics) Leading(held bool) {
+	if m == nil {
+		return
+	}
+	v := 0.0
+	if held {
+		v = 1
+	}
+	m.leader.Set(v)
 }
 
 // TranscriptWrite counts one model call recorded, or not, for the

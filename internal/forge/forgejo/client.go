@@ -1,12 +1,14 @@
-// Package forgejo implements forge.Client against a Forgejo instance's REST
-// API (https://<host>/api/v1), using only the standard library HTTP client:
-// Forgejo has no first-party Go SDK comparable to go-github, so requests and
-// responses are hand-rolled against the subset of the API kritique needs.
+// Package forgejo implements forge.Client against a Forgejo or Gitea
+// instance's REST API (<url>/api/v1) with the standard library's HTTP
+// client: neither forge has a Go SDK comparable to go-github, so requests
+// and responses are written against the subset of the API kritique needs.
 //
-// This client also serves Gitea installations (configfile.ForgeGitea):
-// Gitea and Forgejo share the same REST API, webhook payloads and headers,
-// and OAuth flow, so Gitea is routed here rather than getting its own
-// client package.
+// Gitea speaks the REST API, webhooks and OAuth Forgejo does, so one client
+// serves both. Where the two have parted, the client asks the forge and
+// takes no for an answer: resolving a code conversation and replying in one
+// are Gitea's alone (POST /pulls/comments/{id}/resolve, POST
+// /pulls/{index}/comments/{id}/replies), and Forgejo replies in a
+// conversation by adding a comment to its review instead.
 package forgejo
 
 import (
@@ -19,51 +21,53 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
-	"slices"
-	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/forge"
 	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
-// maxErrorBody bounds how much of a non-2xx response body an apiError
-// quotes, so a large HTML error page cannot blow up an error message.
+// maxErrorBody bounds how much of an error response an apiError quotes, so
+// an HTML error page does not swamp an error message.
 const maxErrorBody = 512
 
-// maxDiffBytes bounds a pull request diff read whole.
+// maxDiffBytes bounds a pull request's diff read whole.
 const maxDiffBytes = 8 << 20
 
-// ErrNotFound wraps any error produced by a 404 response, so callers can
-// branch on a missing resource with errors.Is(err, ErrNotFound).
+// pageSize is the limit every listing asks for. Asking explicitly makes a
+// short page an unambiguous last page whatever the instance's own default.
+const pageSize = 50
+
+// maxPages bounds a listing, so a repository with thousands of pull
+// requests, or a pull request with thousands of reviews, is not read to its
+// end into memory.
+const maxPages = 100
+
+// ErrNotFound wraps every 404 answer, so a caller can branch on a missing
+// resource.
 var ErrNotFound = errors.New("forgejo: not found")
 
-// ErrCommentUnknown is returned when an inline comment id is not found
-// among any review on the given pull request. Forgejo has no endpoint to
-// fetch a single inline review comment by id alone (unlike a conversation
-// comment): the id is only ever returned nested under a review, so
-// resolving one means listing every review on the pull request and every
-// comment under each.
-var ErrCommentUnknown = errors.New("forgejo: inline comment unknown")
-
-// errNoContent is a 204 answering a request that expected a body.
+// errNoContent is a 204 answering a request that expected a body: the
+// conversation-comment endpoint's answer for a code comment.
 var errNoContent = errors.New("forgejo: no content")
 
-// apiError is returned for any non-2xx response.
+// apiError is a non-2xx answer. Its text names the status as go-github's
+// does, "<code> <reason>", which the dashboard reads a forge outage from.
 type apiError struct {
-	method     string
-	path       string
-	statusCode int
-	body       string
+	method, path string
+	statusCode   int
+	body         string
 }
 
 func (e *apiError) Error() string {
-	return fmt.Sprintf("forgejo: %s %s: %d: %s", e.method, e.path, e.statusCode, e.body)
+	return fmt.Sprintf("forgejo: %s %s: %d %s: %s", e.method, e.path, e.statusCode, http.StatusText(e.statusCode), e.body)
 }
 
-// Unwrap lets errors.Is(err, ErrNotFound) succeed for a 404 response.
+// Unwrap makes a 404 ErrNotFound.
 func (e *apiError) Unwrap() error {
 	if e.statusCode == http.StatusNotFound {
 		return ErrNotFound
@@ -71,50 +75,71 @@ func (e *apiError) Unwrap() error {
 	return nil
 }
 
-// Client is one Forgejo instance's API, authenticated as a single account
-// or app token.
+// status is the HTTP status of the answer err carries, 0 when it carries
+// none.
+func status(err error) int {
+	if e, ok := errors.AsType[*apiError](err); ok {
+		return e.statusCode
+	}
+	return 0
+}
+
+// Client is one Forgejo or Gitea instance's API, as one bot account.
 type Client struct {
 	httpClient *http.Client
-	base       string // e.g. https://forge.example.com/api/v1
-	webBase    string // e.g. https://forge.example.com
-	token      string
-	// FetchToken, when set, is what GitToken hands a runner instead of
-	// the API token: a read-only token keeps the pod that reads untrusted
-	// content from holding one that can write to the forge.
+	forge      configfile.Forge
+	// web is the instance's base URL, api its API's.
+	web, api string
+	token    string
+	// FetchToken, when set, is what GitToken hands a runner in place of
+	// the API token, which can write.
 	FetchToken string
 
 	mu    sync.Mutex
-	login string // cached BotLogin result
+	login string
+	// heads caches the pull request a head commit was last found on, by
+	// "owner/repo@sha", so a review's merge base and diff look it up once.
+	heads map[string]int
+	// noResolve is set once the forge answers that it has no API to
+	// resolve a conversation, so it is not asked on every review.
+	noResolve atomic.Bool
 }
 
-// NewClient builds a Client against host's API. host may be a bare hostname
-// (defaulting to https://) or include an explicit scheme, which tests use to
-// point at an httptest server. A nil httpClient defaults to http.DefaultClient.
-func NewClient(host, token string, httpClient *http.Client) (*Client, error) {
-	if host == "" {
-		return nil, errors.New("forgejo: host is required")
+// responseHeaderTimeout bounds how long a request waits for the forge to
+// start answering: the leader's poll runs on a context with no deadline,
+// and a job on one of hours.
+const responseHeaderTimeout = time.Minute
+
+// defaultHTTPClient is every Client's that is given none: the default
+// transport, which bounds the dial and the TLS handshake, with the wait for
+// response headers bounded too, so every Client shares one pool.
+var defaultHTTPClient = func() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = responseHeaderTimeout
+	return &http.Client{Transport: t}
+}()
+
+// NewClient builds a Client for the forge at baseURL, an http or https URL
+// that may carry a path for an instance served under one, authenticating
+// with token. A nil httpClient is one whose wait for an answer is bounded.
+func NewClient(f configfile.Forge, baseURL, token string, httpClient *http.Client) (*Client, error) {
+	if !f.SelfHosted() {
+		return nil, fmt.Errorf("forgejo: forge %q is not forgejo or gitea", f)
 	}
-	webBase := host
-	if !strings.Contains(webBase, "://") {
-		webBase = "https://" + webBase
-	}
-	webBase = strings.TrimSuffix(webBase, "/")
-	if _, err := url.Parse(webBase); err != nil {
-		return nil, fmt.Errorf("forgejo: invalid host %q: %w", host, err)
+	u, err := url.Parse(baseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("forgejo: base URL %q is not an http or https URL", baseURL)
 	}
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = defaultHTTPClient
 	}
-	return &Client{
-		httpClient: httpClient,
-		base:       webBase + "/api/v1",
-		webBase:    webBase,
-		token:      token,
-	}, nil
+	web := strings.TrimRight(baseURL, "/")
+	return &Client{httpClient: httpClient, forge: f, web: web, api: web + "/api/v1", token: token}, nil
 }
 
-// do issues an API request and decodes a JSON response into out (if out is
-// non-nil). body, if non-nil, is marshaled as the JSON request body.
+// do calls the API and decodes a JSON answer into out, when out is not
+// nil, or reads a text one into a *string. body, when not nil, is sent as
+// JSON.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	var reader io.Reader
 	if body != nil {
@@ -124,7 +149,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		}
 		reader = bytes.NewReader(buf)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, c.api+path, reader)
 	if err != nil {
 		return fmt.Errorf("forgejo: build request: %w", err)
 	}
@@ -138,10 +163,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		return fmt.Errorf("forgejo: %s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
-		return &apiError{method: method, path: path, statusCode: resp.StatusCode, body: string(raw)}
+		return &apiError{method: method, path: path, statusCode: resp.StatusCode, body: strings.TrimSpace(string(raw))}
 	}
 	if out == nil {
 		return nil
@@ -152,81 +176,109 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if text, ok := out.(*string); ok {
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDiffBytes+1))
 		if err != nil {
-			return fmt.Errorf("forgejo: read response for %s %s: %w", method, path, err)
+			return fmt.Errorf("forgejo: read %s %s: %w", method, path, err)
 		}
 		if len(raw) > maxDiffBytes {
-			return fmt.Errorf("forgejo: %s %s: response is over %d bytes", method, path, maxDiffBytes)
+			return fmt.Errorf("forgejo: %s %s: answer is over %d bytes", method, path, maxDiffBytes)
 		}
 		*text = string(raw)
 		return nil
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("forgejo: decode response for %s %s: %w", method, path, err)
+		return fmt.Errorf("forgejo: decode %s %s: %w", method, path, err)
 	}
 	return nil
+}
+
+// list reads every page of the listing at path, which carries a query of
+// its own or none, into a slice, up to maxPages of them. stop, when not
+// nil, ends the walk at the first item it holds true for, leaving it out.
+func list[T any](ctx context.Context, c *Client, path string, stop func(T) bool) ([]T, error) {
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	var out []T
+	for page := 1; page <= maxPages; page++ {
+		var batch []T
+		if err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s%spage=%d&limit=%d", path, sep, page, pageSize), nil, &batch); err != nil {
+			return nil, err
+		}
+		for _, item := range batch {
+			if stop != nil && stop(item) {
+				return out, nil
+			}
+			out = append(out, item)
+		}
+		if len(batch) < pageSize {
+			break
+		}
+	}
+	return out, nil
 }
 
 func repoPath(owner, repo string) string {
 	return "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
 }
 
-// LineRanges implements forge.Client: a Forgejo review comment sits on one
-// line, so a suggestion can replace only that line.
-func (c *Client) LineRanges() bool { return false }
+// issuePath is the path of issue or pull request number, as the issues
+// API names both.
+func issuePath(owner, repo string, number int) string {
+	return fmt.Sprintf("%s/issues/%d", repoPath(owner, repo), number)
+}
+
+// pullPath is the path of pull request number.
+func pullPath(owner, repo string, number int) string {
+	return fmt.Sprintf("%s/pulls/%d", repoPath(owner, repo), number)
+}
+
+// escapePath escapes each segment of a repository path.
+func escapePath(p string) string {
+	segs := strings.Split(p, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return strings.Join(segs, "/")
+}
+
+// CloneURL implements forge.Client.
+func (c *Client) CloneURL(owner, repo string) string {
+	return fmt.Sprintf("%s/%s/%s.git", c.web, url.PathEscape(owner), url.PathEscape(repo))
+}
 
 // FileURL implements forge.Client.
 func (c *Client) FileURL(owner, repo, sha, path string, line, endLine int) string {
-	u := fmt.Sprintf("%s/%s/%s/src/commit/%s/%s#L%d", c.webBase, owner, repo, sha, path, line)
+	u := fmt.Sprintf("%s/%s/%s/src/commit/%s/%s#L%d", c.web, url.PathEscape(owner), url.PathEscape(repo), sha, escapePath(path), line)
 	if endLine > line {
 		u += fmt.Sprintf("-L%d", endLine)
 	}
 	return u
 }
 
-// MergeBase implements forge.Client. base and head are accepted for
-// interface parity with other forges but unused: Forgejo's pull request
-// resource already reports the merge base it computed against its current
-// base branch.
-func (c *Client) MergeBase(ctx context.Context, owner, repo string, number int, base, head string) (string, error) {
-	var pr pullRequest
-	path := fmt.Sprintf("%s/pulls/%d", repoPath(owner, repo), number)
-	if err := c.do(ctx, http.MethodGet, path, nil, &pr); err != nil {
-		return "", fmt.Errorf("forgejo: merge base for %s/%s#%d: %w", owner, repo, number, err)
-	}
-	if pr.MergeBase == "" {
-		return "", fmt.Errorf("forgejo: %s/%s#%d: merge_base is empty", owner, repo, number)
-	}
-	return pr.MergeBase, nil
+// CommitURL implements forge.Client.
+func (c *Client) CommitURL(owner, repo, sha string) string {
+	return fmt.Sprintf("%s/%s/%s/commit/%s", c.web, url.PathEscape(owner), url.PathEscape(repo), sha)
 }
 
-// PullRequestDiff implements forge.Client. Forgejo's API diffs a pull
-// request, not two commits, so base and head go unused: the diff runs from
-// the pull request's merge base to its current head.
-func (c *Client) PullRequestDiff(ctx context.Context, owner, repo string, number int, _, _ string) (string, error) {
-	var diff string
-	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/pulls/%d.diff", repoPath(owner, repo), number), nil, &diff); err != nil {
-		return "", fmt.Errorf("forgejo: diff of %s/%s#%d: %w", owner, repo, number, err)
-	}
-	return diff, nil
+// ThreadURL implements forge.Client: a code comment of a submitted review
+// is anchored on the pull request's conversation by its comment id.
+func (c *Client) ThreadURL(owner, repo string, number int, id int64) string {
+	return fmt.Sprintf("%s/%s/%s/pulls/%d#issuecomment-%d", c.web, url.PathEscape(owner), url.PathEscape(repo), number, id)
 }
 
-// CloneURL implements forge.Client.
-func (c *Client) CloneURL(owner, repo string) string {
-	return fmt.Sprintf("%s/%s/%s.git", c.webBase, owner, repo)
-}
-
-// GitToken implements forge.Client: Forgejo authenticates git operations
-// with a static token, FetchToken when one is set and the API token
-// otherwise.
-func (c *Client) GitToken(_ context.Context) (string, error) {
+// GitToken implements forge.Client: FetchToken when one is configured,
+// and otherwise the API token, which can write; Forgejo and Gitea mint no
+// token for one repository.
+func (c *Client) GitToken(context.Context, string) (string, error) {
 	if c.FetchToken != "" {
 		return c.FetchToken, nil
 	}
 	return c.token, nil
 }
 
-// ReadGitToken implements forge.Client with FetchToken alone: the API
-// token can write.
+// ReadGitToken is a credential that can only read the repository:
+// FetchToken, which the admin vouches is read-only, and forge.ErrNoReadToken
+// without one, since the API token can write.
 func (c *Client) ReadGitToken(context.Context, string, string) (string, error) {
 	if c.FetchToken == "" {
 		return "", forge.ErrNoReadToken
@@ -234,47 +286,56 @@ func (c *Client) ReadGitToken(context.Context, string, string) (string, error) {
 	return c.FetchToken, nil
 }
 
-// BranchTip implements forge.Client. An empty branch resolves the
-// repository's default branch first.
+// BranchTip implements forge.Client. An empty branch is the repository's
+// default branch.
 func (c *Client) BranchTip(ctx context.Context, owner, repo, ref string) (string, string, error) {
-	resolved := ref
-	if resolved == "" {
-		var info repoInfo
-		if err := c.do(ctx, http.MethodGet, repoPath(owner, repo), nil, &info); err != nil {
-			return "", "", fmt.Errorf("forgejo: default branch for %s/%s: %w", owner, repo, err)
+	if ref == "" {
+		var r repository
+		if err := c.do(ctx, http.MethodGet, repoPath(owner, repo), nil, &r); err != nil {
+			return "", "", fmt.Errorf("forgejo: repository %s/%s: %w", owner, repo, err)
 		}
-		resolved = info.DefaultBranch
+		ref = r.DefaultBranch
 	}
 	var b branch
-	path := repoPath(owner, repo) + "/branches/" + url.PathEscape(resolved)
-	if err := c.do(ctx, http.MethodGet, path, nil, &b); err != nil {
-		return "", "", fmt.Errorf("forgejo: branch tip for %s/%s@%s: %w", owner, repo, resolved, err)
+	if err := c.do(ctx, http.MethodGet, repoPath(owner, repo)+"/branches/"+url.PathEscape(ref), nil, &b); err != nil {
+		return "", "", fmt.Errorf("forgejo: branch %s of %s/%s: %w", ref, owner, repo, err)
 	}
-	return b.Commit.ID, resolved, nil
+	if b.Commit.ID == "" {
+		return "", "", fmt.Errorf("forgejo: branch %s of %s/%s has no commit", ref, owner, repo)
+	}
+	return b.Commit.ID, ref, nil
+}
+
+// CommitSubject implements forge.Client.
+func (c *Client) CommitSubject(ctx context.Context, owner, repo, sha string) (string, error) {
+	var gc gitCommit
+	// stat, verification and files cost the forge work the subject needs
+	// none of.
+	path := repoPath(owner, repo) + "/git/commits/" + url.PathEscape(sha) + "?stat=false&verification=false&files=false"
+	if err := c.do(ctx, http.MethodGet, path, nil, &gc); err != nil {
+		return "", fmt.Errorf("forgejo: commit %s of %s/%s: %w", sha, owner, repo, err)
+	}
+	subject, _, _ := strings.Cut(gc.Commit.Message, "\n")
+	return strings.TrimSpace(subject), nil
 }
 
 // FileAt implements forge.Client through the raw endpoint.
 func (c *Client) FileAt(ctx context.Context, owner, repo, ref, path string) ([]byte, error) {
-	segments := strings.Split(path, "/")
-	for i, s := range segments {
-		segments[i] = url.PathEscape(s)
-	}
 	var content string
-	err := c.do(ctx, http.MethodGet, repoPath(owner, repo)+"/raw/"+strings.Join(segments, "/")+"?ref="+url.QueryEscape(ref), nil, &content)
-	if errors.Is(err, ErrNotFound) {
+	err := c.do(ctx, http.MethodGet, repoPath(owner, repo)+"/raw/"+escapePath(path)+"?ref="+url.QueryEscape(ref), nil, &content)
+	switch {
+	case errors.Is(err, ErrNotFound):
 		return nil, fmt.Errorf("forgejo: %s of %s/%s at %s: %w", path, owner, repo, ref, fs.ErrNotExist)
-	}
-	if err != nil {
+	case err != nil:
 		return nil, fmt.Errorf("forgejo: %s of %s/%s at %s: %w", path, owner, repo, ref, err)
-	}
-	if len(content) > forge.MaxFileBytes {
+	case len(content) > forge.MaxFileBytes:
 		return nil, fmt.Errorf("forgejo: %s of %s/%s at %s: %w", path, owner, repo, ref, forge.ErrFileTooLarge)
 	}
 	return []byte(content), nil
 }
 
-// BotLogin implements forge.Client, caching the result: the account behind
-// a token never changes mid-process.
+// BotLogin implements forge.Client, once per process: the account behind a
+// token never changes.
 func (c *Client) BotLogin(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -289,163 +350,23 @@ func (c *Client) BotLogin(ctx context.Context) (string, error) {
 	return c.login, nil
 }
 
-// FindComment implements forge.Client, returning the id of the first
-// (oldest) conversation comment by login whose body contains marker, as
-// GitHub's does, or 0 if none matches.
-func (c *Client) FindComment(ctx context.Context, owner, repo string, number int, login, marker string) (int64, error) {
-	comments, err := c.ListConversation(ctx, owner, repo, number)
-	if err != nil {
-		return 0, err
-	}
-	for _, cm := range comments {
-		if cm.Author == login && strings.Contains(cm.Body, marker) {
-			return cm.ID, nil
-		}
-	}
-	return 0, nil
-}
-
-// ListConversation implements forge.Client.
-func (c *Client) ListConversation(ctx context.Context, owner, repo string, number int) ([]forge.Comment, error) {
-	var raw []comment
-	path := fmt.Sprintf("%s/issues/%d/comments", repoPath(owner, repo), number)
-	if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
-		return nil, fmt.Errorf("forgejo: list conversation for %s/%s#%d: %w", owner, repo, number, err)
-	}
-	out := make([]forge.Comment, 0, len(raw))
-	for _, cm := range raw {
-		out = append(out, conversationComment(cm))
-	}
-	// Stable: Forgejo's times are whole seconds, and it lists comments
-	// made in the same second in the order they were made.
-	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
-	return out, nil
-}
-
-func conversationComment(cm comment) forge.Comment {
-	return forge.Comment{
-		ID:          cm.ID,
-		Author:      cm.User.Login,
-		AuthorIsBot: isBot(cm.User.Login),
-		Body:        cm.Body,
-		CreatedAt:   cm.CreatedAt,
-	}
-}
-
-// CreateComment implements forge.Client.
-func (c *Client) CreateComment(ctx context.Context, owner, repo string, number int, body string) (int64, error) {
-	var cm comment
-	path := fmt.Sprintf("%s/issues/%d/comments", repoPath(owner, repo), number)
-	if err := c.do(ctx, http.MethodPost, path, createCommentOption{Body: body}, &cm); err != nil {
-		return 0, fmt.Errorf("forgejo: create comment on %s/%s#%d: %w", owner, repo, number, err)
-	}
-	return cm.ID, nil
-}
-
-// UpdateComment implements forge.Client.
-func (c *Client) UpdateComment(ctx context.Context, owner, repo string, id int64, body string) error {
-	path := fmt.Sprintf("%s/issues/comments/%d", repoPath(owner, repo), id)
-	if err := c.do(ctx, http.MethodPatch, path, createCommentOption{Body: body}, nil); err != nil {
-		return fmt.Errorf("forgejo: update comment %d on %s/%s: %w", id, owner, repo, err)
-	}
-	return nil
-}
-
-// GetComment implements forge.Client. inline=false uses the id-only
-// conversation-comment endpoint. Forgejo delivers a reply in a code
-// conversation as a conversation comment, but that endpoint answers a code
-// comment with 204, so a 204 is looked up inline instead. inline=true has no
-// id-only endpoint on Forgejo: it lists every review on number and every
-// review's comments until id turns up.
-func (c *Client) GetComment(ctx context.Context, owner, repo string, number int, id int64, inline bool) (forge.Comment, error) {
-	if !inline {
-		var cm comment
-		path := fmt.Sprintf("%s/issues/comments/%d", repoPath(owner, repo), id)
-		err := c.do(ctx, http.MethodGet, path, nil, &cm)
-		if err == nil {
-			return conversationComment(cm), nil
-		}
-		if !errors.Is(err, errNoContent) {
-			return forge.Comment{}, fmt.Errorf("forgejo: get comment %d on %s/%s: %w", id, owner, repo, err)
-		}
-	}
-	raw, err := c.findInlineComment(ctx, owner, repo, number, id)
-	if err != nil {
-		return forge.Comment{}, err
-	}
-	return inlineComment(raw), nil
-}
-
-// findInlineComment locates a single inline comment by id, traversing every
-// review on the pull request since Forgejo has no id-only lookup endpoint
-// for review comments.
-func (c *Client) findInlineComment(ctx context.Context, owner, repo string, number int, id int64) (pullReviewComment, error) {
-	reviews, err := c.listReviews(ctx, owner, repo, number)
-	if err != nil {
-		return pullReviewComment{}, err
-	}
-	for _, rv := range reviews {
-		raw, err := c.rawReviewComments(ctx, owner, repo, number, rv.ID)
-		if err != nil {
-			return pullReviewComment{}, err
-		}
-		for _, cm := range raw {
-			if cm.ID == id {
-				return cm, nil
-			}
-		}
-	}
-	return pullReviewComment{}, fmt.Errorf("forgejo: get inline comment %d on %s/%s#%d: %w", id, owner, repo, number, ErrCommentUnknown)
-}
-
-// CreateReview implements forge.Client. No comments is a no-op: Forgejo
-// rejects a review with no body and no comments as meaningless.
-func (c *Client) CreateReview(ctx context.Context, owner, repo string, number int, headSHA string, comments []forge.InlineComment) error {
-	if len(comments) == 0 {
-		return nil
-	}
-	opts := createPullReviewOptions{
-		CommitID: headSHA,
-		Event:    "COMMENT",
-		Comments: make([]createPullReviewComment, 0, len(comments)),
-	}
-	for _, cm := range comments {
-		opts.Comments = append(opts.Comments, createPullReviewComment{
-			Path:       cm.Path,
-			Body:       cm.Body,
-			NewLineNum: int64(cm.Line),
-		})
-	}
-	path := fmt.Sprintf("%s/pulls/%d/reviews", repoPath(owner, repo), number)
-	if err := c.do(ctx, http.MethodPost, path, opts, nil); err != nil {
-		return fmt.Errorf("forgejo: create review on %s/%s#%d: %w", owner, repo, number, err)
-	}
-	return nil
-}
-
 // SetStatus implements forge.Client.
 func (c *Client) SetStatus(ctx context.Context, owner, repo, sha string, state forge.StatusState, description string) error {
-	opts := createStatusOption{
-		State:       string(state),
-		Context:     forge.StatusContext,
-		Description: forge.StatusDescription(description),
-	}
-	path := fmt.Sprintf("%s/statuses/%s", repoPath(owner, repo), sha)
-	if err := c.do(ctx, http.MethodPost, path, opts, nil); err != nil {
-		return fmt.Errorf("forgejo: set status on %s/%s@%s: %w", owner, repo, sha, err)
+	opts := createStatusOption{State: string(state), Context: forge.StatusContext, Description: forge.StatusDescription(description)}
+	if err := c.do(ctx, http.MethodPost, repoPath(owner, repo)+"/statuses/"+url.PathEscape(sha), opts, nil); err != nil {
+		return fmt.Errorf("forgejo: status on %s: %w", sha, err)
 	}
 	return nil
 }
 
-// Permission implements forge.Client, mapping Forgejo's collaborator
-// permission (which reports "owner" for the repository owner, distinct
-// from its own "admin" collaborator level) onto forge.Permission's
-// ascending scale.
+// Permission implements forge.Client. Forgejo and Gitea report the
+// repository's owner as owner, above their admin, and have no triage or
+// maintain level. Only a repository admin may read another login's
+// permission, so the bot needs admin access for it.
 func (c *Client) Permission(ctx context.Context, owner, repo, login string) (forge.Permission, error) {
 	var p collaboratorPermission
-	path := fmt.Sprintf("%s/collaborators/%s/permission", repoPath(owner, repo), url.PathEscape(login))
-	if err := c.do(ctx, http.MethodGet, path, nil, &p); err != nil {
-		return "", fmt.Errorf("forgejo: permission for %s on %s/%s: %w", login, owner, repo, err)
+	if err := c.do(ctx, http.MethodGet, repoPath(owner, repo)+"/collaborators/"+url.PathEscape(login)+"/permission", nil, &p); err != nil {
+		return "", fmt.Errorf("forgejo: permission of %s on %s/%s: %w", login, owner, repo, err)
 	}
 	level := forge.Permission(p.Permission)
 	if p.Permission == "owner" {
@@ -457,269 +378,11 @@ func (c *Client) Permission(ctx context.Context, owner, repo, login string) (for
 	return level, nil
 }
 
-// ReplyInline implements forge.Client. Forgejo carries no reply-linkage
-// field on an inline comment, so a "reply" is a new single-comment review
-// on to's commit, path and line. Forgejo's review-creation response carries
-// no per-comment id, so this always returns 0.
-func (c *Client) ReplyInline(ctx context.Context, owner, repo string, number int, to forge.Comment, body string) (int64, error) {
-	opts := createPullReviewOptions{
-		CommitID: to.CommitID,
-		Event:    "COMMENT",
-		Comments: []createPullReviewComment{
-			{Path: to.Path, Body: body, NewLineNum: int64(to.Line)},
-		},
-	}
-	path := fmt.Sprintf("%s/pulls/%d/reviews", repoPath(owner, repo), number)
-	if err := c.do(ctx, http.MethodPost, path, opts, nil); err != nil {
-		return 0, fmt.Errorf("forgejo: reply to inline comment %d on %s/%s#%d: %w", to.ID, owner, repo, number, err)
-	}
-	return 0, nil
-}
+// isBot tells a bot by its login: the REST user carries no type, unlike
+// GitHub's, so only the "[bot]" suffix webhook.IsBot also reads applies.
+func isBot(login string) bool { return webhook.IsBot("", login) }
 
-// ListInline implements forge.Client: it lists every review on the pull
-// request, then every comment under each review. Every returned comment's
-// InReplyTo is 0: Forgejo's model has no reply-linkage field, so a "thread"
-// always degenerates to a flat list of root comments.
-func (c *Client) ListInline(ctx context.Context, owner, repo string, number int) ([]forge.Comment, error) {
-	reviews, err := c.listReviews(ctx, owner, repo, number)
-	if err != nil {
-		return nil, err
-	}
-	var out []forge.Comment
-	for _, rv := range reviews {
-		raw, err := c.rawReviewComments(ctx, owner, repo, number, rv.ID)
-		if err != nil {
-			return nil, err
-		}
-		for _, cm := range raw {
-			out = append(out, inlineComment(cm))
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
-	return out, nil
-}
+// sameLogin compares logins as the forge does, ignoring case.
+func sameLogin(a, b string) bool { return strings.EqualFold(a, b) }
 
-// reviewsPageSize bounds each GET /pulls/{n}/reviews page. listReviews
-// passes it explicitly as the limit query param rather than relying on the
-// server's default, so a short page (fewer results than requested) is an
-// unambiguous, server-independent "no more pages" signal instead of
-// requiring an exactly-empty page, which a resource with an exact multiple
-// of the page size worth of reviews would never produce.
-const reviewsPageSize = 50
-
-// listReviews paginates GET /pulls/{n}/reviews.
-func (c *Client) listReviews(ctx context.Context, owner, repo string, number int) ([]pullReview, error) {
-	var out []pullReview
-	page := 1
-	for {
-		var batch []pullReview
-		path := fmt.Sprintf("%s/pulls/%d/reviews?page=%d&limit=%d", repoPath(owner, repo), number, page, reviewsPageSize)
-		if err := c.do(ctx, http.MethodGet, path, nil, &batch); err != nil {
-			return nil, fmt.Errorf("forgejo: list reviews for %s/%s#%d: %w", owner, repo, number, err)
-		}
-		out = append(out, batch...)
-		if len(batch) < reviewsPageSize {
-			return out, nil
-		}
-		page++
-	}
-}
-
-// rawReviewComments fetches GET /pulls/{n}/reviews/{id}/comments, which is
-// not paginated.
-func (c *Client) rawReviewComments(ctx context.Context, owner, repo string, number int, reviewID int64) ([]pullReviewComment, error) {
-	var raw []pullReviewComment
-	path := fmt.Sprintf("%s/pulls/%d/reviews/%d/comments", repoPath(owner, repo), number, reviewID)
-	if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
-		return nil, fmt.Errorf("forgejo: list review comments for %s/%s#%d review %d: %w", owner, repo, number, reviewID, err)
-	}
-	return raw, nil
-}
-
-// inlineComment maps one raw review comment to forge.Comment, with
-// InReplyTo always 0: Forgejo's model has no reply-linkage field.
-func inlineComment(cm pullReviewComment) forge.Comment {
-	return forge.Comment{
-		ID:          cm.ID,
-		Author:      cm.User.Login,
-		AuthorIsBot: isBot(cm.User.Login),
-		Body:        cm.Body,
-		CreatedAt:   cm.CreatedAt,
-		Inline:      true,
-		Path:        cm.Path,
-		Line:        int(cm.LineNum),
-		CommitID:    cm.CommitID,
-	}
-}
-
-// openPullRequestsPageSize bounds each GET /pulls page, for the same
-// short-page-means-last-page reasoning as reviewsPageSize.
-const openPullRequestsPageSize = 50
-
-// ListOpenPullRequests implements forge.Client. Forgejo sorts by
-// recentupdate server-side, so pagination stops as soon as a page's pull
-// requests are older than since.
-func (c *Client) ListOpenPullRequests(ctx context.Context, owner, repo string, since time.Time) ([]forge.OpenPullRequest, error) {
-	var out []forge.OpenPullRequest
-	page := 1
-	for {
-		var batch []pullRequest
-		path := fmt.Sprintf("%s/pulls?state=open&sort=recentupdate&page=%d&limit=%d", repoPath(owner, repo), page, openPullRequestsPageSize)
-		if err := c.do(ctx, http.MethodGet, path, nil, &batch); err != nil {
-			return nil, fmt.Errorf("forgejo: list open pull requests for %s/%s: %w", owner, repo, err)
-		}
-		if len(batch) == 0 {
-			return out, nil
-		}
-		for _, pr := range batch {
-			if pr.UpdatedAt.Before(since) {
-				return out, nil
-			}
-			out = append(out, openPullRequest(pr))
-		}
-		page++
-	}
-}
-
-// fullName returns r's full_name, or "" for a nil r: a deleted fork leaves
-// head.repo JSON null, which decodes to a nil *repository.
-func fullName(r *repository) string {
-	if r == nil {
-		return ""
-	}
-	return r.FullName
-}
-
-func openPullRequest(pr pullRequest) forge.OpenPullRequest {
-	out := forge.OpenPullRequest{
-		UpdatedAt: pr.UpdatedAt,
-	}
-	if pr.Base.Repo != nil {
-		out.DefaultBranch = pr.Base.Repo.DefaultBranch
-	}
-	out.Number = pr.Number
-	out.Title = pr.Title
-	out.Body = pr.Body
-	out.Author = pr.User.Login
-	out.AuthorIsBot = isBot(pr.User.Login)
-	out.State = pr.State
-	out.Merged = pr.Merged
-	out.Draft = pr.Draft
-	// A fork PR's head lives in a different repository than its base. A
-	// deleted fork leaves head.repo null, which is also not the base repo.
-	// Forgejo's own head.repo.fork flag is not trusted directly: it can lag
-	// or disagree with the repository comparison, matching webhook's rule.
-	out.Fork = pr.Head.Repo == nil || fullName(pr.Head.Repo) != fullName(pr.Base.Repo)
-	out.HeadRef = pr.Head.Ref
-	out.HeadSHA = pr.Head.SHA
-	out.BaseRef = pr.Base.Ref
-	out.BaseSHA = pr.Base.SHA
-	out.URL = pr.HTMLURL
-	out.CreatedAt = pr.CreatedAt
-	for _, l := range pr.Labels {
-		out.Labels = append(out.Labels, webhook.Label{Name: l.Name, Color: l.Color})
-	}
-	return out
-}
-
-// Issue implements forge.Client.
-func (c *Client) Issue(ctx context.Context, owner, repo string, number int) (forge.Issue, error) {
-	var iss issue
-	path := fmt.Sprintf("%s/issues/%d", repoPath(owner, repo), number)
-	if err := c.do(ctx, http.MethodGet, path, nil, &iss); err != nil {
-		return forge.Issue{}, fmt.Errorf("forgejo: issue %s/%s#%d: %w", owner, repo, number, err)
-	}
-	return issueFrom(iss), nil
-}
-
-// SetState implements forge.Client.
-func (c *Client) SetState(ctx context.Context, owner, repo string, number int, open bool) error {
-	state := "closed"
-	if open {
-		state = "open"
-	}
-	path := fmt.Sprintf("%s/issues/%d", repoPath(owner, repo), number)
-	if err := c.do(ctx, http.MethodPatch, path, editIssueOption{State: &state}, nil); err != nil {
-		return fmt.Errorf("forgejo: set state of %s/%s#%d: %w", owner, repo, number, err)
-	}
-	return nil
-}
-
-// AddAssignees implements forge.Client. Forgejo's edit-issue endpoint
-// replaces the assignee list wholesale, so this fetches the issue's current
-// assignees first and merges logins into that set to satisfy the
-// interface's additive contract.
-func (c *Client) AddAssignees(ctx context.Context, owner, repo string, number int, logins []string) error {
-	if len(logins) == 0 {
-		return nil
-	}
-	current, err := c.Issue(ctx, owner, repo, number)
-	if err != nil {
-		return fmt.Errorf("forgejo: add assignees to %s/%s#%d: %w", owner, repo, number, err)
-	}
-	merged := current.Assignees
-	for _, login := range logins {
-		if !slices.Contains(merged, login) {
-			merged = append(merged, login)
-		}
-	}
-	path := fmt.Sprintf("%s/issues/%d", repoPath(owner, repo), number)
-	if err := c.do(ctx, http.MethodPatch, path, editIssueOption{Assignees: merged}, nil); err != nil {
-		return fmt.Errorf("forgejo: add assignees to %s/%s#%d: %w", owner, repo, number, err)
-	}
-	return nil
-}
-
-// RequestReviewers implements forge.Client.
-func (c *Client) RequestReviewers(ctx context.Context, owner, repo string, number int, logins []string) error {
-	if len(logins) == 0 {
-		return nil
-	}
-	path := fmt.Sprintf("%s/pulls/%d/requested_reviewers", repoPath(owner, repo), number)
-	if err := c.do(ctx, http.MethodPost, path, pullReviewRequestOptions{Reviewers: logins}, nil); err != nil {
-		return fmt.Errorf("forgejo: request reviewers on %s/%s#%d: %w", owner, repo, number, err)
-	}
-	return nil
-}
-
-// SearchIssues implements forge.Client, using the repo-scoped issue list
-// endpoint's free-text q parameter. The type filter is left unset so both
-// issues and pull requests come back, matching the interface's contract.
-func (c *Client) SearchIssues(ctx context.Context, owner, repo, query string, limit int) ([]forge.Issue, error) {
-	var batch []issue
-	path := fmt.Sprintf("%s/issues?q=%s&limit=%d&page=1", repoPath(owner, repo), url.QueryEscape(query), limit)
-	if err := c.do(ctx, http.MethodGet, path, nil, &batch); err != nil {
-		return nil, fmt.Errorf("forgejo: search %q in %s/%s: %w", query, owner, repo, err)
-	}
-	out := make([]forge.Issue, 0, len(batch))
-	for _, iss := range batch {
-		if len(out) == limit {
-			break
-		}
-		out = append(out, issueFrom(iss))
-	}
-	return out, nil
-}
-
-func issueFrom(iss issue) forge.Issue {
-	out := forge.Issue{
-		Number: iss.Number, Title: iss.Title, Body: iss.Body,
-		State: iss.State, Author: iss.User.Login,
-		IsPull: iss.PullRequest != nil, Draft: iss.PullRequest != nil && iss.PullRequest.Draft, URL: iss.HTMLURL,
-	}
-	for _, l := range iss.Labels {
-		out.Labels = append(out.Labels, l.Name)
-	}
-	for _, a := range iss.Assignees {
-		out.Assignees = append(out.Assignees, a.Login)
-	}
-	return out
-}
-
-// isBot heuristically detects a bot account from its login, matching the
-// login-suffix half of webhook's ghUser.isBot rule: Forgejo's REST user
-// model carries no Type field (unlike GitHub's), so only the login check
-// applies here.
-func isBot(login string) bool {
-	return strings.HasSuffix(login, "[bot]")
-}
+var _ forge.Client = (*Client)(nil)

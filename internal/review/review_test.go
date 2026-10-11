@@ -39,75 +39,190 @@ func TestAnchors(t *testing.T) {
 		path string
 		line int
 		want bool
+		text string
 	}{
-		{"main.go", 10, true},  // context " x := 1"
-		{"main.go", 11, true},  // "+ y := 3"
-		{"main.go", 12, true},  // "+ z := 4"
-		{"main.go", 13, true},  // context return
-		{"main.go", 14, true},  // "+}"
-		{"main.go", 15, false}, // past the hunk
-		{"main.go", 9, false},  // before the hunk
-		{"README.md", 2, true}, // "+new line"
-		{"README.md", 3, true}, // context tail
-		{"README.md", 4, false},
-		{"other.go", 1, false},
+		{"main.go", 10, true, "\tx := 1"},       // context
+		{"main.go", 11, true, "\ty := 3"},       // added
+		{"main.go", 12, true, "\tz := 4"},       // added
+		{"main.go", 13, true, "\treturn x + y"}, // context
+		{"main.go", 14, true, "}"},              // added
+		{"main.go", 15, false, ""},              // past the hunk
+		{"main.go", 9, false, ""},               // before the hunk
+		{"README.md", 2, true, "new line"},      // added
+		{"README.md", 3, true, "tail"},          // context
+		{"README.md", 4, false, ""},
+		{"other.go", 1, false, ""},
 	}
 	for _, tt := range tests {
-		if got := a[tt.path][tt.line]; got != tt.want {
-			t.Errorf("%s:%d anchored = %v, want %v", tt.path, tt.line, got, tt.want)
+		text, got := a[tt.path][tt.line]
+		if got != tt.want || text != tt.text {
+			t.Errorf("%s:%d anchored = %v %q, want %v %q", tt.path, tt.line, got, text, tt.want, tt.text)
 		}
+	}
+}
+
+func TestCheck(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr string
+	}{
+		{name: "the contract's shape", raw: `{"summary":{"take":"Fine.","praise":[]},"findings":[]}`},
+		{name: "findings omitted", raw: `{"summary":{"take":"Fine.","praise":["clear"]}}`},
+		{name: "summary flattened to a string", raw: `{"summary":"Fine.","take":"Fine.","praise":"[]","findings":[]}`,
+			wantErr: "cannot unmarshal string into Go struct field Result.summary"},
+		{name: "praise as a string", raw: `{"summary":{"take":"Fine.","praise":"clear"},"findings":[]}`,
+			wantErr: "cannot unmarshal string into Go struct field"},
+		{name: "a finding's line as a string", raw: `{"summary":{"take":"Fine.","praise":[]},"findings":[{"path":"a","line":"3"}]}`,
+			wantErr: "cannot unmarshal string into Go struct field"},
+		{name: "summary left out", raw: `{"take":"Fine.","praise":[],"findings":[]}`,
+			wantErr: `unknown keys "praise", "take"; the input takes findings, summary`},
+		{name: "empty summary", raw: `{"summary":{},"findings":[]}`, wantErr: "summary.take is required"},
+		{name: "every key the contract defines", raw: `{"summary":{"headline":"h","take":"Fine.","praise":[],"diagram":"flowchart TD\n  A --> B","checked":["c"]},
+			"findings":[{"path":"a","line":1,"severity":"nit","category":"tests","title":"t","explanation":"e","suggested_fix":"f",
+			"end_line":2,"replacement":"r","insert_after":"i","agent_prompt":"p","rules":["r"],"prior":"0a1b2c3d"}]}`},
+		{name: "a misspelled fix key and checked key", raw: `{"summary":{"headline":"h","take":"t","praise":[],"checked>":["x"]},
+			"findings":[{"path":"a.yaml","line":1,"severity":"important","category":"correctness","title":"t","explanation":"e","suggested_fix.":"the fix"}]}`,
+			wantErr: `unknown keys summary."checked>", findings[0]."suggested_fix."; the input takes findings, summary, ` +
+				`the summary takes checked, diagram, headline, praise, take and a finding takes agent_prompt, category, ` +
+				`end_line, explanation, insert_after, line, path, prior, replacement, rules, severity, suggested_fix, title`},
+		{name: "broken keys across findings, each named", raw: `{"summary":{"take":"t","praise":[]},
+			"findings":[{"path":"a","line":1,"severity":"blocking","severity_":"important","title":"t","explanation":"e","suggested_fix` + "`" + `: ":"f"},
+			{": ":", ","path":"a","line":1,"severity":"important","title":"t","explanation":"e"}]}`,
+			wantErr: "unknown keys findings[0].\"severity_\", findings[0].\"suggested_fix`: \", findings[1].\": \";"},
+		{name: "keys that differ only in case, which still decode", raw: `{"Summary":{"Take":"Fine.","praise":[]},
+			"findings":[{"PATH":"a","line":1,"Suggested_Fix":"f"}]}`},
+		{name: "a summary repeated in another case, each one's keys named", raw: `{"Summary":{"take":"Fine."},"summary":{"take":"Fine.","mood":"ok"},"findings":[]}`,
+			wantErr: `unknown keys summary."mood";`},
+		{name: "findings repeated in another case, each one's keys named", raw: `{"summary":{"take":"Fine."},"Findings":[],"findings":[{"path":"a","line":1,"mood":"ok"}]}`,
+			wantErr: `unknown keys findings[0]."mood";`},
+		{name: "blank take", raw: `{"summary":{"take":"  ","praise":[]},"findings":[]}`, wantErr: "summary.take is required"},
+		{name: "an array", raw: `[]`, wantErr: "cannot unmarshal array"},
+		{name: "a flowchart", raw: `{"summary":{"take":"Fine.","praise":[],"diagram":"flowchart TD\n  A --> B"},"findings":[]}`},
+		{name: "a blank diagram", raw: `{"summary":{"take":"Fine.","praise":[],"diagram":" "},"findings":[]}`},
+		{name: "a diagram of another kind", raw: `{"summary":{"take":"Fine.","praise":[],"diagram":"pie\n  \"a\": 1"},"findings":[]}`,
+			wantErr: "summary.diagram must be Mermaid source under 4096 bytes opening with flowchart, graph, sequenceDiagram, or be left out"},
+		{name: "prose as a diagram", raw: `{"summary":{"take":"Fine.","praise":[],"diagram":"A calls B."},"findings":[]}`,
+			wantErr: "summary.diagram must be"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Check(json.RawMessage(tt.raw))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Check() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Check() = %v, want an error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLenient(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "the contract's shape, which check does not refuse", raw: `{"summary":{"take":"Fine.","praise":[]},"findings":[]}`},
+		{name: "unknown keys at every level", raw: `{"verdict":"ok","summary":{"take":"Fine.","praise":[],"checked>":["x"]},
+			"findings":[{"path":"a","line":1,"suggested_fix.":"f"},null]}`, want: true},
+		{name: "unknown keys in a summary that differs in case", raw: `{"Summary":{"Take":"Fine.","praise":[],"mood":"ok"}}`, want: true},
+		{name: "unknown keys in a summary repeated in another case", raw: `{"Summary":{"take":"Fine.","mood":"ok"},"summary":{"take":"Fine.","mood":"ok"}}`, want: true},
+		{name: "unknown keys and a blank take", raw: `{"summary":{"take":" ","praise":[],"mood":"ok"},"findings":[]}`},
+		{name: "unknown keys and a field of the wrong type", raw: `{"summary":{"take":"Fine.","praise":"clear","mood":"ok"}}`},
+		// Decoding into a map keeps only the last of a repeated key, so
+		// dropping the unknown keys would hide the type error.
+		{name: "a repeated key whose first value is of the wrong type", raw: `{"summary":{"take":"Fine.","praise":[]},
+			"findings":[{"path":"a","line":"bad","line":3,"mood":"ok"}]}`},
+		{name: "a repeated key of the wrong type and no unknown key", raw: `{"summary":{"take":"Fine.","praise":[]},
+			"findings":[{"path":"a","line":"bad","line":3}]}`},
+		{name: "the summary's keys flattened to the top", raw: `{"take":"Fine.","praise":[],"findings":[]}`},
+		{name: "not JSON", raw: `{"summary":`},
+		{name: "an array", raw: `[]`},
+	}
+	lenient := Lenient(Check)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := lenient(json.RawMessage(tt.raw)); got != tt.want {
+				t.Fatalf("Lenient(Check)(%s) = %v, want %v", tt.raw, got, tt.want)
+			}
+		})
 	}
 }
 
 func TestParse(t *testing.T) {
 	anchors := Anchors(sampleDiff)
 	tests := []struct {
-		name    string
-		raw     string
-		opts    ParseOptions
-		kept    []string // "path:line:title" in order
-		dropped map[string]DropReason
-		praise  []string
-		take    string
-		wantErr bool
+		name     string
+		raw      string
+		opts     ParseOptions
+		kept     []string // "path:line:title" in order
+		dropped  map[string]DropReason
+		praise   []string
+		take     string
+		headline string
+		wantErr  bool
 	}{
 		{
 			name: "valid findings are kept and sorted by severity, then path and line",
-			raw: `{"summary": {"take": " Changes y and adds z. ", "praise": []}, "findings": [
-			  {"path": "main.go", "line": 12, "severity": "nit", "title": "n", "explanation": "e"},
-			  {"path": "main.go", "line": 11, "severity": "important", "title": "i2", "explanation": "e"},
-			  {"path": "README.md", "line": 2, "severity": "important", "title": "i1", "explanation": "e"},
-			  {"path": "main.go", "line": 13, "severity": "blocking", "title": "b", "explanation": "e", "suggested_fix": "do x"}
+			raw: `{"summary": {"headline": "  Changes y\nand adds z. ", "take": " Changes y and adds z. ", "praise": []}, "findings": [
+			  {"path": "main.go", "line": 12, "severity": "nit", "category": "correctness", "title": "n", "explanation": "e"},
+			  {"path": "main.go", "line": 11, "severity": "important", "category": "correctness", "title": "i2", "explanation": "e"},
+			  {"path": "README.md", "line": 2, "severity": "important", "category": "correctness", "title": "i1", "explanation": "e"},
+			  {"path": "main.go", "line": 13, "severity": "blocking", "category": "correctness", "title": "b", "explanation": "e", "suggested_fix": "do x"}
 			]}`,
-			take: "Changes y and adds z.",
-			kept: []string{"main.go:13:b", "README.md:2:i1", "main.go:11:i2", "main.go:12:n"},
+			take:     "Changes y and adds z.",
+			headline: "Changes y and adds z.",
+			kept:     []string{"main.go:13:b", "README.md:2:i1", "main.go:11:i2", "main.go:12:n"},
+		},
+		{
+			name: "references to other repositories are redirected, the review's own kept",
+			raw: `{"summary": {"take": "Bumps a/b#1 per https://github.com/a/b/pull/2.", "praise": ["Cites me/home#3 and ` + "`a/b#4`" + `."]}, "findings": [
+			  {"path": "main.go", "line": 11, "severity": "nit", "category": "correctness", "title": "see a/b#5", "explanation": "as a/b#6 says", "suggested_fix": "a/b#7", "replacement": "a/b#8", "agent_prompt": "a/b#9"}
+			]}`,
+			opts:   ParseOptions{Repository: "me/home"},
+			take:   "Bumps [a/b#1](https://redirect.github.com/a/b/issues/1) per https://redirect.github.com/a/b/pull/2.",
+			praise: []string{"Cites me/home#3 and `a/b#4`."},
+			kept:   []string{"main.go:11:see [a/b#5](https://redirect.github.com/a/b/issues/5)"},
 		},
 		{
 			name: "an unknown severity is dropped, not coerced",
-			raw:  `{"summary": {"take": "t"}, "findings": [{"path": "main.go", "line": 11, "severity": "error", "title": "old", "explanation": "e"}]}`,
+			raw:  `{"summary": {"take": "t"}, "findings": [{"path": "main.go", "line": 11, "severity": "error", "category": "correctness", "title": "old", "explanation": "e"}]}`,
 			take: "t", dropped: map[string]DropReason{"old": DropBadSeverity},
+		},
+		{
+			name: "an unknown or missing category is dropped",
+			raw: `{"summary": {"take": "t"}, "findings": [
+			  {"path": "main.go", "line": 11, "severity": "nit", "category": "style", "title": "styled", "explanation": "e"},
+			  {"path": "main.go", "line": 12, "severity": "nit", "title": "uncategorised", "explanation": "e"}
+			]}`,
+			take: "t", dropped: map[string]DropReason{"styled": DropBadCategory, "uncategorised": DropBadCategory},
 		},
 		{
 			name: "a finding without a title or explanation is incomplete",
 			raw: `{"summary": {"take": "t"}, "findings": [
-			  {"path": "main.go", "line": 11, "severity": "nit", "title": " ", "explanation": "no title"},
-			  {"path": "main.go", "line": 11, "severity": "nit", "title": "no explanation", "explanation": ""}
+			  {"path": "main.go", "line": 11, "severity": "nit", "category": "correctness", "title": " ", "explanation": "no title"},
+			  {"path": "main.go", "line": 11, "severity": "nit", "category": "correctness", "title": "no explanation", "explanation": ""}
 			]}`,
 			take: "t", dropped: map[string]DropReason{"": DropIncomplete, "no explanation": DropIncomplete},
 		},
 		{
 			name: "a finding off the diff is unanchored",
 			raw: `{"summary": {"take": "t"}, "findings": [
-			  {"path": "main.go", "line": 99, "severity": "nit", "title": "off", "explanation": "e"},
-			  {"path": "nope.go", "line": 1, "severity": "nit", "title": "unknown file", "explanation": "e"}
+			  {"path": "main.go", "line": 99, "severity": "nit", "category": "correctness", "title": "off", "explanation": "e"},
+			  {"path": "nope.go", "line": 1, "severity": "nit", "category": "correctness", "title": "unknown file", "explanation": "e"}
 			]}`,
 			take: "t", dropped: map[string]DropReason{"off": DropUnanchored, "unknown file": DropUnanchored},
 		},
 		{
 			name: "RequireSuggestedFix drops a finding without a fix",
 			raw: `{"summary": {"take": "t"}, "findings": [
-			  {"path": "main.go", "line": 11, "severity": "important", "title": "no fix", "explanation": "e", "suggested_fix": "  "},
-			  {"path": "main.go", "line": 12, "severity": "important", "title": "fixed", "explanation": "e", "suggested_fix": "x"}
+			  {"path": "main.go", "line": 11, "severity": "important", "category": "correctness", "title": "no fix", "explanation": "e", "suggested_fix": "  "},
+			  {"path": "main.go", "line": 12, "severity": "important", "category": "correctness", "title": "fixed", "explanation": "e", "suggested_fix": "x"}
 			]}`,
 			opts: ParseOptions{RequireSuggestedFix: true},
 			take: "t", kept: []string{"main.go:12:fixed"}, dropped: map[string]DropReason{"no fix": DropNoFix},
@@ -121,19 +236,46 @@ func TestParse(t *testing.T) {
 		{
 			name: "a replacement is kept only over anchored lines, without fences",
 			raw: `{"summary": {"take": "t"}, "findings": [
-			  {"path": "main.go", "line": 11, "end_line": 12, "severity": "nit", "title": "ranged", "explanation": "e", "replacement": "` + "```go\\na\\nb\\n```" + `"},
-			  {"path": "main.go", "line": 11, "end_line": 99, "severity": "nit", "title": "off range", "explanation": "e", "replacement": "a"},
-			  {"path": "main.go", "line": 12, "end_line": 12, "severity": "nit", "title": "same line", "explanation": "e", "replacement": "a", "agent_prompt": " p "}
+			  {"path": "main.go", "line": 11, "end_line": 12, "severity": "nit", "category": "correctness", "title": "ranged", "explanation": "e", "replacement": "` + "```go\\na\\nb\\n```" + `"},
+			  {"path": "main.go", "line": 11, "end_line": 99, "severity": "nit", "category": "correctness", "title": "off range", "explanation": "e", "replacement": "a"},
+			  {"path": "main.go", "line": 12, "end_line": 12, "severity": "nit", "category": "correctness", "title": "same line", "explanation": "e", "replacement": "a", "agent_prompt": " p "}
 			]}`,
 			take: "t", kept: []string{"main.go:11:ranged", "main.go:11:off range", "main.go:12:same line"},
 		},
 		{
+			name: "an insertion becomes a replacement of its line by that line and the added ones",
+			raw: `{"summary": {"take": "t"}, "findings": [
+			  {"path": "main.go", "line": 11, "severity": "nit", "category": "correctness", "title": "inserted", "explanation": "e", "insert_after": "` + "```go\\n\\tw := 5\\n```" + `"},
+			  {"path": "main.go", "line": 11, "end_line": 12, "severity": "nit", "category": "correctness", "title": "both", "explanation": "e", "replacement": "a\nb", "insert_after": "c"},
+			  {"path": "main.go", "line": 99, "severity": "nit", "category": "correctness", "title": "inserted off", "explanation": "e", "insert_after": "c"}
+			]}`,
+			take: "t", kept: []string{"main.go:11:inserted", "main.go:11:both"}, dropped: map[string]DropReason{"inserted off": DropUnanchored},
+		},
+		{
+			name: "RequireSuggestedFix accepts an insertion as the fix",
+			raw: `{"summary": {"take": "t"}, "findings": [
+			  {"path": "README.md", "line": 3, "severity": "important", "category": "correctness", "title": "appended", "explanation": "e", "insert_after": "more"}
+			]}`,
+			opts: ParseOptions{RequireSuggestedFix: true},
+			take: "t", kept: []string{"README.md:3:appended"},
+		},
+		{
 			name: "RequireSuggestedFix accepts a replacement as the fix",
 			raw: `{"summary": {"take": "t"}, "findings": [
-			  {"path": "main.go", "line": 11, "severity": "important", "title": "replaced", "explanation": "e", "replacement": "x"}
+			  {"path": "main.go", "line": 11, "severity": "important", "category": "correctness", "title": "replaced", "explanation": "e", "replacement": "x"}
 			]}`,
 			opts: ParseOptions{RequireSuggestedFix: true},
 			take: "t", kept: []string{"main.go:11:replaced"},
+		},
+		{
+			name: "a finding cites only the rules the review was given, once each",
+			raw: `{"summary": {"take": "t"}, "findings": [
+			  {"path": "main.go", "line": 11, "severity": "nit", "category": "correctness", "title": "cites", "explanation": "e",
+			   "rules": ["wrap-errors", " no-tokens ", "made-up", "wrap-errors"]},
+			  {"path": "main.go", "line": 12, "severity": "nit", "category": "correctness", "title": "cites none", "explanation": "e", "rules": ["made-up"]}
+			]}`,
+			opts: ParseOptions{Rules: []string{"no-tokens", "wrap-errors"}},
+			take: "t", kept: []string{"main.go:11:cites", "main.go:12:cites none"},
 		},
 		{name: "garbage errors", raw: "not json", wantErr: true},
 	}
@@ -152,6 +294,9 @@ func TestParse(t *testing.T) {
 			if res.Summary.Take != tt.take {
 				t.Errorf("take = %q, want %q", res.Summary.Take, tt.take)
 			}
+			if res.Summary.Headline != tt.headline {
+				t.Errorf("headline = %q, want %q", res.Summary.Headline, tt.headline)
+			}
 			if !slices.Equal(res.Summary.Praise, tt.praise) && (len(res.Summary.Praise) != 0 || len(tt.praise) != 0) {
 				t.Errorf("praise = %q, want %q", res.Summary.Praise, tt.praise)
 			}
@@ -162,20 +307,28 @@ func TestParse(t *testing.T) {
 			if !slices.Equal(kept, tt.kept) {
 				t.Errorf("kept = %q, want %q", kept, tt.kept)
 			}
+			// The fix fields a kept finding ends up with, by title; a title
+			// not listed is not checked.
+			fixes := map[string]Finding{
+				"ranged":     {EndLine: 12, Replacement: "a\nb"},
+				"off range":  {},
+				"same line":  {Replacement: "a", AgentPrompt: "p"},
+				"inserted":   {Replacement: "\ty := 3\n\tw := 5"},
+				"both":       {EndLine: 12, Replacement: "a\nb"},
+				"appended":   {Replacement: "tail\nmore"},
+				"cites":      {Rules: []string{"wrap-errors", "no-tokens"}},
+				"cites none": {},
+				"see [a/b#5](https://redirect.github.com/a/b/issues/5)": {Replacement: "a/b#8", AgentPrompt: "a/b#9"},
+			}
 			for _, f := range res.Findings {
-				switch f.Title {
-				case "ranged":
-					if f.EndLine != 12 || f.Replacement != "a\nb" {
-						t.Errorf("ranged = %+v", f)
-					}
-				case "off range":
-					if f.EndLine != 0 || f.Replacement != "" {
-						t.Errorf("off range = %+v", f)
-					}
-				case "same line":
-					if f.EndLine != 0 || f.Replacement != "a" || f.AgentPrompt != "p" {
-						t.Errorf("same line = %+v", f)
-					}
+				want, ok := fixes[f.Title]
+				if !ok {
+					continue
+				}
+				got := Finding{EndLine: f.EndLine, Replacement: f.Replacement, InsertAfter: f.InsertAfter, AgentPrompt: f.AgentPrompt, Rules: f.Rules}
+				if got.EndLine != want.EndLine || got.Replacement != want.Replacement || got.InsertAfter != want.InsertAfter ||
+					got.AgentPrompt != want.AgentPrompt || !slices.Equal(got.Rules, want.Rules) {
+					t.Errorf("%s fix fields = %+v, want %+v", f.Title, got, want)
 				}
 			}
 			if len(dropped) != len(tt.dropped) {
@@ -286,26 +439,17 @@ func TestBuildAppendsContextWithinBudget(t *testing.T) {
 }
 
 func TestBuildReferences(t *testing.T) {
-	schema := Reference{Path: "db/schema.sql", Description: "the schema", Content: strings.Repeat("CREATE TABLE t (id int);\n", 100)}
-	pointer := Reference{Path: "docs/arch.md", Description: "how the parts fit"}
-	in := Input{Repository: "a/b", Number: 1, Diff: sampleDiff, Changed: []string{"main.go"}, References: []Reference{schema, pointer},
+	schema := Reference{Path: "db/schema.sql", Description: "the schema"}
+	arch := Reference{Path: "docs/arch.md", Description: "how the parts fit"}
+	in := Input{Repository: "a/b", Number: 1, Diff: sampleDiff, Changed: []string{"main.go"}, References: []Reference{schema, arch},
 		Context: []contextpack.Chunk{{Stage: "caller", Path: "b.go", Language: "go", StartLine: 1, EndLine: 1, Text: "b()"}}}
 	msg, _, _ := Build(in)
 	refs := strings.Index(msg, "Reference files the repository names")
 	if refs < strings.Index(msg, "Diff (unified") || refs > strings.Index(msg, "Context (not part") {
 		t.Fatalf("references must come between the diff and the context:\n%s", msg)
 	}
-	if !strings.Contains(msg, "### db/schema.sql: the schema\n```\n"+schema.Content+"\n```\n") ||
-		!strings.Contains(msg, "### docs/arch.md: how the parts fit\n") {
+	if !strings.Contains(msg, "### db/schema.sql: the schema\n\n### docs/arch.md: how the parts fit\n") {
 		t.Fatalf("references:\n%s", msg)
-	}
-	// A budget that fits the diff and the heading but not the schema's
-	// content names the schema instead.
-	in.BudgetTokens = (refs + 700) / charsPerToken
-	msg, _, _ = Build(in)
-	if !strings.Contains(msg, "### db/schema.sql: the schema\n[omitted to fit the context budget]\n") || strings.Contains(msg, "CREATE TABLE") ||
-		!strings.Contains(msg, "+new line") {
-		t.Fatalf("an oversized reference:\n%s", msg)
 	}
 }
 
@@ -313,12 +457,14 @@ func TestBuildFollowUpAndParse(t *testing.T) {
 	in := Input{Repository: "a/b", Number: 1, Title: "t", Author: "u", BaseRef: "main", Changed: []string{"main.go"}, Diff: sampleDiff}
 	findings := []Finding{{Path: "main.go", Line: 11, Severity: SeverityImportant, Title: "y changed", Explanation: "why\nit matters"}}
 	thread := []Message{
-		{Author: "kritique[bot]", Body: "### kritique review\n\nFine."},
-		{Author: "onedr0p", Body: "@kritique why is y changed?", When: time.Date(2026, 9, 24, 21, 0, 0, 0, time.UTC)},
+		NewMessage("kritique[bot]", "## Kritique Review\n\nFine.\n", time.Time{}),
+		NewMessage("outsider", strings.Repeat("x", maxMessageChars+1), time.Time{}),
+		NewMessage("onedr0p", "@kritique why is y changed?", time.Date(2026, 9, 24, 21, 0, 0, 0, time.UTC)),
 	}
 	msg := BuildFollowUp(in, findings, thread)
 	for _, want := range []string{"Diff (unified", "+	z := 4", "Findings kritique posted on this pull request (1)", "main.go:11 [important] y changed: why it matters",
-		"--- kritique[bot] ---", "--- onedr0p (2026-09-24 21:00) [answer this] ---", "Reply to the last message from onedr0p."} {
+		"--- kritique[bot] ---\n## Kritique Review\n\nFine.\n", "--- outsider ---\n" + strings.Repeat("x", maxMessageChars) + " …\n",
+		"--- onedr0p (2026-09-24 21:00) [answer this] ---", "Reply to the last message from onedr0p."} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("missing %q in:\n%s", want, msg)
 		}
@@ -326,14 +472,21 @@ func TestBuildFollowUpAndParse(t *testing.T) {
 	if strings.Index(msg, "Thread, oldest first") < strings.Index(msg, "Diff (unified") {
 		t.Fatal("thread must come after the diff")
 	}
-	reply, err := ParseFollowUp(`{"reply": " Because the base value moved. "}`)
+	reply, err := ParseFollowUp(`{"reply": " Because the base value moved. "}`, "me/home")
 	if err != nil || reply != "Because the base value moved." {
 		t.Fatalf("reply = %q, %v", reply, err)
 	}
-	if _, err := ParseFollowUp(`{"reply": ""}`); err == nil {
+	if _, err := ParseFollowUp(`{"reply": ""}`, "me/home"); err == nil {
 		t.Fatal("an empty reply must error")
 	}
-	if !strings.HasPrefix(FollowUpBody(reply, "m"), reply) || !strings.Contains(FollowUpBody(reply, "m"), "kritique follow-up with m") {
+	if err := CheckFollowUp(json.RawMessage(`{"reply": " "}`)); err == nil {
+		t.Fatal("an empty reply must not be accepted as a submission")
+	}
+	if err := CheckFollowUp(json.RawMessage(`{"reply": "Because the base value moved."}`)); err != nil {
+		t.Fatalf("CheckFollowUp = %v", err)
+	}
+	if !strings.HasPrefix(FollowUpBody(reply, "m", ""), reply) || !strings.Contains(FollowUpBody(reply, "m", ""), "kritique follow-up with m.") ||
+		!strings.Contains(FollowUpBody(reply, "m", "low"), "kritique follow-up with m/low.") {
 		t.Fatal("FollowUpBody")
 	}
 }
@@ -370,29 +523,60 @@ func TestBuildRendersDescriptionAsData(t *testing.T) {
 			t.Fatalf("unexpected sections:\n%s", msg)
 		}
 	})
+	t.Run("a long description is kept whole while it fits its share of the budget", func(t *testing.T) {
+		// A Renovate body: the release notes of the oldest version in the
+		// update come last, well past the first few thousand bytes.
+		in.Body = "### Release Notes\n" + strings.Repeat("- a fix\n", 800) + "### v0.12.17\n- the oldest release in the update\n"
+		msg, _, _ := Build(in)
+		if !strings.Contains(msg, "### v0.12.17\n- the oldest release in the update\n</description>") || strings.Contains(msg, "was cut here") {
+			t.Fatalf("the whole description must reach the model:\n%s", msg)
+		}
+	})
+	t.Run("a description over its share is cut on a rune boundary with a note of what was left out", func(t *testing.T) {
+		in.BudgetTokens = 1_000 // 4,000 characters, a quarter of which the description may take
+		in.Body = strings.Repeat("x", 999) + "é" + strings.Repeat("y", 500)
+		msg, _, _ := Build(in)
+		want := strings.Repeat("x", 999) + "\n[The description was cut here to fit the prompt budget: 502 more bytes.]\n</description>"
+		if !strings.Contains(msg, want) || strings.Contains(msg, "xé") {
+			t.Fatalf("missing %q in:\n%s", want, msg)
+		}
+		if len(msg) > in.BudgetTokens*charsPerToken {
+			t.Fatalf("message is %d chars, over the budget", len(msg))
+		}
+	})
 }
 
 type node struct {
-	Type       string           `json:"type"`
-	Enum       []string         `json:"enum"`
-	Properties map[string]*node `json:"properties"`
-	Items      *node            `json:"items"`
-	Required   []string         `json:"required"`
-	MaxItems   int              `json:"maxItems"`
+	Type                 string           `json:"type"`
+	Enum                 []string         `json:"enum"`
+	Properties           map[string]*node `json:"properties"`
+	Items                *node            `json:"items"`
+	Required             []string         `json:"required"`
+	MaxItems             int              `json:"maxItems"`
+	AdditionalProperties *bool            `json:"additionalProperties"`
+}
+
+// closed reports whether n refuses keys beyond its properties.
+func (n *node) closed() bool {
+	return n != nil && n.AdditionalProperties != nil && !*n.AdditionalProperties
 }
 
 func checkContract(t *testing.T, n node, required []string) {
 	t.Helper()
+	if !n.closed() {
+		t.Fatalf("the input is open to unknown keys: %+v", n)
+	}
 	summary := n.Properties["summary"]
-	if summary == nil || summary.Type != "object" || !slices.Equal(summary.Required, []string{"take", "praise"}) ||
+	if !summary.closed() || summary.Type != "object" || !slices.Equal(summary.Required, []string{"headline", "take", "praise"}) ||
 		summary.Properties["praise"].Type != "array" || summary.Properties["praise"].MaxItems != 3 {
 		t.Fatalf("summary = %+v", summary)
 	}
 	items := n.Properties["findings"].Items
-	if n.Properties["findings"].Type != "array" || items == nil || items.Type != "object" ||
+	if n.Properties["findings"].Type != "array" || !items.closed() || items.Type != "object" ||
 		!slices.Equal(items.Required, required) ||
 		items.Properties["line"].Type != "integer" || items.Properties["suggested_fix"].Type != "string" ||
-		!slices.Equal(items.Properties["severity"].Enum, []string{"blocking", "important", "nit"}) {
+		!slices.Equal(items.Properties["severity"].Enum, []string{"blocking", "important", "nit"}) ||
+		!slices.Equal(items.Properties["category"].Enum, []string{"correctness", "security", "performance", "reliability", "maintainability", "tests"}) {
 		t.Fatalf("findings item = %+v", items)
 	}
 }
@@ -404,11 +588,11 @@ func TestSchemas(t *testing.T) {
 		required []string
 		check    func(t *testing.T, n node)
 	}{
-		{"findings", Schema(), []string{"summary", "findings"}, func(t *testing.T, n node) {
-			checkContract(t, n, []string{"path", "line", "severity", "title", "explanation"})
+		{"findings", Schema(false), []string{"summary", "findings"}, func(t *testing.T, n node) {
+			checkContract(t, n, []string{"path", "line", "severity", "category", "title", "explanation"})
 		}},
-		{"strict findings", SchemaStrict(), []string{"summary", "findings"}, func(t *testing.T, n node) {
-			checkContract(t, n, []string{"path", "line", "severity", "title", "explanation", "suggested_fix"})
+		{"strict findings", SchemaStrict(false), []string{"summary", "findings"}, func(t *testing.T, n node) {
+			checkContract(t, n, []string{"path", "line", "severity", "category", "title", "explanation", "suggested_fix"})
 		}},
 		{"follow-up", FollowUpSchema(), []string{"reply"}, func(t *testing.T, n node) {
 			if n.Properties["reply"].Type != "string" {
@@ -428,10 +612,32 @@ func TestSchemas(t *testing.T) {
 			tt.check(t, n)
 		})
 	}
+	t.Run("a diagram is in the contract only when asked for", func(t *testing.T) {
+		for name, tt := range map[string]struct {
+			raw  json.RawMessage
+			want bool
+		}{
+			"Schema":            {Schema(false), false},
+			"Schema diagram":    {Schema(true), true},
+			"SchemaStrict":      {SchemaStrict(false), false},
+			"SchemaStrict diag": {SchemaStrict(true), true},
+		} {
+			var n node
+			if err := json.Unmarshal(tt.raw, &n); err != nil {
+				t.Fatal(err)
+			}
+			if _, got := n.Properties["summary"].Properties["diagram"]; got != tt.want {
+				t.Errorf("%s has summary.diagram = %v, want %v", name, got, tt.want)
+			}
+			if slices.Contains(n.Properties["summary"].Required, "diagram") {
+				t.Errorf("%s requires summary.diagram", name)
+			}
+		}
+	})
 	t.Run("callers cannot alter the shared schema", func(t *testing.T) {
-		s := Schema()
+		s := Schema(false)
 		s[0] = 'x'
-		if Schema()[0] != '{' {
+		if Schema(false)[0] != '{' {
 			t.Fatal("Schema returned the shared slice")
 		}
 	})
@@ -442,9 +648,9 @@ func TestSchemas(t *testing.T) {
 // schemas declare, at the summary and the finding level.
 func TestSchemaMatchesJSONTags(t *testing.T) {
 	raw, err := json.Marshal(Result{
-		Summary: Summary{Take: "t", Praise: []string{"p"}},
+		Summary: Summary{Headline: "h", Take: "t", Praise: []string{"p"}, Diagram: "d", Checked: []string{"c"}},
 		Findings: []Finding{{Path: "a", Line: 1, Severity: SeverityNit, Title: "t", Explanation: "e", SuggestedFix: "f",
-			EndLine: 2, Replacement: "r", AgentPrompt: "p", URL: "ignored"}},
+			EndLine: 2, Replacement: "r", InsertAfter: "i", AgentPrompt: "p", Rules: []string{"r"}, Prior: "p", URL: "ignored"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -462,7 +668,7 @@ func TestSchemaMatchesJSONTags(t *testing.T) {
 	}
 	keys := func(m map[string]any) []string { return slices.Sorted(maps.Keys(m)) }
 	props := func(n *node) []string { return slices.Sorted(maps.Keys(n.Properties)) }
-	for name, schema := range map[string]json.RawMessage{"Schema": Schema(), "SchemaStrict": SchemaStrict()} {
+	for name, schema := range map[string]json.RawMessage{"Schema": Schema(true), "SchemaStrict": SchemaStrict(true)} {
 		var n node
 		if err := json.Unmarshal(schema, &n); err != nil {
 			t.Fatal(err)
@@ -471,6 +677,75 @@ func TestSchemaMatchesJSONTags(t *testing.T) {
 			!slices.Equal(keys(got.Findings[0]), props(n.Properties["findings"].Items)) {
 			t.Fatalf("%s properties drifted from the JSON tags: %s", name, raw)
 		}
+	}
+}
+
+// TestParseChecked: the notes for the next review are cut to one line
+// each and to maxChecked of them, blank ones dropped.
+func TestParseChecked(t *testing.T) {
+	notes := make([]string, 0, 2+maxChecked)
+	notes = append(notes, `" main.go:\n f1 is pure "`, `"  "`)
+	want := []string{"main.go: f1 is pure"}
+	for i := range maxChecked {
+		notes = append(notes, fmt.Sprintf(`"n%d"`, i))
+		if len(want) < maxChecked {
+			want = append(want, fmt.Sprintf("n%d", i))
+		}
+	}
+	res, _, err := Parse(`{"summary":{"take":"t","praise":[],"checked":[`+strings.Join(notes, ",")+`]},"findings":[]}`, nil, ParseOptions{})
+	if err != nil || !slices.Equal(res.Summary.Checked, want) {
+		t.Fatalf("checked = %q, want %q (err %v)", res.Summary.Checked, want, err)
+	}
+	if res, _, _ := Parse(`{"summary":{"take":"t","praise":[]},"findings":[]}`, nil, ParseOptions{}); res.Summary.Checked != nil {
+		t.Fatalf("no notes = %q", res.Summary.Checked)
+	}
+}
+
+func TestParseDiagram(t *testing.T) {
+	flow := "flowchart TD\n  A[\"webhook\"] --> B[worker]"
+	tests := []struct {
+		name, diagram, want string
+	}{
+		{"a flowchart is kept, trimmed", "\n" + flow + "\n", flow},
+		{"its fences are dropped", "```mermaid\n" + flow + "\n```", flow},
+		{"a sequence diagram is kept", "sequenceDiagram\n  A->>B: run", "sequenceDiagram\n  A->>B: run"},
+		{"a graph is kept", "graph LR\n  A --> B", "graph LR\n  A --> B"},
+		{"front matter may precede the kind", "---\ntitle: Webhook flow\n---\n" + flow, "---\ntitle: Webhook flow\n---\n" + flow},
+		{"a comment may precede the kind", "%% request path\n" + flow, "%% request path\n" + flow},
+		{"an unsupported kind is dropped", "pie\n  \"a\": 1", ""},
+		{"unclosed front matter is dropped", "---\ntitle: Webhook flow\n" + flow, ""},
+		{"an init directive is dropped", "%%{init: {}}%%\n" + flow, ""},
+		{"an init directive after a comment is dropped", "%% theme\n%%{init: {}}%%\n" + flow, ""},
+		{"an init directive after the kind is dropped", flow + "\n%%{init: {\"theme\": \"dark\"}}%%", ""},
+		{"an init directive within a line is dropped", "flowchart LR\n  A --> B %%{init: {\"theme\": \"dark\"}}%%", ""},
+		{"front matter that configures is dropped", "---\ntitle: Flow\nconfig:\n  theme: dark\n---\n" + flow, ""},
+		{"prose is dropped", "The webhook calls the worker.", ""},
+		{"an oversized diagram is dropped", "flowchart TD\n" + strings.Repeat("  A --> B\n", maxDiagramBytes/10), ""},
+		{"none stays none", "", ""},
+	}
+	t.Run("a diagram not asked for is dropped", func(t *testing.T) {
+		res, _, err := Parse(`{"summary": {"take": "t", "diagram": "flowchart TD\n  A --> B"}, "findings": []}`, nil, ParseOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Summary.Diagram != "" {
+			t.Fatalf("diagram = %q, want none", res.Summary.Diagram)
+		}
+	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := json.Marshal(Result{Summary: Summary{Take: "t", Diagram: tt.diagram}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, _, err := Parse(string(raw), nil, ParseOptions{Diagram: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Summary.Diagram != tt.want {
+				t.Fatalf("diagram = %q, want %q", res.Summary.Diagram, tt.want)
+			}
+		})
 	}
 }
 
@@ -488,5 +763,115 @@ func TestAgentPromptFence(t *testing.T) {
 		if got := (Finding{AgentPrompt: prompt}).AgentPromptFence(); got != want {
 			t.Errorf("fence for %q = %q, want %q", prompt, got, want)
 		}
+	}
+}
+
+func TestBuildLargerBudgetKeepsALargeFile(t *testing.T) {
+	big := "diff --git a/big.go b/big.go\n--- a/big.go\n+++ b/big.go\n@@ -0,0 +1,3000 @@\n" +
+		strings.Repeat("+// a line of the large file under review\n", 3000)
+	in := Input{Repository: "a/b", Number: 1, Title: "t", Author: "u", BaseRef: "main", Changed: []string{"main.go", "big.go"}, Diff: sampleDiff + big}
+	tests := []struct {
+		name        string
+		budget      int
+		wantOmitted []string
+	}{
+		{name: "the default budget leaves it out", wantOmitted: []string{"big.go"}},
+		{name: "a larger budget keeps it", budget: 60_000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := in
+			in.BudgetTokens = tt.budget
+			msg, omitted, _ := Build(in)
+			if !slices.Equal(omitted, tt.wantOmitted) {
+				t.Fatalf("omitted = %v, want %v", omitted, tt.wantOmitted)
+			}
+			if kept := strings.Contains(msg, "+// a line of the large file under review"); kept != (len(tt.wantOmitted) == 0) {
+				t.Fatalf("large file in the message = %v", kept)
+			}
+		})
+	}
+}
+
+// TestParsePrior: a finding on a prior finding's path that names its id,
+// or that has its path and title, carries that finding's fingerprint on
+// whatever its wording now, so it keeps the thread; one that names an
+// unknown id or another path's is its own, as is one whose prior finding an
+// earlier one carried on. A severity a model wrote into a title, once or
+// more, is dropped, and a prior finding's title written with one matches.
+func TestParsePrior(t *testing.T) {
+	first := Finding{Path: "main.go", Title: "Publish the chart tag"}
+	// The last review reported first again in other words, and carries its
+	// fingerprint.
+	reworded := Finding{Path: "main.go", Line: 11, Severity: SeverityImportant, Title: "Chart tag is not published", Explanation: "e", Fingerprint: Fingerprint(first)}
+	other := Finding{Path: "README.md", Line: 2, Severity: SeverityNit, Title: "Typo", Explanation: "e"}
+	prefixed := Finding{Path: "main.go", Line: 14, Severity: SeverityBlocking, Title: "[blocking] Unsigned tag", Explanation: "e", Fingerprint: "0123456789abcdef"}
+	raw := `{"summary": {"take": "t"}, "findings": [
+	  {"path": "main.go", "line": 12, "severity": "blocking", "category": "correctness", "title": "[blocking] Tag 0.0.46 is missing", "explanation": "e", "prior": " ` + PriorID(reworded) + ` "},
+	  {"path": "main.go", "line": 11, "severity": "important", "category": "correctness", "title": "chart tag is not  published", "explanation": "e"},
+	  {"path": "README.md", "line": 2, "severity": "nit", "category": "maintainability", "title": "Typo", "explanation": "e", "prior": "deadbeef"},
+	  {"path": "main.go", "line": 13, "severity": "nit", "category": "maintainability", "title": "New", "explanation": "e", "prior": "ffffffff"},
+	  {"path": "README.md", "line": 3, "severity": "nit", "category": "maintainability", "title": "Elsewhere", "explanation": "e", "prior": "` + PriorID(prefixed) + `"},
+	  {"path": "main.go", "line": 14, "severity": "blocking", "category": "correctness", "title": "[blocking] [Blocking] Unsigned tag", "explanation": "e"}
+	]}`
+	res, dropped, err := Parse(raw, Anchors(sampleDiff), ParseOptions{Prior: []Finding{reworded, other, prefixed}})
+	if err != nil || len(dropped) != 0 || len(res.Findings) != 6 {
+		t.Fatalf("Parse = %+v, dropped %+v, %v", res.Findings, dropped, err)
+	}
+	want := map[string]string{
+		"Tag 0.0.46 is missing":       Fingerprint(first),
+		"chart tag is not  published": Fingerprint(Finding{Path: "main.go", Title: "chart tag is not published"}),
+		"Typo":                        Fingerprint(other),
+		"New":                         Fingerprint(Finding{Path: "main.go", Title: "New"}),
+		"Elsewhere":                   Fingerprint(Finding{Path: "README.md", Title: "Elsewhere"}),
+		"Unsigned tag":                prefixed.Fingerprint,
+	}
+	for _, f := range res.Findings {
+		fp, ok := want[f.Title]
+		if !ok || Fingerprint(f) != fp || f.Prior != "" {
+			t.Errorf("finding %q: fingerprint %s, prior %q; want %s, prior cleared", f.Title, Fingerprint(f), f.Prior, fp)
+		}
+		if carried := f.Title == "Tag 0.0.46 is missing" || f.Title == "Unsigned tag"; (f.Fingerprint != "") != carried {
+			t.Errorf("finding %q: Fingerprint field %q; want it set only when carried on", f.Title, f.Fingerprint)
+		}
+	}
+}
+
+// TestParsePriorDroppedClaimsNone: a finding dropped as malformed claims
+// no prior finding's fingerprint, so a later finding that names the same
+// one carries it on; one off the diff, reported all the same, does claim
+// it.
+func TestParsePriorDroppedClaimsNone(t *testing.T) {
+	prior := Finding{Path: "main.go", Line: 11, Severity: SeverityImportant, Title: "Chart tag is not published", Explanation: "e"}
+	finding := func(severity, title string, line int) string {
+		return `{"path": "main.go", "line": ` + fmt.Sprint(line) + `, "severity": "` + severity + `", "category": "correctness", "title": "` +
+			title + `", "explanation": "e", "prior": "` + PriorID(prior) + `"}`
+	}
+	tests := []struct {
+		name string
+		raw  string
+		// want is the title of the kept finding that carries prior's
+		// fingerprint, and wantDropped the fingerprint of the dropped one.
+		want, wantDropped string
+	}{
+		{name: "a malformed finding claims none", raw: `{"summary": {"take": "t"}, "findings": [` +
+			finding("severe", "Malformed", 12) + `,` + finding("blocking", "Tag is missing", 12) + `]}`, want: "Tag is missing"},
+		{name: "a finding off the diff claims it", raw: `{"summary": {"take": "t"}, "findings": [` +
+			finding("blocking", "Off the diff", 999) + `,` + finding("blocking", "Tag is missing", 12) + `]}`,
+			want: "", wantDropped: Fingerprint(prior)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, dropped, err := Parse(tt.raw, Anchors(sampleDiff), ParseOptions{Prior: []Finding{prior}})
+			if err != nil || len(res.Findings) != 1 || len(dropped) != 1 {
+				t.Fatalf("Parse = %+v, dropped %+v, %v", res.Findings, dropped, err)
+			}
+			if kept := res.Findings[0]; (kept.Fingerprint == Fingerprint(prior)) != (kept.Title == tt.want) || kept.Prior != "" {
+				t.Errorf("kept %q carries %q, prior %q; want prior's carried by %q", kept.Title, kept.Fingerprint, kept.Prior, tt.want)
+			}
+			if d := dropped[0].Finding; d.Fingerprint != tt.wantDropped {
+				t.Errorf("dropped %q carries %q, want %q", d.Title, d.Fingerprint, tt.wantDropped)
+			}
+		})
 	}
 }

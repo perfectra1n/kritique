@@ -1,6 +1,6 @@
 // Package forge is the worker's view of a forge: the few calls a review
-// needs before and after the runner does its work. Each installation gets
-// its own Client, authenticated as that installation.
+// needs before and after the runner does its work. Each connection gets
+// its own Client, authenticated as that connection.
 package forge
 
 import (
@@ -9,16 +9,26 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
-// OpenPullRequest is a pull request as the forge lists it, in the same
-// shape the webhook parser produces so the poller can dispatch it as an
-// event.
+// Clients builds a forge client per App and repository owner: a GitHub
+// App's installation, and with it the token, is its owner's.
+type Clients interface {
+	For(ctx context.Context, in *configfile.Connection, repo string) (Client, error)
+}
+
+// OpenPullRequest is a pull request as the forge lists or returns it, in
+// the same shape the webhook parser produces so the poller can dispatch it
+// as an event.
 type OpenPullRequest struct {
 	webhook.PullRequest
-	UpdatedAt     time.Time
 	DefaultBranch string
+	// Additions, Deletions and ChangedFiles are the size of the pull
+	// request's diff as the forge counts it, lines and files, all zero when
+	// it was listed rather than read alone.
+	Additions, Deletions, ChangedFiles int
 }
 
 // Comment is a pull request comment as the forge holds it: a conversation
@@ -32,11 +42,34 @@ type Comment struct {
 	Inline      bool
 	Path        string
 	Line        int
-	// CommitID is the commit an inline comment is on.
-	CommitID string
+	// Outdated is whether the lines an inline comment was made on have
+	// changed since, by a later push to the pull request.
+	Outdated bool
 	// InReplyTo is the root inline comment this one replies to, 0 for a
 	// root or a conversation comment.
 	InReplyTo int64
+	// ReactionsUp and ReactionsDown count the 👍 and 👎 on the comment.
+	ReactionsUp, ReactionsDown int
+}
+
+// Issue is an issue of a repository, as a pull request's description links
+// one it closes, or the issue or pull request a task reads and acts on.
+type Issue struct {
+	Number int
+	Title  string
+	Body   string
+	// URL is the issue's page in the forge's web UI.
+	URL string
+	// PullRequest is set when the number names a pull request, which the
+	// forge files among its issues.
+	PullRequest bool
+	State       string // "open" or "closed"
+	Author      string
+	Labels      []string
+	Assignees   []string
+	// Draft is whether a pull request is a draft, false for an issue and
+	// on a forge too old to report it.
+	Draft bool
 }
 
 // InlineComment is one finding attached to a line on the head side of the
@@ -51,43 +84,29 @@ type InlineComment struct {
 	Body      string
 }
 
-// Issue is an issue or pull request as the forge holds it, in the shape a
-// task needs to read and act on one: it does not carry everything a pull
-// request review does (no diff, no branches), only what triage-style tasks
-// use.
-type Issue struct {
-	Number    int
-	Title     string
-	Body      string
-	State     string // "open" or "closed"
-	Author    string
-	Labels    []string
-	Assignees []string
-	IsPull    bool
-	// Draft is whether a pull request is a draft, false for an issue and
-	// on a forge too old to report it.
-	Draft bool
-	URL   string
-}
-
-// StatusState is the outcome a commit status reports. kritique never reports
-// failure for a review that ran: a review informs, it does not block.
-// StatusError is the one exception, for a review that did not run to a
-// verdict at all (canceled), which is not a finding to weigh.
+// StatusState is the outcome a commit status reports. A review that ran
+// reports success whatever it found: a review informs, it does not block.
+// StatusFailure is for a repository that asks for more, a confidence score
+// its pull request did not reach. StatusError is for a review that reached
+// no verdict: canceled, timed out, ended by an agent that never submitted a
+// valid review, or left unscored where a score was asked for. That is not
+// a finding to weigh, and a success would read as one. StatusPending
+// stands from a review's start until its outcome replaces it.
 type StatusState string
 
 // States kritique reports.
 const (
 	StatusPending StatusState = "pending"
 	StatusSuccess StatusState = "success"
+	StatusFailure StatusState = "failure"
 	StatusError   StatusState = "error"
 )
 
 // StatusContext is the commit status context kritique reports under.
 const StatusContext = "kritique/review"
 
-// MaxStatusDescription is the length, in characters, GitHub, and Forgejo
-// matching it, truncates a commit status description to.
+// MaxStatusDescription is the length, in characters, GitHub truncates a
+// commit status description to.
 const MaxStatusDescription = 140
 
 // StatusDescription is s cut to MaxStatusDescription characters, the last
@@ -133,38 +152,40 @@ var ErrFileTooLarge = errors.New("forge: file is over the size limit")
 // runner.
 var ErrNoReadToken = errors.New("forge: no read-only git token")
 
-// Client is one installation's access to its forge.
+// Client is one connection's access to its forge.
 type Client interface {
 	// MergeBase asks the forge for the merge-base of base (a branch) and
-	// head (a commit) of pull request number, the same way the forge
-	// computes the PR diff.
-	MergeBase(ctx context.Context, owner, repo string, number int, base, head string) (string, error)
-	// PullRequestDiff is the unified diff of pull request number: from
-	// base, its merge-base, to head on a forge that diffs two commits, and
-	// from the pull request's own merge base to its current head on one
-	// whose API diffs only pull requests. A diff too large to read whole is
-	// an error, never a truncated diff.
-	PullRequestDiff(ctx context.Context, owner, repo string, number int, base, head string) (string, error)
+	// head (a commit), the same way the forge computes a pull request's
+	// diff.
+	MergeBase(ctx context.Context, owner, repo, base, head string) (string, error)
+	// PullRequestDiff is a pull request's unified diff, from base, its
+	// merge-base, to head. A diff too large to read whole is an error,
+	// never a truncated diff.
+	PullRequestDiff(ctx context.Context, owner, repo, base, head string) (string, error)
 	// CloneURL is the HTTPS clone URL of a repository on this forge.
 	CloneURL(owner, repo string) string
-	// GitToken is the credential a runner fetches with: a short-lived
-	// installation token on GitHub, and on Forgejo a static token, the
-	// installation's gitToken when configured and its API token otherwise.
-	// It reaches a pod that reads untrusted content.
-	GitToken(ctx context.Context) (string, error)
+	// GitToken is the credential a runner fetches repo, a name under the
+	// client's account, with: a short-lived installation token on GitHub
+	// that can only read repo. It reaches a pod that reads untrusted
+	// content and runs commands an agent chose.
+	GitToken(ctx context.Context, repo string) (string, error)
 	// ReadGitToken is a credential that can only read owner/repo, for a
 	// runner whose agent a task drives over untrusted input: on GitHub an
 	// installation token minted for that repository alone with contents
-	// read, and on Forgejo the installation's gitToken, which the operator
-	// vouches is read-only. ErrNoReadToken when the forge has none.
+	// read. ErrNoReadToken when the forge has none.
 	ReadGitToken(ctx context.Context, owner, repo string) (string, error)
 	// BranchTip returns the commit a branch points at; an empty branch
 	// means the repository's default branch, whose name is also returned.
 	BranchTip(ctx context.Context, owner, repo, branch string) (sha, resolvedBranch string, err error)
+	// CommitSubject returns the first line of commit sha's message.
+	CommitSubject(ctx context.Context, owner, repo, sha string) (string, error)
 	// FileAt returns the content of the file at path in commit ref. A path
 	// that is not a file there is an error wrapping fs.ErrNotExist, and a
 	// file over MaxFileBytes one wrapping ErrFileTooLarge.
 	FileAt(ctx context.Context, owner, repo, ref, path string) ([]byte, error)
+	// Issue returns issue number of the repository. A number that names
+	// none is an error wrapping fs.ErrNotExist.
+	Issue(ctx context.Context, owner, repo string, number int) (Issue, error)
 
 	// BotLogin is the login comments posted through this client carry, so
 	// the sticky comment can be matched by author and marker together.
@@ -174,26 +195,43 @@ type Client interface {
 	FindComment(ctx context.Context, owner, repo string, number int, login, marker string) (int64, error)
 	// CreateComment posts a PR conversation comment and returns its id.
 	CreateComment(ctx context.Context, owner, repo string, number int, body string) (int64, error)
-	// UpdateComment replaces the body of a PR conversation comment.
+	// UpdateComment replaces the body of conversation comment id. An id
+	// that names none, say one deleted since, is an error wrapping
+	// fs.ErrNotExist.
 	UpdateComment(ctx context.Context, owner, repo string, id int64, body string) error
 	// CreateReview posts a non-blocking review with inline comments pinned
-	// to headSHA.
-	CreateReview(ctx context.Context, owner, repo string, number int, headSHA string, comments []InlineComment) error
+	// to headSHA and returns each comment's id, in order, 0 where the forge
+	// did not say. ids is nil when the review was not posted; a review
+	// posted whose comments could not be read back returns ids, all 0, and
+	// the error.
+	CreateReview(ctx context.Context, owner, repo string, number int, headSHA string, comments []InlineComment) (ids []int64, err error)
+	// Approve posts an approving review of headSHA with body, unless the
+	// bot's approval of that head already stands, and reports whether one
+	// was posted.
+	Approve(ctx context.Context, owner, repo string, number int, headSHA, body string) (bool, error)
+	// ChangesRequested reports whether a reviewer other than the bot
+	// stands as requesting changes on the pull request.
+	ChangesRequested(ctx context.Context, owner, repo string, number int) (bool, error)
+	// DismissApprovals dismisses each of the bot's standing approvals of
+	// the pull request with message, and returns how many it dismissed.
+	DismissApprovals(ctx context.Context, owner, repo string, number int, message string) (int, error)
 	// SetStatus sets the kritique commit status on sha.
 	SetStatus(ctx context.Context, owner, repo, sha string, state StatusState, description string) error
-	// LineRanges reports whether inline comments may span a range of
-	// lines, so a suggestion can replace more than one.
-	LineRanges() bool
 	// FileURL links lines line through endLine (0 for line alone) of path
 	// at sha in the forge's web UI.
 	FileURL(owner, repo, sha, path string, line, endLine int) string
+	// CommitURL links commit sha in the forge's web UI.
+	CommitURL(owner, repo, sha string) string
+	// ThreadURL links the thread of inline comment id on pull request
+	// number in the forge's web UI.
+	ThreadURL(owner, repo string, number int, id int64) string
 
 	// GetComment fetches one comment; inline selects the review-comment
 	// namespace, which the forge keeps apart from conversation comments.
-	// number is the pull request the comment belongs to; forges that can
-	// resolve a comment by id alone (GitHub) ignore it.
-	GetComment(ctx context.Context, owner, repo string, number int, id int64, inline bool) (Comment, error)
-	// ListConversation returns the PR's conversation comments, oldest first.
+	GetComment(ctx context.Context, owner, repo string, id int64, inline bool) (Comment, error)
+	// ListConversation returns the PR's conversation comments, oldest
+	// first. It and ListInline may stop short of the end of a pull request
+	// with thousands.
 	ListConversation(ctx context.Context, owner, repo string, number int) ([]Comment, error)
 	// ListInline returns the PR's inline review comments, oldest first.
 	ListInline(ctx context.Context, owner, repo string, number int) ([]Comment, error)
@@ -203,12 +241,30 @@ type Client interface {
 	// ReplyInline posts a reply in inline comment to's thread and returns
 	// its id, 0 when the forge does not say.
 	ReplyInline(ctx context.Context, owner, repo string, number int, to Comment, body string) (int64, error)
+	// React adds the bot's reaction, such as ReactionEyes, to a comment and
+	// returns the reaction's id, which Unreact takes. Reacting again with
+	// the same content returns the reaction already there.
+	React(ctx context.Context, owner, repo string, to Comment, content string) (int64, error)
+	// Unreact removes the bot's reaction id from a comment.
+	Unreact(ctx context.Context, owner, repo string, from Comment, id int64) error
+	// ReactToPullRequest adds the bot's reaction to the pull request itself
+	// and returns the reaction's id, as React does for a comment.
+	ReactToPullRequest(ctx context.Context, owner, repo string, number int, content string) (int64, error)
+	// UnreactToPullRequest removes the bot's reaction id from the pull
+	// request itself.
+	UnreactToPullRequest(ctx context.Context, owner, repo string, number int, id int64) error
+	// ResolveThread resolves the review thread inline comment id opened,
+	// when it is still open, and reports whether it did. With onlyOwn, a
+	// thread someone else has written in is left open: it is a
+	// conversation, left to its people unless one of them asked.
+	ResolveThread(ctx context.Context, owner, repo string, number int, id int64, onlyOwn bool) (bool, error)
 	// ListOpenPullRequests returns the open pull requests updated since a
-	// time, most recently updated first.
+	// time, most recently updated first; the zero time lists them all.
 	ListOpenPullRequests(ctx context.Context, owner, repo string, since time.Time) ([]OpenPullRequest, error)
+	// PullRequest returns one pull request as it stands, open or closed. A
+	// missing one is fs.ErrNotExist.
+	PullRequest(ctx context.Context, owner, repo string, number int) (OpenPullRequest, error)
 
-	// Issue fetches one issue or pull request by number.
-	Issue(ctx context.Context, owner, repo string, number int) (Issue, error)
 	// RepoLabels lists the names of every label defined on the repository.
 	RepoLabels(ctx context.Context, owner, repo string) ([]string, error)
 	// AddLabels adds labels, by name, to an issue or pull request. A label
@@ -225,9 +281,17 @@ type Client interface {
 	// RequestReviewers requests review from logins on a pull request.
 	RequestReviewers(ctx context.Context, owner, repo string, number int, logins []string) error
 	// SearchIssues searches issues and pull requests in one repository,
-	// returning at most limit results.
+	// returning at most limit results. The query is free text: a forge
+	// keeps the search inside owner/repo whatever qualifiers it holds.
 	SearchIssues(ctx context.Context, owner, repo, query string, limit int) ([]Issue, error)
 }
+
+// Reactions the bot leaves on a pull request it reviews and on a mention it
+// answers: the 👀 while it works, the 👍 once it has answered.
+const (
+	ReactionEyes = "eyes"
+	ReactionDone = "+1"
+)
 
 // CanWrite reports whether a permission level allows pushing.
 func CanWrite(permission Permission) bool {
@@ -236,4 +300,24 @@ func CanWrite(permission Permission) bool {
 		return true
 	}
 	return false
+}
+
+// pullRequestKey is the context key WithPullRequest stores its number
+// under.
+type pullRequestKey struct{}
+
+// WithPullRequest returns ctx naming pull request number as the one the
+// forge calls made with it are about. A Client method that takes no number
+// may need one on a forge whose API keys the thing by its pull request:
+// Forgejo and Gitea find an inline comment by id, and a commit's merge base,
+// only through the pull request. GitHub needs none.
+func WithPullRequest(ctx context.Context, number int) context.Context {
+	return context.WithValue(ctx, pullRequestKey{}, number)
+}
+
+// PullRequestFrom returns the pull request number WithPullRequest put in
+// ctx, and whether there is one.
+func PullRequestFrom(ctx context.Context) (int, bool) {
+	n, ok := ctx.Value(pullRequestKey{}).(int)
+	return n, ok && n > 0
 }

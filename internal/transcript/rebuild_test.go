@@ -70,7 +70,7 @@ func TestRebuild(t *testing.T) {
 	single := delta(State{}, model.StepRequest{System: "review sys", Messages: []model.Message{user("the diff")},
 		Tools: []model.ToolDef{{Name: "findings", InputSchema: json.RawMessage(`{"type":"object"}`)}}})
 	single.Response = response(model.StepResponse{ToolCalls: []model.ToolCall{{ID: "f", Name: "findings", Input: json.RawMessage(`{"findings":[]}`)}}})
-	singleRow := decoded(t, single.Encode(), StoredRow{Kind: KindReview, Usage: model.Usage{Input: 10, Output: 5}, CostUSD: 0.01,
+	singleRow := decoded(t, single.Encode(), StoredRow{Kind: KindFollowUp, Usage: model.Usage{Input: 10, Output: 5}, CostUSD: 0.01,
 		Duration: time.Second, Model: "m"})
 
 	truncated := delta(State{}, stepReq("sys", result(string(make([]byte, ToolResultCap+1)))))
@@ -94,7 +94,7 @@ func TestRebuild(t *testing.T) {
 			system: "sys", tools: grepTool, want: []string{"review", "two"}, resets: []bool{false, false}, changed: []bool{false, true}},
 		{name: "a new run is not a reset", rows: append(store(t, "r1", a, b), store(t, "r2", a)...), system: "sys", tools: grepTool,
 			want: []string{"review"}, resets: []bool{false, false, false}, changed: []bool{false, false, false}},
-		{name: "a single-shot call is one turn", rows: []StoredRow{singleRow}, system: "review sys",
+		{name: "a lone call is one turn", rows: []StoredRow{singleRow}, system: "review sys",
 			tools: []model.ToolDef{{Name: "findings", InputSchema: json.RawMessage(`{"type":"object"}`)}},
 			want:  []string{"the diff"}, resets: []bool{false}, changed: []bool{false}},
 		{name: "a truncated row says so", rows: []StoredRow{truncatedRow}, system: "sys", tools: grepTool,
@@ -130,7 +130,7 @@ func TestRebuild(t *testing.T) {
 	turn := Rebuild([]StoredRow{singleRow}).Turns[0]
 	if turn.Usage.Input != 10 || turn.CostUSD != 0.01 || turn.Duration != time.Second || turn.Model != "m" ||
 		string(turn.Response.ToolCalls[0].Input) != `{"findings":[]}` {
-		t.Fatalf("single-shot turn = %+v", turn)
+		t.Fatalf("lone call's turn = %+v", turn)
 	}
 	if !truncatedRow.Truncated || Rebuild([]StoredRow{truncatedRow}).Turns[0].Messages[0].ToolResults[0].TruncatedBytes != 1 {
 		t.Fatal("the cut tool result lost its marker")
@@ -148,5 +148,48 @@ func TestDecodeToolsNullIsUnchanged(t *testing.T) {
 	}
 	if _, err := DecodeMessages(json.RawMessage(`{`)); err == nil {
 		t.Fatal("bad messages decoded")
+	}
+}
+
+// TestRebuildParts: each part of a split review is a conversation of its
+// own, so its first step is no reset of the run's, and a part's later step
+// that starts over is one.
+func TestRebuildParts(t *testing.T) {
+	part := func(n, step int, req model.StepRequest) StoredRow {
+		t.Helper()
+		r := delta(State{}, req)
+		r.Response = Response{Text: "step", Stop: model.StopToolUse}
+		return decoded(t, r.Encode(), StoredRow{Kind: KindAgentStep, Step: step, Part: n, RunnerRunID: "r"})
+	}
+	turns := Rebuild([]StoredRow{
+		part(1, 0, stepReq("sys", user("one"))),
+		part(2, 0, stepReq("sys", user("two"))),
+		part(1, 1, stepReq("sys", user("one again"))),
+	}).Turns
+	if len(turns) != 3 || turns[0].Reset || turns[1].Reset || !turns[2].Reset || turns[1].Part != 2 {
+		t.Fatalf("turns = %+v; want only part 1's second step reset", turns)
+	}
+
+	// Parts with prompts of their own, interleaved: part 2's first step
+	// shows its prompt, which differs from the conversation's, and part 1's
+	// second step leaves out the prompt it sent before, which its part had
+	// already.
+	first := delta(State{}, stepReq("sys A", user("one")))
+	first.Response = Response{Text: "step", Stop: model.StopToolUse}
+	e := first.Encode()
+	again := delta(e.State, stepReq("sys A", user("one"), user("more")))
+	again.Response = Response{Text: "step", Stop: model.StopToolUse}
+	rows := []StoredRow{
+		decoded(t, e, StoredRow{Kind: KindAgentStep, Step: 0, Part: 1, RunnerRunID: "r"}),
+		part(2, 0, stepReq("sys B", user("two"))),
+		decoded(t, again.Encode(), StoredRow{Kind: KindAgentStep, Step: 1, Part: 1, RunnerRunID: "r"}),
+	}
+	if rows[2].System != nil {
+		t.Fatal("part 1's second step recorded the prompt it sent before")
+	}
+	conv := Rebuild(rows)
+	if conv.System != "sys A" || conv.Turns[0].System != nil || conv.Turns[1].System == nil || *conv.Turns[1].System != "sys B" ||
+		conv.Turns[2].System != nil {
+		t.Fatalf("conversation = %+v; want part 2's prompt shown, and part 1's not again", conv)
 	}
 }

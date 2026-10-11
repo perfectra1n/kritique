@@ -3,6 +3,46 @@ git_url = "https://github.com/home-operations/.github"
 ref = "main"
 configs = ["lefthook.common.toml"]
 
+# Regenerate the chart's committed README and values.schema.json whenever
+# their inputs change, and stage them. CI's generate-check is the backstop.
+[pre-commit.commands.helm-docs]
+glob = [
+  "charts/kritique/Chart.yaml",
+  "charts/kritique/values.yaml",
+  "charts/kritique/README.md.gotmpl",
+]
+run = "mise run generate && git add charts/kritique/README.md charts/kritique/values.schema.json"
+
+# The generated chart README and schema and the hand-wrapped pages under
+# docs/ are .prettierignore'd; exclude them from the shared formatters too.
+# The hooks pass staged paths explicitly, so a commit whose only Markdown or
+# JSON is ignored hands oxfmt an empty target set, and it exits non-zero
+# ("Expected at least one target file"), failing the whole hook.
+[pre-commit.commands.format-markdown]
+exclude = ["charts/kritique/README.md", "docs/**"]
+
+[pre-commit.commands.format-json]
+exclude = ["charts/kritique/values.schema.json"]
+
+# build/tools is a mise config root of its own, outside the shared format-mise
+# and mise-lock globs. Its fmt and lock run as a piped group: mise fmt rewrites
+# the config in place on every run, and a mise lock that reads it mid-rewrite
+# prunes every tool from build/tools/mise.lock.
+[[pre-commit.jobs]]
+glob = "build/tools/mise.toml"
+
+[pre-commit.jobs.group]
+piped = true
+
+[[pre-commit.jobs.group.jobs]]
+name = "mise-build-tools-fmt"
+run = "mise -C build/tools fmt"
+stage_fixed = true
+
+[[pre-commit.jobs.group.jobs]]
+name = "mise-build-tools-lock"
+run = "mise -C build/tools lock && git add build/tools/mise.lock"
+
 [pre-commit.commands.golangci-lint]
 glob = "*.go"
 run = "mise exec -- golangci-lint run"

@@ -18,7 +18,7 @@ const (
 
 // encodeCursor makes c the opaque token a client passes back as ?cursor=.
 // It is only a position, not a capability: every read it feeds still runs
-// under the requesting principal's tenant scope.
+// under the requesting principal's account scope.
 func encodeCursor(c store.Cursor) string {
 	raw, _ := json.Marshal(c) // a struct of a time and two strings always marshals
 	return base64.RawURLEncoding.EncodeToString(raw)
@@ -59,7 +59,7 @@ func parsePage(r *http.Request) (store.Page, error) {
 
 // newPage wraps a page of items, never null, and the next page's cursor.
 func newPage[T any](items []T, next *store.Cursor) Page[T] {
-	p := Page[T]{Items: nonNil(items)}
+	p := Page[T]{Items: items}
 	if next != nil {
 		s := encodeCursor(*next)
 		p.NextCursor = &s

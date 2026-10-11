@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -15,40 +17,32 @@ import (
 	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
-// userTypeBot is how GitHub types App and bot accounts.
-const userTypeBot = "Bot"
-
 // Client is one App installation's access to GitHub.
 type Client struct {
 	app    *App
 	api    *gh.Client
 	tokens *InstallationTokens
-	// webBase is "https://github.com" or the GHES host.
-	webBase string
 
 	mu    sync.Mutex
 	login string
 }
 
-// NewClient builds a Client for an installation. host is empty for
-// github.com, or the GHES hostname.
-func NewClient(app *App, installationID int64, host string) (*Client, error) {
+// webBase is where repositories, files and clone URLs live.
+const webBase = "https://github.com"
+
+// NewClient builds a Client for an installation.
+func NewClient(app *App, installationID int64) (*Client, error) {
 	tokens := app.InstallationTokens(installationID)
 	api, err := app.Client(tokens)
 	if err != nil {
 		return nil, err
 	}
-	web := "https://github.com"
-	if host != "" {
-		web = "https://" + strings.TrimRight(host, "/")
-	}
-	return &Client{app: app, api: api, tokens: tokens, webBase: web}, nil
+	return &Client{app: app, api: api, tokens: tokens}, nil
 }
 
 // MergeBase implements forge.Client through the compare API, whose
-// merge_base_commit is exactly what GitHub diffs a PR against. number is
-// unused: GitHub's compare API needs only the two refs.
-func (c *Client) MergeBase(ctx context.Context, owner, repo string, number int, base, head string) (string, error) {
+// merge_base_commit is exactly what GitHub diffs a PR against.
+func (c *Client) MergeBase(ctx context.Context, owner, repo, base, head string) (string, error) {
 	cmp, _, err := c.api.Repositories.CompareCommits(ctx, owner, repo, base, head, &gh.ListOptions{PerPage: 1})
 	if err != nil {
 		return "", fmt.Errorf("github: compare %s...%s: %w", base, head, err)
@@ -62,7 +56,7 @@ func (c *Client) MergeBase(ctx context.Context, owner, repo string, number int, 
 
 // PullRequestDiff implements forge.Client from the compare of base and
 // head, both commits, so the diff is of exactly those two.
-func (c *Client) PullRequestDiff(ctx context.Context, owner, repo string, _ int, base, head string) (string, error) {
+func (c *Client) PullRequestDiff(ctx context.Context, owner, repo, base, head string) (string, error) {
 	diff, _, err := c.api.Repositories.CompareCommitsRaw(ctx, owner, repo, base, head, gh.RawOptions{Type: gh.Diff})
 	if err != nil {
 		return "", fmt.Errorf("github: diff %s...%s: %w", base, head, err)
@@ -72,31 +66,44 @@ func (c *Client) PullRequestDiff(ctx context.Context, owner, repo string, _ int,
 
 // CloneURL implements forge.Client.
 func (c *Client) CloneURL(owner, repo string) string {
-	return c.webBase + "/" + owner + "/" + repo + ".git"
+	return webBase + "/" + owner + "/" + repo + ".git"
 }
-
-// LineRanges implements forge.Client: GitHub review comments take a
-// start_line.
-func (c *Client) LineRanges() bool { return true }
 
 // FileURL implements forge.Client.
 func (c *Client) FileURL(owner, repo, sha, path string, line, endLine int) string {
-	u := fmt.Sprintf("%s/%s/%s/blob/%s/%s#L%d", c.webBase, owner, repo, sha, path, line)
+	segs := strings.Split(path, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	u := fmt.Sprintf("%s/%s/%s/blob/%s/%s#L%d", webBase, owner, repo, sha, strings.Join(segs, "/"), line)
 	if endLine > line {
 		u += fmt.Sprintf("-L%d", endLine)
 	}
 	return u
 }
 
-// GitToken implements forge.Client with the installation token.
-func (c *Client) GitToken(ctx context.Context) (string, error) {
-	return c.tokens.Token(ctx)
+// CommitURL implements forge.Client.
+func (c *Client) CommitURL(owner, repo, sha string) string {
+	return fmt.Sprintf("%s/%s/%s/commit/%s", webBase, owner, repo, sha)
 }
 
-// ReadGitToken implements forge.Client with an installation token minted
-// for repo alone that can only read its contents.
-func (c *Client) ReadGitToken(ctx context.Context, _, repo string) (string, error) {
+// ThreadURL implements forge.Client: GitHub scrolls the conversation tab
+// to a review comment's thread by its discussion anchor.
+func (c *Client) ThreadURL(owner, repo string, number int, id int64) string {
+	return fmt.Sprintf("%s/%s/%s/pull/%d#discussion_r%d", webBase, owner, repo, number, id)
+}
+
+// GitToken implements forge.Client with a read-only installation token
+// for repo alone.
+func (c *Client) GitToken(ctx context.Context, repo string) (string, error) {
 	return c.tokens.ReadOnly(ctx, repo)
+}
+
+// ReadGitToken implements forge.Client with GitToken's token: one minted
+// for repo alone that can only read its contents and metadata. owner is
+// the installation's.
+func (c *Client) ReadGitToken(ctx context.Context, _, repo string) (string, error) {
+	return c.GitToken(ctx, repo)
 }
 
 // BranchTip implements forge.Client.
@@ -116,6 +123,16 @@ func (c *Client) BranchTip(ctx context.Context, owner, repo, branch string) (str
 		return "", "", fmt.Errorf("github: branch %s of %s/%s has no commit", branch, owner, repo)
 	}
 	return b.GetCommit().GetSHA(), branch, nil
+}
+
+// CommitSubject implements forge.Client.
+func (c *Client) CommitSubject(ctx context.Context, owner, repo, sha string) (string, error) {
+	rc, _, err := c.api.Repositories.GetCommit(ctx, owner, repo, sha, nil)
+	if err != nil {
+		return "", fmt.Errorf("github: commit %s of %s/%s: %w", sha, owner, repo, err)
+	}
+	subject, _, _ := strings.Cut(rc.GetCommit().GetMessage(), "\n")
+	return strings.TrimSpace(subject), nil
 }
 
 // FileAt implements forge.Client through the contents API, which inlines
@@ -139,6 +156,34 @@ func (c *Client) FileAt(ctx context.Context, owner, repo, ref, path string) ([]b
 		return nil, fmt.Errorf("github: %s of %s/%s at %s: %w", path, owner, repo, ref, err)
 	}
 	return []byte(content), nil
+}
+
+// Issue implements forge.Client. GitHub files pull requests among a
+// repository's issues, so one is returned as such rather than as an error.
+func (c *Client) Issue(ctx context.Context, owner, repo string, number int) (forge.Issue, error) {
+	issue, resp, err := c.api.Issues.Get(ctx, owner, repo, number)
+	if resp != nil && resp.StatusCode == http.StatusNotFound {
+		return forge.Issue{}, fmt.Errorf("github: issue %d of %s/%s: %w", number, owner, repo, fs.ErrNotExist)
+	}
+	if err != nil {
+		return forge.Issue{}, fmt.Errorf("github: issue %d of %s/%s: %w", number, owner, repo, err)
+	}
+	return issueFrom(issue), nil
+}
+
+func issueFrom(iss *gh.Issue) forge.Issue {
+	out := forge.Issue{
+		Number: iss.GetNumber(), Title: iss.GetTitle(), Body: iss.GetBody(), URL: iss.GetHTMLURL(),
+		PullRequest: iss.PullRequestLinks != nil, State: iss.GetState(), Author: iss.GetUser().GetLogin(),
+		Draft: iss.GetDraft(),
+	}
+	for _, l := range iss.Labels {
+		out.Labels = append(out.Labels, l.GetName())
+	}
+	for _, a := range iss.Assignees {
+		out.Assignees = append(out.Assignees, a.GetLogin())
+	}
+	return out
 }
 
 // BotLogin implements forge.Client. An App's comments are authored by the
@@ -182,17 +227,25 @@ func (c *Client) CreateComment(ctx context.Context, owner, repo string, number i
 
 // UpdateComment implements forge.Client.
 func (c *Client) UpdateComment(ctx context.Context, owner, repo string, id int64, body string) error {
-	if _, _, err := c.api.Issues.UpdateComment(ctx, owner, repo, id, gh.IssueCommentRequest{Body: body}); err != nil {
+	_, resp, err := c.api.Issues.UpdateComment(ctx, owner, repo, id, gh.IssueCommentRequest{Body: body})
+	if resp != nil && resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("github: edit comment %d: %w", id, fs.ErrNotExist)
+	}
+	if err != nil {
 		return fmt.Errorf("github: edit comment %d: %w", id, err)
 	}
 	return nil
 }
 
 // CreateReview implements forge.Client with a COMMENT review: visible in
-// the Files tab, never a required approval or a request for changes.
-func (c *Client) CreateReview(ctx context.Context, owner, repo string, number int, headSHA string, comments []forge.InlineComment) error {
+// the Files tab, never a required approval or a request for changes. The
+// review's answer does not carry its comments, so they are listed after
+// and matched to the ones sent by path and body, in order.
+func (c *Client) CreateReview(
+	ctx context.Context, owner, repo string, number int, headSHA string, comments []forge.InlineComment,
+) ([]int64, error) {
 	if len(comments) == 0 {
-		return nil
+		return []int64{}, nil
 	}
 	req := &gh.PullRequestReviewRequest{CommitID: new(headSHA), Event: new("COMMENT")}
 	for _, cm := range comments {
@@ -202,15 +255,108 @@ func (c *Client) CreateReview(ctx context.Context, owner, repo string, number in
 		}
 		req.Comments = append(req.Comments, c)
 	}
-	if _, _, err := c.api.PullRequests.CreateReview(ctx, owner, repo, number, req); err != nil {
-		return fmt.Errorf("github: review #%d: %w", number, err)
+	review, _, err := c.api.PullRequests.CreateReview(ctx, owner, repo, number, req)
+	if err != nil {
+		return nil, fmt.Errorf("github: review #%d: %w", number, err)
 	}
-	return nil
+	ids := make([]int64, len(comments))
+	for cm, err := range c.api.PullRequests.ListReviewCommentsIter(ctx, owner, repo, number, review.GetID(), &gh.ListOptions{PerPage: 100}) {
+		if err != nil {
+			return ids, fmt.Errorf("github: list the comments of review %d on #%d: %w", review.GetID(), number, err)
+		}
+		for i, sent := range comments {
+			if ids[i] == 0 && cm.GetPath() == sent.Path && cm.GetBody() == sent.Body {
+				ids[i] = cm.GetID()
+				break
+			}
+		}
+	}
+	return ids, nil
 }
 
-// GetComment implements forge.Client. GitHub resolves a comment by id alone,
-// so number (the pull request it belongs to) is unused.
-func (c *Client) GetComment(ctx context.Context, owner, repo string, _ int, id int64, inline bool) (forge.Comment, error) {
+// Approve implements forge.Client. GitHub keeps every review a user
+// submits, so a re-run on the same head would stack a second approval;
+// the bot's reviews are listed first and one already approving the head
+// stands as it is.
+func (c *Client) Approve(ctx context.Context, owner, repo string, number int, headSHA, body string) (bool, error) {
+	approvals, err := c.approvals(ctx, owner, repo, number)
+	if err != nil {
+		return false, err
+	}
+	if slices.ContainsFunc(approvals, func(r *gh.PullRequestReview) bool { return r.GetCommitID() == headSHA }) {
+		return false, nil
+	}
+	req := &gh.PullRequestReviewRequest{CommitID: new(headSHA), Event: new("APPROVE"), Body: new(body)}
+	if _, _, err := c.api.PullRequests.CreateReview(ctx, owner, repo, number, req); err != nil {
+		return false, fmt.Errorf("github: approve #%d: %w", number, err)
+	}
+	return true, nil
+}
+
+// DismissApprovals implements forge.Client.
+func (c *Client) DismissApprovals(ctx context.Context, owner, repo string, number int, message string) (int, error) {
+	approvals, err := c.approvals(ctx, owner, repo, number)
+	if err != nil {
+		return 0, err
+	}
+	for i, r := range approvals {
+		if _, _, err := c.api.PullRequests.DismissReview(ctx, owner, repo, number, r.GetID(),
+			gh.PullRequestDismissReviewRequest{Message: message}); err != nil {
+			return i, fmt.Errorf("github: dismiss review %d on #%d: %w", r.GetID(), number, err)
+		}
+	}
+	return len(approvals), nil
+}
+
+// ChangesRequested implements forge.Client. GitHub keeps every review a
+// user submits, oldest first: where a reviewer stands is their latest one
+// that approved, requested changes or was dismissed, a comment changing
+// nothing.
+func (c *Client) ChangesRequested(ctx context.Context, owner, repo string, number int) (bool, error) {
+	login, err := c.BotLogin(ctx)
+	if err != nil {
+		return false, err
+	}
+	stands := map[string]string{}
+	for r, err := range c.api.PullRequests.ListReviewsIter(ctx, owner, repo, number, &gh.ListOptions{PerPage: 100}) {
+		if err != nil {
+			return false, fmt.Errorf("github: list reviews on #%d: %w", number, err)
+		}
+		switch state := r.GetState(); state {
+		case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
+			stands[r.GetUser().GetLogin()] = state
+		}
+	}
+	delete(stands, login)
+	for _, state := range stands {
+		if state == "CHANGES_REQUESTED" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// approvals lists the bot's reviews of the pull request that approve it
+// and stand: GitHub reports a dismissed one as DISMISSED.
+func (c *Client) approvals(ctx context.Context, owner, repo string, number int) ([]*gh.PullRequestReview, error) {
+	login, err := c.BotLogin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []*gh.PullRequestReview
+	for r, err := range c.api.PullRequests.ListReviewsIter(ctx, owner, repo, number, &gh.ListOptions{PerPage: 100}) {
+		if err != nil {
+			return nil, fmt.Errorf("github: list reviews on #%d: %w", number, err)
+		}
+		if r.GetUser().GetLogin() == login && r.GetState() == "APPROVED" {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// GetComment implements forge.Client. GitHub resolves a comment by id alone.
+func (c *Client) GetComment(ctx context.Context, owner, repo string, id int64, inline bool) (forge.Comment, error) {
 	if inline {
 		cm, _, err := c.api.PullRequests.GetComment(ctx, owner, repo, id)
 		if err != nil {
@@ -225,6 +371,11 @@ func (c *Client) GetComment(ctx context.Context, owner, repo string, _ int, id i
 	return conversationComment(cm), nil
 }
 
+// maxListedComments is how many comments ListConversation and ListInline
+// each return, the oldest: a pull request with more is not read to its end
+// into memory. A variable for the tests.
+var maxListedComments = 5000
+
 // ListConversation implements forge.Client.
 func (c *Client) ListConversation(ctx context.Context, owner, repo string, number int) ([]forge.Comment, error) {
 	opts := &gh.IssueListCommentsOptions{Sort: new("created"), Direction: new("asc"), PerPage: 100}
@@ -233,7 +384,9 @@ func (c *Client) ListConversation(ctx context.Context, owner, repo string, numbe
 		if err != nil {
 			return nil, fmt.Errorf("github: list comments on #%d: %w", number, err)
 		}
-		out = append(out, conversationComment(cm))
+		if out = append(out, conversationComment(cm)); len(out) >= maxListedComments {
+			break
+		}
 	}
 	return out, nil
 }
@@ -246,7 +399,9 @@ func (c *Client) ListInline(ctx context.Context, owner, repo string, number int)
 		if err != nil {
 			return nil, fmt.Errorf("github: list review comments on #%d: %w", number, err)
 		}
-		out = append(out, inlineComment(cm))
+		if out = append(out, inlineComment(cm)); len(out) >= maxListedComments {
+			break
+		}
 	}
 	return out, nil
 }
@@ -258,9 +413,10 @@ func (c *Client) Permission(ctx context.Context, owner, repo, login string) (for
 		return "", fmt.Errorf("github: permission of %s on %s/%s: %w", login, owner, repo, err)
 	}
 	// role_name carries maintain and triage, which permission folds into
-	// write and read.
+	// write and read. A custom repository role puts its own name there, and
+	// its base role in permission.
 	p := forge.Permission(level.GetRoleName())
-	if p == "" {
+	if !p.Valid() {
 		p = forge.Permission(level.GetPermission())
 	}
 	if !p.Valid() {
@@ -283,18 +439,62 @@ func (c *Client) ReplyInline(ctx context.Context, owner, repo string, number int
 	return cm.GetID(), nil
 }
 
+// React implements forge.Client.
+func (c *Client) React(ctx context.Context, owner, repo string, to forge.Comment, content string) (int64, error) {
+	create := c.api.Reactions.CreateIssueCommentReaction
+	if to.Inline {
+		create = c.api.Reactions.CreatePullRequestCommentReaction
+	}
+	r, _, err := create(ctx, owner, repo, to.ID, content)
+	if err != nil {
+		return 0, fmt.Errorf("github: react to comment %d: %w", to.ID, err)
+	}
+	return r.GetID(), nil
+}
+
+// Unreact implements forge.Client.
+func (c *Client) Unreact(ctx context.Context, owner, repo string, from forge.Comment, id int64) error {
+	remove := c.api.Reactions.DeleteIssueCommentReaction
+	if from.Inline {
+		remove = c.api.Reactions.DeletePullRequestCommentReaction
+	}
+	if _, err := remove(ctx, owner, repo, from.ID, id); err != nil {
+		return fmt.Errorf("github: remove reaction %d from comment %d: %w", id, from.ID, err)
+	}
+	return nil
+}
+
+// ReactToPullRequest implements forge.Client. A pull request's own
+// reactions are its issue's.
+func (c *Client) ReactToPullRequest(ctx context.Context, owner, repo string, number int, content string) (int64, error) {
+	r, _, err := c.api.Reactions.CreateIssueReaction(ctx, owner, repo, number, content)
+	if err != nil {
+		return 0, fmt.Errorf("github: react to #%d: %w", number, err)
+	}
+	return r.GetID(), nil
+}
+
+// UnreactToPullRequest implements forge.Client.
+func (c *Client) UnreactToPullRequest(ctx context.Context, owner, repo string, number int, id int64) error {
+	if _, err := c.api.Reactions.DeleteIssueReaction(ctx, owner, repo, number, id); err != nil {
+		return fmt.Errorf("github: remove reaction %d from #%d: %w", id, number, err)
+	}
+	return nil
+}
+
 func conversationComment(cm *gh.IssueComment) forge.Comment {
 	return forge.Comment{
-		ID: cm.GetID(), Author: cm.GetUser().GetLogin(), AuthorIsBot: cm.GetUser().GetType() == userTypeBot,
+		ID: cm.GetID(), Author: cm.GetUser().GetLogin(), AuthorIsBot: webhook.IsBot(cm.GetUser().GetType(), cm.GetUser().GetLogin()),
 		Body: cm.GetBody(), CreatedAt: cm.GetCreatedAt().Time,
 	}
 }
 
 func inlineComment(cm *gh.PullRequestComment) forge.Comment {
 	return forge.Comment{
-		ID: cm.GetID(), Author: cm.GetUser().GetLogin(), AuthorIsBot: cm.GetUser().GetType() == userTypeBot,
+		ID: cm.GetID(), Author: cm.GetUser().GetLogin(), AuthorIsBot: webhook.IsBot(cm.GetUser().GetType(), cm.GetUser().GetLogin()),
 		Body: cm.GetBody(), CreatedAt: cm.GetCreatedAt().Time,
-		Inline: true, Path: cm.GetPath(), Line: cm.GetLine(), CommitID: cm.GetCommitID(), InReplyTo: cm.GetInReplyTo(),
+		Inline: true, Path: cm.GetPath(), Line: cm.GetLine(), Outdated: webhook.Outdated(cm.Line, cm.OriginalLine), InReplyTo: cm.GetInReplyTo(),
+		ReactionsUp: cm.GetReactions().GetPlusOne(), ReactionsDown: cm.GetReactions().GetMinusOne(),
 	}
 }
 
@@ -316,16 +516,33 @@ func (c *Client) ListOpenPullRequests(ctx context.Context, owner, repo string, s
 	return out, nil
 }
 
+// PullRequest implements forge.Client.
+func (c *Client) PullRequest(ctx context.Context, owner, repo string, number int) (forge.OpenPullRequest, error) {
+	pr, resp, err := c.api.PullRequests.Get(ctx, owner, repo, number)
+	if resp != nil && resp.StatusCode == http.StatusNotFound {
+		return forge.OpenPullRequest{}, fmt.Errorf("github: pull request %d of %s/%s: %w", number, owner, repo, fs.ErrNotExist)
+	}
+	if err != nil {
+		return forge.OpenPullRequest{}, fmt.Errorf("github: pull request %d of %s/%s: %w", number, owner, repo, err)
+	}
+	out := openPullRequest(pr)
+	if pr.ClosedAt != nil {
+		out.ClosedAt = &pr.ClosedAt.Time
+	}
+	out.Additions, out.Deletions, out.ChangedFiles = pr.GetAdditions(), pr.GetDeletions(), pr.GetChangedFiles()
+	return out, nil
+}
+
 func openPullRequest(pr *gh.PullRequest) forge.OpenPullRequest {
 	head, base := pr.GetHead(), pr.GetBase()
 	out := forge.OpenPullRequest{
 		Number: pr.GetNumber(), Title: pr.GetTitle(), Author: pr.GetUser().GetLogin(),
-		AuthorIsBot: pr.GetUser().GetType() == userTypeBot || strings.HasSuffix(pr.GetUser().GetLogin(), "[bot]"),
+		AuthorIsBot: webhook.IsBot(pr.GetUser().GetType(), pr.GetUser().GetLogin()),
 		State:       pr.GetState(), Merged: pr.GetMerged(), Draft: pr.GetDraft(),
 		// A deleted fork leaves head.repo null, which is not the base repo
 		// either, as the webhook parser rules.
 		Fork:    head.GetRepo() == nil || head.GetRepo().GetFullName() != base.GetRepo().GetFullName(),
-		HeadRef: head.GetRef(), HeadSHA: head.GetSHA(), BaseRef: base.GetRef(), BaseSHA: base.GetSHA(),
+		HeadRef: head.GetRef(), HeadSHA: head.GetSHA(), BaseRef: base.GetRef(),
 		URL: pr.GetHTMLURL(), Body: pr.GetBody(), CreatedAt: pr.GetCreatedAt().Time,
 		UpdatedAt: pr.GetUpdatedAt().Time, DefaultBranch: base.GetRepo().GetDefaultBranch(),
 	}
@@ -346,21 +563,12 @@ func (c *Client) SetStatus(ctx context.Context, owner, repo, sha string, state f
 	return nil
 }
 
-// Issue implements forge.Client.
-func (c *Client) Issue(ctx context.Context, owner, repo string, number int) (forge.Issue, error) {
-	iss, _, err := c.api.Issues.Get(ctx, owner, repo, number)
-	if err != nil {
-		return forge.Issue{}, fmt.Errorf("github: issue %s/%s#%d: %w", owner, repo, number, err)
-	}
-	return issueFrom(iss), nil
-}
-
 // RepoLabels implements forge.Client.
 func (c *Client) RepoLabels(ctx context.Context, owner, repo string) ([]string, error) {
 	var out []string
 	for l, err := range c.api.Issues.ListLabelsIter(ctx, owner, repo, &gh.ListOptions{PerPage: 100}) {
 		if err != nil {
-			return nil, fmt.Errorf("github: list labels of %s/%s: %w", owner, repo, err)
+			return nil, fmt.Errorf("github: labels of %s/%s: %w", owner, repo, err)
 		}
 		out = append(out, l.GetName())
 	}
@@ -470,30 +678,5 @@ func (c *Client) SearchIssues(ctx context.Context, owner, repo, query string, li
 
 // inRepository reports whether iss, a search result, is in owner/repo.
 func inRepository(iss *gh.Issue, owner, repo string) bool {
-	u := iss.GetRepositoryURL()
-	return strings.HasSuffix(strings.ToLower(u), strings.ToLower("/repos/"+owner+"/"+repo))
-}
-
-func issueFrom(iss *gh.Issue) forge.Issue {
-	out := forge.Issue{
-		Number: iss.GetNumber(), Title: iss.GetTitle(), Body: iss.GetBody(),
-		State: iss.GetState(), Author: iss.GetUser().GetLogin(),
-		IsPull: iss.IsPullRequest(), Draft: iss.GetDraft(), URL: iss.GetHTMLURL(),
-	}
-	for _, l := range iss.Labels {
-		out.Labels = append(out.Labels, l.GetName())
-	}
-	for _, a := range iss.Assignees {
-		out.Assignees = append(out.Assignees, a.GetLogin())
-	}
-	return out
-}
-
-// APIBase derives the REST base for a host: empty for github.com, the
-// Enterprise Server path otherwise.
-func APIBase(host string) string {
-	if host == "" {
-		return ""
-	}
-	return "https://" + strings.TrimRight(host, "/") + "/api/v3"
+	return strings.HasSuffix(strings.ToLower(iss.GetRepositoryURL()), strings.ToLower("/repos/"+owner+"/"+repo))
 }

@@ -1,32 +1,85 @@
-### kritique review
+## {{ if .PullURL }}<a href="{{ .PullURL }}"><picture><source media="(prefers-color-scheme: dark)" srcset="{{ .WebURL }}/badges/rerun-dark.svg"><img alt="Re-run" src="{{ .WebURL }}/badges/rerun.svg" align="right"></picture></a>{{ end }}Kritique Review
 
 {{ if .Incomplete -}}
-**Review incomplete for `{{ trunc 7 .HeadSHA }}`:** {{ .Incomplete }}. Findings posted for earlier heads may no longer apply.
+**Review incomplete for {{ if .HeadURL }}[`{{ trunc 7 .HeadSHA }}`]({{ .HeadURL }}){{ else }}`{{ trunc 7 .HeadSHA }}`{{ end }}:** {{ .Incomplete }}. Findings posted for earlier heads may no longer apply.
 {{ else -}}
+{{ if .Result.Summary.Headline -}}
+{{ .Result.Summary.Headline }}
+
+{{ end -}}
+{{ if .Counts.Total -}}
+**{{ .Counts.Total }} {{ plural "finding" "findings" .Counts.Total }}**{{ if .Counts.Blocking }} · {{ .Counts.Blocking }} blocking{{ end }}{{ if .Counts.Important }} · {{ .Counts.Important }} important{{ end }}{{ if .Counts.Nit }} · {{ .Counts.Nit }} nit{{ end }}
+{{ else -}}
+**No findings**
+{{ end }}
+{{ if .Confidence -}}
+**Confidence {{ .Confidence.Score }}/5**{{ if .Confidence.Risk }} · {{ .Confidence.Risk }} risk{{ end }}{{ if .Confidence.Reason }}: {{ .Confidence.Reason }}{{ end }}
+
+{{ end -}}
+{{ if .Approval -}}
+**{{ if .Approval.Approved }}Approved{{ else }}Not approved{{ end }}**{{ if .Approval.Reason }}: {{ .Approval.Reason }}{{ end }}
+
+{{ end -}}
+{{ if or .Result.Findings .Unanchored .HeldBack .Prior -}}
+## Findings
+
 {{ if .Result.Findings -}}
-**{{ len .Result.Findings }} {{ plural "finding" "findings" (len .Result.Findings) }}** · {{ .Counts.Blocking }} blocking · {{ .Counts.Important }} important · {{ .Counts.Nit }} nit
+{{ range .Result.Findings -}}
+- **[{{ .Severity }}{{ if .Category }} · {{ .Category }}{{ end }}]** {{ if .URL }}[`{{ .Path }}:{{ .Line }}`]({{ .URL }}){{ else }}`{{ .Path }}:{{ .Line }}`{{ end }} {{ if .ThreadURL }}[{{ .Title }}]({{ .ThreadURL }}){{ else }}{{ .Title }}{{ end }}
+{{ end }}
+{{ end -}}
+{{ if .Unanchored -}}
+**Outside the diff**
+
+{{ range .Unanchored -}}
+- **[{{ .Severity }}{{ if .Category }} · {{ .Category }}{{ end }}]** `{{ .Path }}:{{ .Line }}` {{ if .ThreadURL }}[{{ .Title }}]({{ .ThreadURL }}){{ else }}{{ .Title }}{{ end }}
+
+{{ .Explanation | indent 2 }}
+{{ end }}
+{{ end -}}
+{{ if .HeldBack -}}
+<details>
+<summary>Held back ({{ len .HeldBack }}): not on lines changed since the last review</summary>
+
+{{ range .HeldBack -}}
+- **[{{ .Severity }}{{ if .Category }} · {{ .Category }}{{ end }}]** {{ if .URL }}[`{{ .Path }}:{{ .Line }}`]({{ .URL }}){{ else }}`{{ .Path }}:{{ .Line }}`{{ end }} {{ .Title }}
+{{ end }}
+</details>
 
 {{ end -}}
-{{ if and .Incremental .PriorHeadSHA -}}
-_Incremental review of the changes since `{{ trunc 7 .PriorHeadSHA }}`._
+{{ if .Prior -}}
+{{ $resolved := 0 }}{{ $dismissed := 0 -}}
+{{ range .Prior }}{{ if .Dismissed }}{{ $dismissed = add $dismissed 1 }}{{ else }}{{ $resolved = add $resolved 1 }}{{ end }}{{ end -}}
+<details>
+<summary>Earlier findings ({{ if $resolved }}{{ $resolved }} resolved{{ end }}{{ if and $resolved $dismissed }}, {{ end }}{{ if $dismissed }}{{ $dismissed }} dismissed{{ end }})</summary>
+
+{{ range .Prior -}}
+- **[{{ .Severity }}{{ if .Category }} · {{ .Category }}{{ end }}]** {{ if .URL }}[`{{ .Path }}:{{ .Line }}`]({{ .URL }}){{ else }}`{{ .Path }}:{{ .Line }}`{{ end }} {{ if .ThreadURL }}[{{ .Title }}]({{ .ThreadURL }}){{ else }}{{ .Title }}{{ end }} · {{ if .Dismissed }}dismissed{{ if .DismissReason }}: {{ .DismissReason }}{{ end }}{{ else }}resolved{{ end }}
+{{ end }}
+</details>
 
 {{ end -}}
+{{ end -}}
+### Summary
+
 {{ .Result.Summary.Take }}
-{{ if .Result.Summary.Praise }}
+{{ if .Result.Summary.Diagram }}
+<details open>
+<summary>Flow</summary>
+
+```mermaid
+%%{init: {'theme': 'neutral'}}%%
+{{ .Result.Summary.Diagram }}
+```
+
+</details>
+{{ end -}}
+{{ if and .Result.Summary.Praise (not .AuthorIsBot) }}
 **What's good**
 
 {{ range .Result.Summary.Praise -}}
 - {{ . }}
 {{ end -}}
-{{ end -}}
-{{ if .Result.Findings }}
-**Findings**
-
-{{ range .Result.Findings -}}
-- **[{{ .Severity }}]** {{ if .URL }}[`{{ .Path }}:{{ .Line }}`]({{ .URL }}){{ else }}`{{ .Path }}:{{ .Line }}`{{ end }} {{ .Title }}
-{{ end -}}
-{{ else }}
-Nothing worth flagging in this diff.
 {{ end -}}
 {{ end -}}
 {{ if .Sources }}
@@ -43,4 +96,4 @@ Nothing worth flagging in this diff.
 _{{ . }}._
 {{ end -}}
 {{ end }}
-<sub>Reviewed `{{ trunc 7 .HeadSHA }}` by kritique with {{ .Model }}. Reviews never block a merge.</sub>
+<sub>Reviews ({{ .Reviews }}) · Last reviewed commit: {{ if .HeadURL }}[{{ if .HeadSubject }}"{{ .HeadSubject }}"{{ else }}`{{ trunc 7 .HeadSHA }}`{{ end }}]({{ .HeadURL }}){{ else if .HeadSubject }}"{{ .HeadSubject }}"{{ else }}`{{ trunc 7 .HeadSHA }}`{{ end }} · {{ .Model }}{{ if .Effort }}/{{ .Effort }}{{ end }}{{ if .Cost }} · {{ .Cost }}{{ end }}</sub>

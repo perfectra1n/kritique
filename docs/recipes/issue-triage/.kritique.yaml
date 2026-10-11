@@ -1,10 +1,11 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/perfectra1n/kritique/main/docs/kritique.schema.json
+# yaml-language-server: $schema=https://kritique.perfectra1n.github.io/kritique.schema.json
 tasks:
   - name: triage
     on:
       - issue: [opened, reopened]
     # Once triaged, an issue is left alone: the rules below add the label.
-    if: '!("triaged" in subject.labels)'
+    when:
+      - { name: untriaged, expr: '!("triaged" in subject.labels)' }
     mode: single
     context:
       thread: { comments: 20 }
@@ -27,7 +28,9 @@ tasks:
       comment:
         mode: sticky
         template: .kritique/tasks/triage-comment.md.tmpl
-        if: 'answer.fields.needsInfo || answer.comment != ""'
+        when:
+          - expr: answer.fields.needsInfo
+          - expr: answer.comment != ""
       labels:
         # The model picks the type label; kritique offers only these, and
         # only those the repository has.
@@ -41,4 +44,4 @@ tasks:
               - "area/{{ .Fields.area }}"
               - triaged
           - add: [needs-info]
-            if: answer.fields.needsInfo
+            when: [{ expr: answer.fields.needsInfo }]

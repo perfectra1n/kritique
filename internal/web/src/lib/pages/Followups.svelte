@@ -1,12 +1,14 @@
 <script lang="ts">
+  import { accountApi } from '../links';
   import { Paged, live } from '../resource.svelte';
   import type { Followup } from '../types';
   import StateView from '../components/StateView.svelte';
   import FollowupItem from '../components/FollowupItem.svelte';
   import LoadMore from '../components/LoadMore.svelte';
+  import SectionTabs from '../components/SectionTabs.svelte';
 
   let { slug }: { slug: string } = $props();
-  const base = $derived(`/api/v1/tenants/${encodeURIComponent(slug)}/followups`);
+  const base = $derived(`${accountApi(slug)}/followups`);
   const paged = new Paged<Followup>(
     (cursor) => `${base}?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
     (f) => f.id,
@@ -16,12 +18,14 @@
   $effect(() => {
     void paged.load();
   });
-  $effect(() => live((e) => e.tenant === slug && e.kind === 'followup', () => void paged.load()));
+  $effect(() => live((e) => e.account === slug && e.kind === 'followup', () => void paged.load()));
 </script>
+
+<svelte:head><title>Follow-ups · {slug} · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">
-    <header class="page-head"><h1>Follow-ups</h1></header>
+    <SectionTabs section="pulls" {slug} current="followups" />
     <StateView {res} retry={() => res.load()} isEmpty={(d) => d.items.length === 0} empty="No follow-up questions yet.">
       {#snippet children()}
         <ul class="followups">

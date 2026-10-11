@@ -1,32 +1,44 @@
 // Package model is kritique's view of a language model and an embedder. A
 // Stepper performs one model turn over typed messages and tools; Completer,
-// a single forced tool call returning structured JSON, is built on it.
+// a single tool call returning structured JSON, is built on it.
 // Adapters speak to the vendors' official SDKs.
 package model
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"slices"
+	"strconv"
+	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/openai/openai-go/v3"
 )
 
 // ProviderType selects the adapter a provider uses.
 type ProviderType string
 
 // Provider types kritique implements. OpenRouter is the OpenAI adapter at
-// OpenRouter's URL with its server-side fallback and reported cost.
+// OpenRouter's URL with its server-side fallback and reported cost;
+// OpenCode is the OpenAI adapter at OpenCode Go's URL, naming the
+// conversation each step belongs to as the gateway asks.
 const (
 	ProviderOpenRouter ProviderType = "openrouter"
 	ProviderOpenAI     ProviderType = "openai"
 	ProviderAnthropic  ProviderType = "anthropic"
+	ProviderOpenCode   ProviderType = "opencode"
 )
 
 // Valid reports whether p is a provider type kritique implements.
 func (p ProviderType) Valid() bool {
 	switch p {
-	case ProviderOpenRouter, ProviderOpenAI, ProviderAnthropic:
+	case ProviderOpenRouter, ProviderOpenAI, ProviderAnthropic, ProviderOpenCode:
 		return true
 	}
 	return false
@@ -103,6 +115,34 @@ type ToolChoice struct {
 	Name string
 }
 
+// Effort is how hard a model reasons on a step, the reasoning effort of
+// the providers' APIs; the zero value leaves it to the provider's default.
+type Effort string
+
+// Effort levels, lowest first. OpenRouter and OpenAI take them all; the
+// Anthropic Messages API has no level under low, so its adapter sends
+// EffortNone and EffortMinimal as EffortLow. A level a model lacks is the
+// provider's to map or refuse.
+const (
+	EffortNone    Effort = "none"
+	EffortMinimal Effort = "minimal"
+	EffortLow     Effort = "low"
+	EffortMedium  Effort = "medium"
+	EffortHigh    Effort = "high"
+	EffortXHigh   Effort = "xhigh"
+	EffortMax     Effort = "max"
+)
+
+// Efforts lists the effort levels, lowest first.
+var Efforts = []Effort{EffortNone, EffortMinimal, EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax}
+
+// EffortLevels lists the effort levels for a message.
+const EffortLevels = string(EffortNone) + ", " + string(EffortMinimal) + ", " + string(EffortLow) + ", " +
+	string(EffortMedium) + ", " + string(EffortHigh) + ", " + string(EffortXHigh) + " or " + string(EffortMax)
+
+// Valid reports whether e is an effort level.
+func (e Effort) Valid() bool { return slices.Contains(Efforts, e) }
+
 // StopReason is why the model ended its turn.
 type StopReason string
 
@@ -113,15 +153,6 @@ const (
 	StopMaxTokens StopReason = "max_tokens"
 	StopOther     StopReason = "other"
 )
-
-// Valid reports whether s is a normalised stop reason.
-func (s StopReason) Valid() bool {
-	switch s {
-	case StopEndTurn, StopToolUse, StopMaxTokens, StopOther:
-		return true
-	}
-	return false
-}
 
 // Usage is the tokens one or more steps spent. Input is the uncached part of
 // the prompt; CacheRead and CacheWrite are the cached parts, which providers
@@ -148,6 +179,11 @@ func (u Usage) Prompt() int64 { return u.Input + u.CacheRead + u.CacheWrite }
 type StepRequest struct {
 	// Model is the primary model id in the provider's namespace.
 	Model string
+	// Session names the conversation the step belongs to, the same for
+	// every step of it: a review run's steps share one and a follow-up has
+	// its own. Adapters whose provider routes or caches by conversation
+	// send it; the others ignore it.
+	Session string
 	// Fallbacks are tried, in order, if Model fails: by OpenRouter itself,
 	// by the adapter for every other provider.
 	Fallbacks []string
@@ -158,6 +194,13 @@ type StepRequest struct {
 	ToolChoice ToolChoice
 	// MaxTokens bounds the answer; zero means the adapter's default.
 	MaxTokens int64
+	// Effort is how hard the model reasons; empty means the provider's
+	// default.
+	Effort Effort
+	// Once says no later step reads this one's prompt back, so adapters
+	// leave it out of the provider's prompt cache, whose writes cost more
+	// than an uncached prompt.
+	Once bool
 }
 
 // StepResponse is the model's turn and what it cost.
@@ -181,12 +224,22 @@ type Stepper interface {
 	Step(ctx context.Context, req StepRequest) (StepResponse, error)
 }
 
+// StepperFunc is a Stepper made of one function.
+type StepperFunc func(ctx context.Context, req StepRequest) (StepResponse, error)
+
+// Step implements Stepper.
+func (f StepperFunc) Step(ctx context.Context, req StepRequest) (StepResponse, error) {
+	return f(ctx, req)
+}
+
 // CompletionRequest is one structured-output call.
 type CompletionRequest struct {
 	System string
 	User   string
 	// Model is the primary model id in the provider's namespace.
 	Model string
+	// Session is the conversation the call is, as StepRequest.Session.
+	Session string
 	// Fallbacks are tried, in order, if Model fails.
 	Fallbacks []string
 	// Schema is the JSON Schema the answer must satisfy; the response
@@ -194,6 +247,8 @@ type CompletionRequest struct {
 	Schema     json.RawMessage
 	SchemaName string
 	MaxTokens  int64
+	// Effort is how hard the model reasons, as StepRequest.Effort.
+	Effort Effort
 }
 
 // CompletionResponse is the answer plus what it cost.
@@ -214,36 +269,65 @@ type CompletionResponse struct {
 	CostUSD float64
 }
 
-// Completer produces structured answers.
-type Completer interface {
-	Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error)
-}
-
 // Embedder turns texts into vectors and reports the tokens it spent.
 type Embedder interface {
 	Embed(ctx context.Context, inputs []string) (vectors [][]float32, tokens int64, err error)
 }
 
+// StepTimeout bounds one request to a provider for a step, long enough for
+// a step's whole output from a slow model. A provider that takes the
+// request and never answers fails the step as a timeout, which is
+// Transient, so the gateway's retries and its fallback provider still get
+// their turn. A variable for the tests.
+var StepTimeout = 5 * time.Minute
+
+// GatewayStepBudget bounds what the gateway spends on one step, its
+// provider's attempts, their backoff and the fallback's together: two
+// provider timeouts and the waits between, of which a fallback on another
+// provider waits at most the first half for its turn. GatewayRequestTimeout
+// bounds the runner's request to the gateway for that step: the budget,
+// then the time the gateway may take to charge and record an answered
+// step, each bounded at two minutes on a context of its own, before it
+// writes the answer. So a provider that stalls is the gateway's to give up
+// on, retry or replace, and never the runner's to cut off first, and an
+// answered step is never abandoned while the gateway settles it. Variables
+// for the tests.
+var (
+	GatewayStepBudget     = 2*StepTimeout + 2*time.Minute
+	GatewayRequestTimeout = GatewayStepBudget + 5*time.Minute
+)
+
 // NewStepper builds the adapter for a provider. An empty baseURL means the
-// provider's default endpoint; client may be nil.
+// provider's default endpoint; client may be nil. The adapter sends each
+// request once: the gateway and the workers retry a step with the
+// provider's retries (adapter.Step).
 func NewStepper(t ProviderType, baseURL, apiKey string, pricing Pricing, client *http.Client) (Stepper, error) {
 	switch t {
 	case ProviderOpenRouter:
-		if baseURL == "" {
-			baseURL = OpenRouterBaseURL
-		}
+		baseURL = cmp.Or(baseURL, OpenRouterBaseURL)
 		return NewOpenAI(OpenAIConfig{BaseURL: baseURL, APIKey: apiKey, HTTPClient: client, OpenRouter: true, Pricing: pricing})
 	case ProviderOpenAI:
+		// Set, so the client never falls back to OPENAI_BASE_URL.
+		baseURL = cmp.Or(baseURL, OpenAIBaseURL)
 		return NewOpenAI(OpenAIConfig{BaseURL: baseURL, APIKey: apiKey, HTTPClient: client, Pricing: pricing})
 	case ProviderAnthropic:
 		return NewAnthropic(AnthropicConfig{BaseURL: baseURL, APIKey: apiKey, HTTPClient: client, Pricing: pricing})
+	case ProviderOpenCode:
+		baseURL = cmp.Or(baseURL, OpenCodeBaseURL)
+		return NewOpenAI(OpenAIConfig{BaseURL: baseURL, APIKey: apiKey, HTTPClient: client, OpenCode: true, Pricing: pricing})
 	default:
 		return nil, fmt.Errorf("model: provider type %q has no adapter", t)
 	}
 }
 
-// OpenRouterBaseURL is where an openrouter provider without a baseUrl goes.
-const OpenRouterBaseURL = "https://openrouter.ai/api/v1"
+// Where an openrouter, openai or opencode provider without a baseUrl goes.
+// OpenCode Zen, the same gateway, is an opencode provider with its own
+// baseUrl.
+const (
+	OpenRouterBaseURL = "https://openrouter.ai/api/v1"
+	OpenAIBaseURL     = "https://api.openai.com/v1"
+	OpenCodeBaseURL   = "https://opencode.ai/zen/go/v1"
+)
 
 // checkRequest rejects a request no provider could serve.
 func checkRequest(req StepRequest) error {
@@ -262,7 +346,62 @@ func checkRequest(req StepRequest) error {
 	case (c.Mode == ToolChoiceTool) != (c.Name != ""):
 		return fmt.Errorf("model: tool choice %s must name a tool exactly when the mode is %s", c.Mode, ToolChoiceTool)
 	}
+	if req.Effort != "" && !req.Effort.Valid() {
+		return fmt.Errorf("model: effort must be %s, got %q", EffortLevels, req.Effort)
+	}
 	return nil
+}
+
+// Transient reports whether a step failed in a way another attempt may
+// not: the provider answered 408, 429 or a 5xx, or a 402 with a Retry-After
+// header, or the connection failed, timed out or was cut. A provider's
+// refusal of the request itself, any other 4xx, and a spent budget fail the
+// same way again.
+//
+// OpenRouter answers 402 with a Retry-After when the account's in-flight
+// requests would exceed its balance, and says to retry once they settle;
+// its 402 for an empty balance carries none.
+func Transient(err error) bool {
+	if err == nil || errors.Is(err, ErrBudget) {
+		return false
+	}
+	status, resp := providerResponse(err)
+	if status == http.StatusPaymentRequired {
+		return resp != nil && resp.Header.Get("Retry-After") != ""
+	}
+	if status != 0 {
+		return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+	}
+	_, isNet := errors.AsType[net.Error](err)
+	return isNet || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) ||
+		errors.Is(err, context.DeadlineExceeded)
+}
+
+// RetryAfter is how long the provider that failed a step asked to wait
+// before the next request, from the Retry-After header of its answer, in
+// seconds as the model providers send it; zero when it asked nothing.
+func RetryAfter(err error) time.Duration {
+	_, resp := providerResponse(err)
+	if resp == nil {
+		return 0
+	}
+	secs, err := strconv.Atoi(resp.Header.Get("Retry-After"))
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// providerResponse is the status and the response of the provider's error
+// in err, zero and nil when it holds none.
+func providerResponse(err error) (int, *http.Response) {
+	if e, ok := errors.AsType[*openai.Error](err); ok {
+		return e.StatusCode, e.Response
+	}
+	if e, ok := errors.AsType[*anthropic.Error](err); ok {
+		return e.StatusCode, e.Response
+	}
+	return 0, nil
 }
 
 // eachModel calls step with Model, then each fallback in turn until one

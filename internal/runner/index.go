@@ -4,9 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/perfectra1n/kritique/internal/gitfetch"
@@ -60,19 +61,17 @@ func runIndex(ctx context.Context, st *store.Store, p Spec, secrets Secrets, log
 	}
 	err = st.WithRunnerJob(ctx, p.RunID, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO index_packs (runner_run_id, tenant_id, commit_sha, base_sha, mode, changed_paths, chunk_count)
-			SELECT id, tenant_id, $2, $3, $4, $5, $6 FROM runner_runs WHERE id = $1`,
-			p.RunID, p.Head, baseFor(mode, p.Base), mode, changed, len(chunks)); err != nil {
+			INSERT INTO index_packs (runner_run_id, account_id, base_sha, mode, changed_paths, chunk_count)
+			SELECT id, account_id, $2, $3, $4, $5 FROM runner_runs WHERE id = $1`,
+			p.RunID, baseFor(mode, p.Base), mode, changed, len(chunks)); err != nil {
 			return fmt.Errorf("runner: write index pack: %w", err)
 		}
-		for start := 0; start < len(chunks); start += stagingBatch {
-			end := min(start+stagingBatch, len(chunks))
-			if err := stage(ctx, tx, p.RunID, chunks[start:end]); err != nil {
+		for batch := range slices.Chunk(chunks, stagingBatch) {
+			if err := stage(ctx, tx, p.RunID, batch); err != nil {
 				return err
 			}
 		}
-		_, err := tx.Exec(ctx, `UPDATE runner_runs SET phase = 'done' WHERE id = $1`, p.RunID)
-		return err
+		return setPhaseTx(ctx, tx, p.RunID, "done")
 	})
 	if err != nil {
 		return err
@@ -99,8 +98,6 @@ func fetchForIndex(ctx context.Context, p Spec, token string, logger *slog.Logge
 	return res, "full", nil
 }
 
-func strs(n int) []string { return make([]string, n) }
-
 func baseFor(mode, base string) string {
 	if mode == "full" {
 		return ""
@@ -108,19 +105,20 @@ func baseFor(mode, base string) string {
 	return base
 }
 
-// stage inserts one batch of chunks under the run, copying tenant_id from
+// stage inserts one batch of chunks under the run, copying account_id from
 // the run row the same way context packs do.
 func stage(ctx context.Context, tx pgx.Tx, runID string, chunks []indexer.Chunk) error {
 	n := len(chunks)
-	paths, langs, symbols, kinds, scopes, texts := strs(n), strs(n), strs(n), strs(n), strs(n), strs(n)
+	paths, langs, symbols := make([]string, n), make([]string, n), make([]string, n)
+	kinds, scopes, texts := make([]string, n), make([]string, n), make([]string, n)
 	starts, ends := make([]int32, n), make([]int32, n)
 	for i, c := range chunks {
 		paths[i], starts[i], ends[i] = c.Path, int32(c.StartLine), int32(c.EndLine)
 		langs[i], symbols[i], kinds[i], scopes[i], texts[i] = c.Language, c.Symbol, c.Kind, c.Scope, c.Text
 	}
 	_, err := tx.Exec(ctx, `
-		INSERT INTO index_staging (runner_run_id, tenant_id, path, start_line, end_line, language, symbol, kind, scope, text)
-		SELECT r.id, r.tenant_id, c.path, c.start_line, c.end_line, c.language, c.symbol, c.kind, c.scope, c.text
+		INSERT INTO index_staging (runner_run_id, account_id, path, start_line, end_line, language, symbol, kind, scope, text)
+		SELECT r.id, r.account_id, c.path, c.start_line, c.end_line, c.language, c.symbol, c.kind, c.scope, c.text
 		FROM runner_runs r, unnest($2::text[], $3::int[], $4::int[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[])
 			AS c (path, start_line, end_line, language, symbol, kind, scope, text)
 		WHERE r.id = $1`, runID, paths, starts, ends, langs, symbols, kinds, scopes, texts)

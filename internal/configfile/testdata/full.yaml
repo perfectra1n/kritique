@@ -1,3 +1,15 @@
+apps:
+  sticky-gecko:
+    accounts: [home-operations]
+    clientId: Iv1.xxxxxxxx
+    privateKey: { env: TEST_PRIVATE_KEY }
+    webhookSecret: { env: TEST_WEBHOOK_SECRET }
+  bot-ross:
+    accounts: [onedr0p]
+    clientId: { env: TEST_CLIENT_ID }
+    privateKey: { env: TEST_PRIVATE_KEY }
+    webhookSecret: { env: TEST_WEBHOOK_SECRET }
+
 providers:
   openrouter:
     type: openrouter
@@ -5,67 +17,34 @@ providers:
   local:
     type: openai
     baseUrl: http://litellm.ai.svc:4000/v1
-    apiKey: { file: __DIR__/local-key }
+    apiKey: { env: TEST_LOCAL_KEY }
 
-defaults:
-  models:
-    review: openrouter/openai/gpt-6-sol
-    fallback: local/claude-sonnet-5
-  filter: "!pr.draft"
-  forks: false
-  limits:
-    concurrency: 3
+review:
+  model: openrouter/openai/gpt-6-sol
+  fallback: local/claude-sonnet-5
+trigger:
+  exclude: [{ name: drafts, expr: pr.draft }]
+limits:
+  concurrency: 3
 
-retention:
-  disabledIndexGrace: 720h
+repositories:
+  home-operations/flate:
+    ignore:
+      - "**/testdata/**"
+    trigger:
+      settle: 30s
+  home-operations/kopiur:
+    trigger:
+      exclude: [{ name: skip-label, expr: 'pr.labels.exists(l, l.name == "skip-review")' }]
+  home-operations/charts-mirror:
+    ignore: ["charts/**"]
+  onedr0p/*:
+    review:
+      model: local/claude-opus-5
+    trigger:
+      settle: 2m
 
-tenants:
-  - slug: home-operations
-    runner:
-      resources: { limits: { cpu: "2", memory: 4Gi } }
-      activeDeadlineSeconds: 900
-    installations:
-      - name: sticky-gecko
-        forge: github
-        account: home-operations
-        app:
-          clientId: Iv1.xxxxxxxx
-          privateKey: { file: __DIR__/private-key.pem }
-          webhookSecret: { env: TEST_WEBHOOK_SECRET }
+accounts:
+  home-operations:
     limits:
       reviewsPerDay: 200
-    repositories:
-      - name: home-operations/flate
-        ignore:
-          - "**/testdata/**"
-        settle: 30s
-      - name: home-operations/kopiur
-        filter: '!pr.draft && !pr.labels.exists(l, l.name == "skip-review")'
-      - name: home-operations/charts-mirror
-        enabled: false
-
-  - slug: onedr0p
-    installations:
-      - name: bot-ross
-        forge: github
-        account: onedr0p
-        app:
-          clientIdFrom: { env: TEST_CLIENT_ID }
-          privateKey: { file: __DIR__/private-key.pem }
-          webhookSecret: { env: TEST_WEBHOOK_SECRET }
-      - name: onedr0p-forgejo
-        forge: forgejo
-        host: git.example.org
-        account: onedr0p
-        token: { env: TEST_FORGEJO_TOKEN }
-        webhookSecret: { env: TEST_WEBHOOK_SECRET }
-      - name: onedr0p-gitea
-        forge: gitea
-        host: gitea.example.org
-        account: onedr0p
-        token: { env: TEST_GITEA_TOKEN }
-        webhookSecret: { env: TEST_WEBHOOK_SECRET }
-    models:
-      review: local/claude-opus-5
-    forks: true
-    settle: 2m

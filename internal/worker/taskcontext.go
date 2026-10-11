@@ -8,8 +8,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/perfectra1n/kritique/internal/adapter"
 	"github.com/perfectra1n/kritique/internal/forge"
-	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/store"
 	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
@@ -64,7 +65,8 @@ type indexHit struct {
 // no index to search.
 func (r *taskRunner) searchIndex(ctx context.Context, q tasks.NamedQuery) (hits []indexHit, ok bool, err error) {
 	w := r.w
-	if w.Embedder == nil {
+	embedder, emb := w.Embedders.Embedder(r.file)
+	if embedder == nil {
 		r.notes = append(r.notes, fmt.Sprintf("context %s left out: repository indexing is off", q.Name))
 		return nil, false, nil
 	}
@@ -73,23 +75,24 @@ func (r *taskRunner) searchIndex(ctx context.Context, q tasks.NamedQuery) (hits 
 		return nil, false, nil
 	}
 	var runID string
-	err = w.Store.WithTenant(ctx, r.tenant.ID(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT r.active_index_run_id::text FROM repositories r JOIN index_runs g ON g.id = r.active_index_run_id
-			WHERE r.id = $1 AND g.status = 'completed' AND g.embed_model = $2`, r.args.RepositoryID, w.EmbedModel).Scan(&runID)
+	err = w.Store.WithAccount(ctx, r.account.ID(), func(tx pgx.Tx) error {
+		var err error
+		runID, err = store.ActiveGenerationFor(ctx, tx, r.args.RepositoryID, emb.Model, emb.Dims)
+		return err
 	})
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, store.ErrNotFound) {
 		r.notes = append(r.notes, fmt.Sprintf("context %s left out: the repository has no index yet", q.Name))
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("worker: active index: %w", err)
+		return nil, false, err
 	}
 	var vectors [][]float32
 	var tokens int64
-	err = w.withLease(ctx, r.tenant, "embed:"+w.EmbedModel, r.settings.Limits.Concurrency, r.jobID, func(ctx context.Context) error {
+	err = w.withLease(ctx, r.account, "embed:"+emb.Model, r.settings.Limits.Concurrency, r.jobID, func(ctx context.Context) error {
 		var err error
-		vectors, tokens, err = w.Embedder.Embed(ctx, []string{q.Query})
-		w.Metrics.ModelCall(r.tenant.Slug, w.EmbedModel, roleEmbedding, callOutcome(err), tokens, 0, 0, 0)
+		vectors, tokens, err = embedder.Embed(ctx, []string{q.Query})
+		w.Metrics.ModelCall(r.account.Key(), emb.Model, store.RoleEmbedding, adapter.Outcome(err), tokens, 0, 0, 0)
 		return err
 	})
 	if err != nil {
@@ -102,36 +105,27 @@ func (r *taskRunner) searchIndex(ctx context.Context, q tasks.NamedQuery) (hits 
 	if k <= 0 {
 		k = taskSearchK
 	}
-	err = w.Store.WithTenant(ctx, r.tenant.ID(), func(tx pgx.Tx) error {
+	var found []store.SimilarHit
+	err = w.Store.WithAccount(ctx, r.account.ID(), func(tx pgx.Tx) error {
 		// A run past its answer never gathers context again; should one,
 		// its embedding is not charged twice.
 		if r.run.AnsweredAt == nil {
-			if err := insertUsage(ctx, tx, reviewUsage{
-				tenantID: r.tenant.ID(), repositoryID: r.args.RepositoryID, role: roleEmbedding, model: w.EmbedModel, input: tokens,
+			if err := store.InsertUsage(ctx, tx, store.Usage{
+				AccountID: r.account.ID(), RepositoryID: r.args.RepositoryID, Role: store.RoleEmbedding, Model: emb.Model, Input: tokens,
 			}); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx, `SET LOCAL vchordrq.prefilter = on`); err != nil {
-			return fmt.Errorf("worker: enable prefilter: %w", err)
-		}
-		rows, err := tx.Query(ctx, `SELECT path, start_line, end_line, symbol, text FROM index_chunks WHERE index_run_id = $2
-			ORDER BY embedding <=> $1::halfvec LIMIT $3`, model.VectorLiteral(vectors[0]), runID, k)
-		if err != nil {
-			return fmt.Errorf("worker: search index: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var h indexHit
-			if err := rows.Scan(&h.Path, &h.StartLine, &h.EndLine, &h.Symbol, &h.Text); err != nil {
-				return fmt.Errorf("worker: search index: %w", err)
-			}
-			hits = append(hits, h)
-		}
-		return rows.Err()
+		var err error
+		found, err = store.SimilarChunks(ctx, tx, runID, vectors, []string{}, k)
+		return err
 	})
 	if err != nil {
 		return nil, false, err
+	}
+	for _, h := range found {
+		c := h.Chunk
+		hits = append(hits, indexHit{Path: c.Path, StartLine: c.StartLine, EndLine: c.EndLine, Symbol: c.Symbol, Text: c.Text})
 	}
 	return hits, true, nil
 }

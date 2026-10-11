@@ -4,14 +4,18 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
+	"unicode/utf8"
 
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/perfectra1n/kritique/internal/chunk"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // Chunk is one staged piece of a file.
@@ -48,10 +52,10 @@ var DefaultOptions = Options{
 
 // Stats says what Build did.
 type Stats struct {
-	Files, Parsed, Skipped, Chunks int
-	Bytes                          int
-	Truncated                      bool
-	Elapsed                        time.Duration
+	Files, Parsed, Skipped int
+	Bytes                  int
+	Truncated              bool
+	Elapsed                time.Duration
 }
 
 // Build chunks head. With base set, only the paths that differ between
@@ -88,7 +92,7 @@ type builder struct {
 	stats  Stats
 }
 
-func (b *builder) ignored(path string) bool { return chunk.Ignored(b.ignore, path) }
+func (b *builder) ignored(path string) bool { return chunk.Matches(b.ignore, path) }
 
 func (b *builder) walkAll(ctx context.Context, head *object.Tree) error {
 	iter := head.Files()
@@ -148,27 +152,23 @@ func (b *builder) file(f *object.File) error {
 		b.stats.Skipped++
 		return nil
 	}
-	if bin, err := f.IsBinary(); err != nil || bin {
+	// Read once, as bytes: a binary file, which holds a NUL, is skipped,
+	// and so is one that is not UTF-8, which would fail the staging insert
+	// and so the whole run, since Postgres text holds valid UTF-8 only.
+	src, err := readBlob(f)
+	if err != nil || len(src) == 0 || bytes.IndexByte(src, 0) >= 0 || !utf8.Valid(src) {
 		b.stats.Skipped++
 		return nil
 	}
-	content, err := f.Contents()
-	if err != nil || content == "" {
-		b.stats.Skipped++
-		return nil
-	}
-	src := []byte(content)
 	b.stats.Files++
 	b.stats.Bytes += len(src)
 	pf := b.parser.Parse(f.Name, src)
+	defer pf.Close()
 	if len(pf.Decls) > 0 {
 		b.stats.Parsed++
 	}
 	for _, d := range pieces(pf, b.opts) {
-		text := chunk.Text(src, d.StartLine, d.EndLine)
-		if len(text) > b.opts.MaxChunkBytes {
-			text = text[:b.opts.MaxChunkBytes]
-		}
+		text := textcut.Prefix(chunk.Text(src, d.StartLine, d.EndLine), b.opts.MaxChunkBytes)
 		if text == "" {
 			continue
 		}
@@ -176,9 +176,18 @@ func (b *builder) file(f *object.File) error {
 			Path: f.Name, Language: pf.Language, Symbol: d.Symbol, Kind: d.Kind, Scope: d.Scope,
 			StartLine: d.StartLine, EndLine: d.EndLine, Text: text,
 		})
-		b.stats.Chunks++
 	}
 	return nil
+}
+
+// readBlob reads the file's contents in one pass.
+func readBlob(f *object.File) ([]byte, error) {
+	r, err := f.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	return io.ReadAll(r)
 }
 
 // pieces picks the declarations to store: the outermost ones that fit

@@ -7,13 +7,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -23,63 +23,49 @@ import (
 
 	"github.com/perfectra1n/kritique/internal/auth"
 	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
 	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
-func testEnv(t *testing.T, key string) string {
-	t.Helper()
-	v := os.Getenv(key)
-	if v == "" {
-		t.Skipf("%s not set", key)
-	}
-	return v
-}
-
 const integrationConfig = `
-web:
-  signIn:
-    - name: corp
-      type: oidc
-      issuer: https://idp.example
-      clientId: kritique
-      clientSecret: { env: KRITIQUE_TEST_TOKEN }
-  operators: ["corp:op-sub"]
-tenants:
-  - slug: webapi-a
-    installations:
-      - name: webapi-a-bot
-        forge: forgejo
-        host: git.example
-        account: wa
-        token: { env: KRITIQUE_TEST_TOKEN }
-        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
-    repositories:
-      - name: wa/one
-      - name: wa/two
-  - slug: webapi-b
-    installations:
-      - name: webapi-b-bot
-        forge: forgejo
-        host: git.example
-        account: wb
-        token: { env: KRITIQUE_TEST_TOKEN }
-        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
-    repositories:
-      - name: wb/one
+auth:
+  oidc:
+    issuer: https://idp.example
+    clientId: kritique
+    clientSecret: { env: KRITIQUE_TEST_TOKEN }
+    roleMappingExpr: '"kritique-admin" in roles ? "admin" : ""'
+apps:
+  webapi-a-bot:
+    accounts: [wa]
+    clientId: Iv1.test
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
+  webapi-b-bot:
+    accounts: [wb]
+    clientId: Iv1.test
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
+repositories:
+  wa/one: {}
+  wa/two: {}
+  wb/one: {}
 `
 
-// followupComment is answered in both tenants, as comment ids from two
-// forges may collide; onlyBComment is answered only in tenant B.
+// followupComment is answered in both accounts, as comment ids from two
+// forges may collide; onlyBComment is answered only in account B. Both
+// exceed int4, as GitHub's comment ids do, so the queries must bind them
+// as bigint.
 const (
-	followupComment = 4242
-	onlyBComment    = 4343
+	followupComment = 4168513971
+	onlyBComment    = 4168513972
 )
 
-// seeded is what seedTenant wrote for one tenant.
+// seeded is what seedAccount wrote for one account.
 type seeded struct {
-	tenantID, repoID, prID, reviewID, runID, taskRunID string
+	accountID, repoID, prID, reviewID, runID, taskRunID string
 }
 
 type apiEnv struct {
@@ -95,30 +81,17 @@ type apiEnv struct {
 
 func newAPIEnv(t *testing.T) *apiEnv {
 	t.Helper()
-	ctx := context.Background()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.Open(ctx, store.Options{
-		AppURL: testEnv(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIQUE_TEST_OWNER_URL"),
-		Logger: logger,
-	})
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	owner, err := pgxpool.New(ctx, testEnv(t, "KRITIQUE_TEST_OWNER_URL"))
+	ctx := t.Context()
+	logger := slog.New(slog.DiscardHandler)
+	st := storetest.Open(t)
+	owner, err := pgxpool.New(ctx, storetest.Env(t, "KRITIQUE_TEST_OWNER_URL"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(owner.Close)
 	t.Setenv("KRITIQUE_TEST_TOKEN", "tok")
-	file, err := configfile.Parse([]byte(integrationConfig))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if err := st.ApplyConfig(ctx, file, "webapi-test"); err != nil {
+	file := configfiletest.Load(t, integrationConfig)
+	if err := st.ApplyConfig(ctx, file); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
 	cur := configfile.NewCurrent(file)
@@ -131,17 +104,18 @@ func newAPIEnv(t *testing.T) *apiEnv {
 	e.srv = New(Config{Store: st, Current: cur, Auth: h, WebURL: webURL, Logger: logger})
 	e.http = httptest.NewServer(e.srv.Handler())
 	t.Cleanup(e.http.Close)
-	e.a, e.b = e.seedTenant("webapi-a", "wa/one"), e.seedTenant("webapi-b", "wb/one")
-	e.exec(`INSERT INTO followups (tenant_id, pull_request_id, comment_id, author, status)
-		VALUES ($1, $2, $3, 'carol', 'answered')`, e.b.tenantID, e.b.prID, onlyBComment)
-	e.signIn("member-a", "alice", seededGrant(e.a.tenantID))
-	e.signIn("member-b", "bob", seededGrant(e.b.tenantID))
-	e.signIn("operator", "op-sub", nil)
+	e.a, e.b = e.seedAccount("webapi-a", "wa/one"), e.seedAccount("webapi-b", "wb/one")
+	e.exec(`INSERT INTO followups (account_id, pull_request_id, comment_id, author, status)
+		VALUES ($1, $2, $3, 'carol', 'answered')`, e.b.accountID, e.b.prID, onlyBComment)
+	e.signIn("member-a", "alice", memberOfAccounts("github/wa"))
+	e.signIn("member-b", "bob", memberOfAccounts("github/wb"))
+	e.signIn("admin", "op-sub", store.SessionGrant{Role: store.RoleAdmin})
 	return e
 }
 
-func seededGrant(tenantID string) []store.Grant {
-	return []store.Grant{{TenantID: tenantID, Role: store.RoleMember}}
+// memberOfAccounts is a member's grant on the forge accounts named.
+func memberOfAccounts(accounts ...string) store.SessionGrant {
+	return store.SessionGrant{Role: store.RoleMember, Accounts: accounts}
 }
 
 func (e *apiEnv) exec(sql string, args ...any) {
@@ -160,42 +134,46 @@ func (e *apiEnv) scalar(sql string, args ...any) string {
 	return v
 }
 
-// seedTenant writes a pull request with a finished agentic review, its
+// seedAccount writes a pull request with a finished agentic review, its
 // runner and agent runs, context pack, findings, usage, model calls, an
 // index run, a follow-up and a queued job, all as the owner so no policy
 // stands in the way.
-func (e *apiEnv) seedTenant(slug, repo string) seeded {
+func (e *apiEnv) seedAccount(slug, repo string) seeded {
 	e.t.Helper()
-	tn, _ := e.file.Tenant(slug)
-	s := seeded{tenantID: tn.ID()}
-	s.repoID = configfile.RepositoryID(tn.Installations[0].ID(), repo)
+	owner, _, _ := strings.Cut(repo, "/")
+	a, _ := e.file.Account(configfile.ForgeGitHub, owner)
+	s := seeded{accountID: a.ID()}
+	s.repoID = configfile.RepositoryID(a.ID(), repo)
 	e.exec(`UPDATE repositories SET default_branch = 'main' WHERE id = $1`, s.repoID)
-	s.prID = e.scalar(`INSERT INTO pull_requests (tenant_id, repository_id, number, title, author, head_sha, labels)
-		VALUES ($1, $2, 7, $3, 'ada', 'head7', '[{"name":"bug","color":"f00"}]') RETURNING id::text`, s.tenantID, s.repoID, "PR of "+slug)
-	s.reviewID = e.scalar(`INSERT INTO reviews (tenant_id, pull_request_id, head_sha, status, trigger, mode, model, finished_at, summary)
-		VALUES ($1, $2, 'head7', 'completed', 'push', 'agentic', 'acme/large', now(), '{"take":"ok","praise":["tests"]}')
-		RETURNING id::text`, s.tenantID, s.prID)
-	e.exec(`INSERT INTO findings (tenant_id, review_id, path, line, severity, title, explanation)
-		VALUES ($1, $2, 'a.go', 3, 'blocking', 'nil deref', 'x'), ($1, $2, 'b.go', 9, 'nit', 'naming', 'y')`, s.tenantID, s.reviewID)
-	s.runID = e.scalar(`INSERT INTO runner_runs (tenant_id, review_id, kind, phase, log_tail)
-		VALUES ($1, $2, 'review', 'done', $3) RETURNING id::text`, s.tenantID, s.reviewID, "tail of "+slug)
-	e.exec(`INSERT INTO context_packs (runner_run_id, tenant_id, head_sha, base_sha, patch_id, diff, changed_paths, stages, repo_files)
-		VALUES ($1, $2, 'head7', 'base7', 'patch7', $3, '{a.go}',
+	s.prID = e.scalar(`INSERT INTO pull_requests (account_id, repository_id, number, title, author, head_sha, labels)
+		VALUES ($1, $2, 7, $3, 'ada', 'head7', '[{"name":"bug","color":"f00"}]') RETURNING id::text`, s.accountID, s.repoID, "PR of "+slug)
+	s.reviewID = e.scalar(`INSERT INTO reviews (account_id, pull_request_id, head_sha, status, trigger, model, finished_at, summary)
+		VALUES ($1, $2, 'head7', 'completed', 'push', 'acme/large', now(), '{"take":"ok","praise":["tests"]}')
+		RETURNING id::text`, s.accountID, s.prID)
+	e.exec(`INSERT INTO findings (account_id, review_id, path, line, severity, title, explanation)
+		VALUES ($1, $2, 'a.go', 3, 'blocking', 'nil deref', 'x'), ($1, $2, 'b.go', 9, 'nit', 'naming', 'y')`, s.accountID, s.reviewID)
+	s.runID = e.scalar(`INSERT INTO runner_runs (account_id, review_id, kind, phase, log_tail)
+		VALUES ($1, $2, 'review', 'done', $3) RETURNING id::text`, s.accountID, s.reviewID, "tail of "+slug)
+	e.exec(`INSERT INTO poll_state (account_id, last_polled_at) VALUES ($1, '2026-09-01T12:00:00Z')
+		ON CONFLICT (account_id) DO UPDATE SET last_polled_at = excluded.last_polled_at`, s.accountID)
+	e.exec(`INSERT INTO context_packs (runner_run_id, account_id, head_sha, base_sha, patch_id, diff, changed_paths, rule_ids, stages, repo_files)
+		VALUES ($1, $2, 'head7', 'base7', 'patch7', $3, '{a.go}', '{wrap-errors}',
 			'[{"stage":"definitions","path":"b.go","start_line":1,"end_line":2,"text":"func F() {}"}]',
-			'{".kritique.yaml":"mode: agentic\n"}')`, s.runID, s.tenantID, "diff of "+slug)
-	e.exec(`INSERT INTO agent_runs (runner_run_id, tenant_id, stop_reason, result, steps, tool_calls, timeline, model, sources)
+			jsonb_build_object('.kritique.yaml', $4::text))`, s.runID, s.accountID, "diff of "+slug,
+		"rules: [{ id: house-style, file: docs/rules-of-"+slug+".md }]\n")
+	e.exec(`INSERT INTO agent_runs (runner_run_id, account_id, stop_reason, result, steps, tool_calls, timeline, model, sources, parts)
 		VALUES ($1, $2, 'submitted', '{"findings":[]}', 2, '{"grep":1}',
-			'[{"index":0,"tools":["grep"],"duration_ms":5,"output_bytes":7,"input_tokens":10,"output_tokens":2}]', 'acme/large',
-			'["https://docs.example"]')`, s.runID, s.tenantID)
-	e.exec(`INSERT INTO usage (tenant_id, repository_id, review_id, role, model, input_tokens, output_tokens, cost_usd)
-		VALUES ($1, $2, $3, 'review', 'acme/large', 100, 10, 0.5)`, s.tenantID, s.repoID, s.reviewID)
-	ix := e.scalar(`INSERT INTO index_runs (tenant_id, repository_id, commit_sha, embed_model, embed_dims, mode, status, finished_at)
-		VALUES ($1, $2, 'commit7', 'embed', 8, 'full', 'completed', now()) RETURNING id::text`, s.tenantID, s.repoID)
+			'[{"index":0,"part":1,"tools":["grep"],"duration_ms":5,"output_bytes":7,"input_tokens":10,"output_tokens":2}]', 'acme/large',
+			'["https://docs.example"]', '[{"paths":["a.go"],"stop":"submitted","steps":2}]')`, s.runID, s.accountID)
+	e.exec(`INSERT INTO usage (account_id, repository_id, review_id, role, model, input_tokens, output_tokens, cost_usd)
+		VALUES ($1, $2, $3, 'review', 'acme/large', 100, 10, 0.5)`, s.accountID, s.repoID, s.reviewID)
+	ix := e.scalar(`INSERT INTO index_runs (account_id, repository_id, commit_sha, embed_model, embed_dims, mode, status, finished_at)
+		VALUES ($1, $2, 'commit7', 'embed', 8, 'full', 'completed', now()) RETURNING id::text`, s.accountID, s.repoID)
 	e.exec(`UPDATE repositories SET active_index_run_id = $1 WHERE id = $2`, ix, s.repoID)
-	e.exec(`INSERT INTO followups (tenant_id, pull_request_id, comment_id, author, status, model)
-		VALUES ($1, $2, $3, 'bob', 'answered', 'acme/large')`, s.tenantID, s.prID, followupComment)
+	e.exec(`INSERT INTO followups (account_id, pull_request_id, comment_id, author, status, model)
+		VALUES ($1, $2, $3, 'bob', 'answered', 'acme/large')`, s.accountID, s.prID, followupComment)
 	args, _ := json.Marshal(map[string]any{
-		"tenant_id": s.tenantID, "repository_id": s.repoID, "number": 7, "head_sha": "head7", "trigger": "push",
+		"account_id": s.accountID, "repository_id": s.repoID, "number": 7, "head_sha": "head7", "trigger": "push",
 	})
 	e.exec(`INSERT INTO river_job (kind, args, max_attempts, state) VALUES ('review', $1, 5, 'available')`, args)
 	e.seedModelCalls(s, slug)
@@ -204,19 +182,23 @@ func (e *apiEnv) seedTenant(slug, repo string) seeded {
 }
 
 // seedTaskRun records a finished triage run on an issue event, with one
-// model call.
+// model call, and the default branch's .kritique.yaml a dispatch read.
 func (e *apiEnv) seedTaskRun(s seeded, slug string) string {
 	e.t.Helper()
-	ev := e.scalar(`INSERT INTO task_events (tenant_id, installation_id, repository_id, forge, event, raw_event, action, sender,
+	a, _ := e.file.AccountByID(s.accountID)
+	conn := e.file.ConnectionFor(a).ID()
+	ev := e.scalar(`INSERT INTO task_events (account_id, connection_id, repository_id, forge, event, raw_event, action, sender,
 		subject_kind, subject_number)
-		SELECT $1, installation_id, id, 'github', 'issue', 'issues', 'opened', $3, 'issue', 12 FROM repositories WHERE id = $2
-		RETURNING id::text`, s.tenantID, s.repoID, "sender of "+slug)
-	id := e.scalar(`INSERT INTO task_runs (tenant_id, repository_id, task, event_id, subject_kind, subject_number, trigger, mode,
-		status, model, fields, proposed, applied, dropped, started_at, finished_at)
+		VALUES ($1, $2, $3, 'github', 'issue', 'issues', 'opened', $4, 'issue', 12) RETURNING id::text`,
+		s.accountID, conn, s.repoID, "sender of "+slug)
+	id := e.scalar(`INSERT INTO task_runs (account_id, repository_id, task, event_id, subject_kind, subject_number, trigger, mode,
+		status, model, fields, proposed, applied, dropped, notes, started_at, finished_at)
 		VALUES ($1, $2, 'triage', $3, 'issue', 12, 'issue.opened', 'single', 'succeeded', 'acme/large', $4,
 			'{"summary":"a crash","labels":{"add":["bug","x"],"remove":[]}}', '{"add_labels":["bug"],"comment":"sticky"}',
-			'[{"action":"labels.add","value":"x","reason":"it is not a label the task lets the model add"}]', now(), now())
-		RETURNING id::text`, s.tenantID, s.repoID, ev, fmt.Sprintf(`{"who":%q}`, slug))
+			'[{"Action":"labels.add","Value":"x","Reason":"it is not a label the task lets the model add"}]', $5, now(), now())
+		RETURNING id::text`, s.accountID, s.repoID, ev, fmt.Sprintf(`{"who":%q}`, slug), []string{"note of " + slug})
+	e.exec(`UPDATE repositories SET task_config_sha = 'tip7', task_config_doc = $2, task_config_at = now() WHERE id = $1`,
+		s.repoID, "tasks: [{ name: "+slug+"-triage, on: [{ issue: [opened] }] }]\n")
 	// Every integration package shares the database, and the task worker's
 	// suite counts every task row.
 	e.t.Cleanup(func() {
@@ -225,11 +207,11 @@ func (e *apiEnv) seedTaskRun(s seeded, slug string) string {
 		e.exec(`DELETE FROM task_events WHERE id = $1`, ev)
 	})
 	ctx := context.Background()
-	err := e.st.WithTenant(ctx, s.tenantID, func(tx pgx.Tx) error {
+	err := e.st.WithAccount(ctx, s.accountID, func(tx pgx.Tx) error {
 		row := transcript.Delta(transcript.State{}, model.StepRequest{System: "task of " + slug}, nil)
 		row.Response = transcript.Response{Text: "{}", Stop: model.StopEndTurn}
 		return store.InsertModelCall(ctx, tx, store.ModelCall{
-			TenantID: s.tenantID, TaskRunID: id, Kind: store.ModelCallTask, Model: "acme/large", Row: row.Encode(),
+			AccountID: s.accountID, TaskRunID: id, Kind: store.ModelCallTask, Model: "acme/large", Row: row.Encode(),
 			Usage: model.Usage{Input: 30, Output: 4}, CostUSD: 0.01,
 		})
 	})
@@ -251,15 +233,15 @@ func (e *apiEnv) seedModelCalls(s seeded, slug string) {
 			msgs = append(msgs, model.Message{Role: model.RoleAssistant, Text: "looking"}, model.Message{Role: model.RoleUser, Text: "more"})
 		}
 		req := model.StepRequest{System: "sys of " + slug, Messages: msgs, Tools: tools}
-		err := e.st.WithTenant(ctx, s.tenantID, func(tx pgx.Tx) error {
-			prev, n, err := store.AgentState(ctx, tx, s.runID)
+		err := e.st.WithAccount(ctx, s.accountID, func(tx pgx.Tx) error {
+			prev, n, err := store.AgentState(ctx, tx, s.runID, 0)
 			if err != nil {
 				return err
 			}
 			row := transcript.Delta(prev, req, nil)
 			row.Response = transcript.Response{Text: "ok", Stop: model.StopToolUse}
 			return store.InsertModelCall(ctx, tx, store.ModelCall{
-				TenantID: s.tenantID, ReviewID: s.reviewID, RunnerRunID: s.runID, Kind: store.ModelCallAgentStep, Step: n,
+				AccountID: s.accountID, ReviewID: s.reviewID, RunnerRunID: s.runID, Kind: store.ModelCallAgentStep, Step: n,
 				Model: "acme/large", Row: row.Encode(), Usage: model.Usage{Input: 10, CacheRead: 4, Output: 2}, CostUSD: 0.25,
 				Duration: time.Second,
 			})
@@ -268,11 +250,11 @@ func (e *apiEnv) seedModelCalls(s seeded, slug string) {
 			e.t.Fatal(err)
 		}
 	}
-	err := e.st.WithTenant(ctx, s.tenantID, func(tx pgx.Tx) error {
+	err := e.st.WithAccount(ctx, s.accountID, func(tx pgx.Tx) error {
 		row := transcript.Delta(transcript.State{}, model.StepRequest{System: "follow of " + slug, Messages: msgs[:1]}, nil)
 		row.Response = transcript.Response{Text: "reply", Stop: model.StopEndTurn}
 		return store.InsertModelCall(ctx, tx, store.ModelCall{
-			TenantID: s.tenantID, ReviewID: s.reviewID, FollowupCommentID: followupComment, Kind: store.ModelCallFollowUp,
+			AccountID: s.accountID, ReviewID: s.reviewID, FollowupCommentID: followupComment, Kind: store.ModelCallFollowUp,
 			Model: "acme/large", Row: row.Encode(),
 		})
 	})
@@ -281,19 +263,17 @@ func (e *apiEnv) seedModelCalls(s seeded, slug string) {
 	}
 }
 
-func (e *apiEnv) signIn(name, subject string, grants []store.Grant) {
+func (e *apiEnv) signIn(name, subject string, g store.SessionGrant) {
 	e.t.Helper()
-	ctx := context.Background()
-	now := time.Now()
-	origin := "oidc:https://idp.example"
-	acct, err := e.st.UpsertIdentity(ctx, store.SignInIdentity{Provider: "corp", Origin: origin, Subject: subject, DisplayName: name}, now)
+	ctx, now, origin := context.Background(), time.Now(), "oidc:https://idp.example"
+	user, err := e.st.UpsertIdentity(ctx, store.SignInIdentity{
+		Provider: "oidc", Origin: origin, Subject: subject, DisplayName: name,
+	})
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	if err := e.st.ReplaceForgeMemberships(ctx, acct.ID, grants, now); err != nil {
-		e.t.Fatal(err)
-	}
-	token, err := e.st.CreateSession(ctx, acct.ID, "corp", origin, now, now.Add(time.Hour))
+	g.Key, _ = auth.GrantKey(e.file.Auth, "oidc")
+	token, err := e.st.CreateSession(ctx, user.ID, "oidc", origin, g, now, now.Add(time.Hour))
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -329,46 +309,69 @@ func (e *apiEnv) getBody(who, path string) (int, []byte) {
 // and follow-ups are unique per repository, so it cannot run twice.
 func TestWebAPI(t *testing.T) {
 	e := newAPIEnv(t)
-	t.Run("read endpoints scope to the tenant", func(t *testing.T) { testReadEndpointsScopeToTenant(t, e) })
-	t.Run("tenant B's ids under tenant A", func(t *testing.T) { testCrossTenantIDs(t, e) })
-	t.Run("me and tenant lists", func(t *testing.T) { testMeAndTenantLists(t, e) })
+	t.Run("read endpoints scope to the account", func(t *testing.T) { testReadEndpointsScopeToAccount(t, e) })
+	t.Run("account B's ids under account A", func(t *testing.T) { testCrossAccountIDs(t, e) })
+	t.Run("me and account lists", func(t *testing.T) { testMeAndAccountLists(t, e) })
+	t.Run("a user's settings are their own", func(t *testing.T) { testUserSettings(t, e) })
+	t.Run("account detail shows each connection's last webhook", func(t *testing.T) { testLastWebhook(t, e) })
 	t.Run("transcripts equal Rebuild", func(t *testing.T) { testTranscriptsEqualRebuild(t, e) })
 	t.Run("repository pagination", func(t *testing.T) { testRepoPagination(t, e) })
-	t.Run("event stream scopes to the tenant", func(t *testing.T) { testEventStreamScopesToTenant(t, e) })
+	t.Run("repository kinds", func(t *testing.T) { testRepoKinds(t, e) })
+	t.Run("pull requests by author", func(t *testing.T) { testPullsByAuthor(t, e) })
+	t.Run("pull numbers outside int4", func(t *testing.T) { testPullNumbersOutsideInt4(t, e) })
+	t.Run("event stream scopes to the account", func(t *testing.T) { testEventStreamScopesToAccount(t, e) })
 }
 
-func testReadEndpointsScopeToTenant(t *testing.T, e *apiEnv) {
-	a := "/api/v1/tenants/webapi-a"
-	// Each path of tenant A and a string only tenant A's answer contains.
+func testReadEndpointsScopeToAccount(t *testing.T, e *apiEnv) {
+	a := "/api/v1/accounts/github/wa"
+	// Each path of account A and a string only account A's answer contains.
 	endpoints := []struct{ path, marker string }{
-		{a, `"slug":"webapi-a"`},
+		{a, `"slug":"github/wa"`},
+		// The hour is the server's zone's.
+		{a, `"lastPolledAt":"2026-09-01T`},
 		{a + "/repos", `"fullName":"wa/one"`},
 		{a + "/repos/wa/one", `"activeCommit":"commit7"`},
 		{a + "/repos/wa/one", `"commit":"base7","found":true`},
 		{a + "/pulls", `"title":"PR of webapi-a"`},
 		{a + "/pulls?state=all&repo=wa/one&outcome=completed&q=webapi-a", `"title":"PR of webapi-a"`},
+		{a + "/pulls?state=all&author=ADA", `"title":"PR of webapi-a"`},
 		{a + "/pulls/wa/one/7", `"title":"PR of webapi-a"`},
+		{a + "/pulls/wa/one/7", `"job":{"id":`},
+		{a + "/pulls/wa/one/7", `"reviewCount":1,"costUsd":0.5`},
+		{a + "/pulls?repo=wa/one", `"reviewCount":1,"costUsd":0.5`},
 		{a + "/reviews/" + e.a.reviewID, `"logTail":"tail of webapi-a"`},
+		{a + "/reviews/" + e.a.reviewID, `"ruleIds":["wrap-errors"]`},
+		{a + "/reviews/" + e.a.reviewID, `"timeline":[{"index":0,"part":1,`},
+		{a + "/reviews/" + e.a.reviewID, `"parts":[{"paths":["a.go"],"stop":"submitted","error":"","steps":2}]`},
 		{a + "/reviews/" + e.a.reviewID + "/diff", `"diff":"diff of webapi-a"`},
 		{a + "/reviews/" + e.a.reviewID + "/transcript", `"system":"sys of webapi-a"`},
 		{a + "/reviews/" + e.a.reviewID + "/raw", `"logTail":"tail of webapi-a"`},
 		{a + "/index-runs?repo=wa/one", `"commitSha":"commit7"`},
-		{a + "/followups?repo=wa/one", `"commentId":4242`},
-		{a + "/followups/4242/transcript", `"system":"follow of webapi-a"`},
+		{a + "/findings?repo=wa/one&severity=blocking&status=open", `"title":"nil deref"`},
+		{a + "/rules", `"path":"docs/rules-of-webapi-a.md","description":"","paths":[],"when":[],"source":"repository","repositories":["wa/one"]`},
+		{a + "/followups?repo=wa/one", fmt.Sprintf(`"commentId":%d`, followupComment)},
+		{a + fmt.Sprintf("/followups/%d/transcript", followupComment), `"system":"follow of webapi-a"`},
 		{a + "/usage?group=repo", `"key":"wa/one"`},
+		{a + "/analytics?group=week", `"repository":"wa/one"`},
+		{a + "/attention", `"blocking":1,"paused":0`},
+		{a + "/pulls?is=blocking", `"title":"PR of webapi-a"`},
 		{a + "/queue", `"repository":"wa/one"`},
 		{a + "/task-runs", `"task":"triage"`},
 		{a + "/task-runs?repo=wa/one&task=triage&status=succeeded", `"droppedCount":1`},
 		{a + "/task-runs/" + e.a.taskRunID, `"sender":"sender of webapi-a"`},
 		{a + "/task-runs/" + e.a.taskRunID, `"fields":{"who":"webapi-a"}`},
+		{a + "/task-runs/" + e.a.taskRunID, `"notes":["note of webapi-a"],"modelCalls":1`},
+		{a + "/task-runs/" + e.a.taskRunID, `"dropped":[{"action":"labels.add","value":"x"`},
 		{a + "/task-runs/" + e.a.taskRunID + "/transcript", `"system":"task of webapi-a"`},
+		{a + "/repos/wa/one/tasks", `"source":"defaultBranch","commit":"tip7"`},
+		{a + "/repos/wa/one/tasks", `{"task":"webapi-a-triage","what":"task","reason":"tasks are disabled"}`},
 	}
 	for _, ep := range endpoints {
 		t.Run(ep.path, func(t *testing.T) {
 			for _, tc := range []struct {
 				who    string
 				status int
-			}{{"member-a", 200}, {"operator", 200}, {"member-b", 404}, {"nobody", 401}} {
+			}{{"member-a", 200}, {"admin", 200}, {"member-b", 404}, {"nobody", 401}} {
 				status, body := e.getBody(tc.who, ep.path)
 				if status != tc.status {
 					t.Fatalf("%s: status = %d, want %d: %s", tc.who, status, tc.status, body)
@@ -381,7 +384,7 @@ func testReadEndpointsScopeToTenant(t *testing.T, e *apiEnv) {
 				}
 				for _, leak := range e.bMarkers() {
 					if bytes.Contains(body, []byte(leak)) {
-						t.Errorf("%s: body leaks tenant B's %q: %s", tc.who, leak, body)
+						t.Errorf("%s: body leaks account B's %q: %s", tc.who, leak, body)
 					}
 				}
 			}
@@ -389,27 +392,28 @@ func testReadEndpointsScopeToTenant(t *testing.T, e *apiEnv) {
 	}
 }
 
-// bMarkers are strings only tenant B's rows contain.
+// bMarkers are strings only account B's rows contain.
 func (e *apiEnv) bMarkers() []string {
 	return []string{
 		"webapi-b", "wb/one", "PR of webapi-b", "tail of webapi-b", "diff of webapi-b", "sys of webapi-b", "follow of webapi-b",
-		"sender of webapi-b", "task of webapi-b", e.b.reviewID, e.b.prID, e.b.runID, e.b.repoID, e.b.taskRunID,
+		"sender of webapi-b", "task of webapi-b", "note of webapi-b", "webapi-b-triage",
+		e.b.reviewID, e.b.prID, e.b.runID, e.b.repoID, e.b.taskRunID,
 	}
 }
 
-// testCrossTenantIDs asks for tenant B's rows by id under tenant A's slug:
-// even an operator, who may read B, finds nothing, since the query runs
+// testCrossAccountIDs asks for account B's rows by id under account A's slug:
+// even an admin, who may read B, finds nothing, since the query runs
 // scoped to A.
-func testCrossTenantIDs(t *testing.T, e *apiEnv) {
-	a := "/api/v1/tenants/webapi-a"
+func testCrossAccountIDs(t *testing.T, e *apiEnv) {
+	a := "/api/v1/accounts/github/wa"
 	paths := []string{
 		a + "/reviews/" + e.b.reviewID, a + "/reviews/" + e.b.reviewID + "/diff",
 		a + "/reviews/" + e.b.reviewID + "/transcript", a + "/reviews/" + e.b.reviewID + "/raw",
 		a + fmt.Sprintf("/followups/%d/transcript", onlyBComment), a + "/pulls/wb/one/7", a + "/repos/wb/one",
-		a + "/task-runs/" + e.b.taskRunID, a + "/task-runs/" + e.b.taskRunID + "/transcript",
+		a + "/task-runs/" + e.b.taskRunID, a + "/task-runs/" + e.b.taskRunID + "/transcript", a + "/repos/wb/one/tasks",
 	}
 	for _, path := range paths {
-		for _, who := range []string{"member-a", "operator"} {
+		for _, who := range []string{"member-a", "admin"} {
 			t.Run(who+" "+path, func(t *testing.T) {
 				if status, body := e.getBody(who, path); status != 404 {
 					t.Errorf("status = %d, want 404: %s", status, body)
@@ -419,20 +423,24 @@ func testCrossTenantIDs(t *testing.T, e *apiEnv) {
 	}
 }
 
-func testMeAndTenantLists(t *testing.T, e *apiEnv) {
+func testMeAndAccountLists(t *testing.T, e *apiEnv) {
 	tests := []struct {
 		who, path string
 		status    int
 		want      []string
 		not       []string
 	}{
-		{"member-a", "/api/v1/me", 200, []string{`"slug":"webapi-a","role":"member"`}, []string{"webapi-b"}},
-		{"operator", "/api/v1/me", 200, []string{`"operator":true`, `"slug":"webapi-a","role":"admin"`, `"slug":"webapi-b"`}, nil},
-		{"member-a", "/api/v1/tenants", 200, []string{`"slug":"webapi-a"`, `"repositories":2`, `"reviews7d":1`}, []string{"webapi-b"}},
-		{"member-b", "/api/v1/tenants", 200, []string{`"slug":"webapi-b"`}, []string{"webapi-a"}},
-		{"operator", "/api/v1/operator/tenants", 200, []string{`"slug":"webapi-a"`, `"slug":"webapi-b"`, `"live":true`}, nil},
-		{"member-a", "/api/v1/operator/tenants", 404, nil, nil},
-		{"nobody", "/api/v1/tenants", 401, nil, nil},
+		{"member-a", "/api/v1/me", 200, []string{`"admin":false`, `"accounts":["github/wa"]`}, []string{"webapi-b"}},
+		{"admin", "/api/v1/me", 200, []string{`"admin":true`, `"accounts":["github/wa","github/wb"]`}, nil},
+		{"member-a", "/api/v1/accounts", 200, []string{`"slug":"github/wa"`, `"repositories":2`, `"reviews7d":1`}, []string{"webapi-b"}},
+		{"member-b", "/api/v1/accounts", 200, []string{`"slug":"github/wb"`}, []string{"webapi-a"}},
+		{"member-a", "/api/v1/accounts", 200, []string{`"attention":{"failed":0,"capped":0,"blocking":1,"paused":0}`}, nil},
+		{"member-a", "/api/v1/queue", 200, []string{`"account":"github/wa"`, `"repository":"wa/one"`}, []string{"github/wb", "wb/one"}},
+		{"admin", "/api/v1/queue", 200, []string{`"account":"github/wa"`, `"account":"github/wb"`}, nil},
+		{"nobody", "/api/v1/queue", 401, nil, nil},
+		{"admin", "/api/v1/admin/accounts", 200, []string{`"slug":"github/wa"`, `"slug":"github/wb"`, `"live":true`}, nil},
+		{"member-a", "/api/v1/admin/accounts", 404, nil, nil},
+		{"nobody", "/api/v1/accounts", 401, nil, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.who+" "+tt.path, func(t *testing.T) {
@@ -454,15 +462,44 @@ func testMeAndTenantLists(t *testing.T, e *apiEnv) {
 	}
 }
 
+func testLastWebhook(t *testing.T, e *apiEnv) {
+	ctx := t.Context()
+	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	in, _ := e.file.Connection("webapi-a-bot")
+	if err := e.st.WithAccount(ctx, e.a.accountID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE connections SET last_webhook_at = $2 WHERE id = $1`, in.ID(), at)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		who, slug string
+		want      *time.Time
+	}{
+		{"member-a", "github/wa", &at},
+		{"member-b", "github/wb", nil},
+	} {
+		status, body := e.getBody(tt.who, "/api/v1/accounts/"+tt.slug)
+		var d AccountDetail
+		if status != 200 || json.Unmarshal(body, &d) != nil || d.Connection.Name == "" {
+			t.Fatalf("%s: status %d: %s", tt.who, status, body)
+		}
+		got := d.Connection.LastWebhookAt
+		if (got == nil) != (tt.want == nil) || got != nil && !got.Equal(*tt.want) {
+			t.Errorf("%s: lastWebhookAt = %v, want %v", tt.who, got, tt.want)
+		}
+	}
+}
+
 func testTranscriptsEqualRebuild(t *testing.T, e *apiEnv) {
-	ctx := context.Background()
+	ctx := t.Context()
 	var steps, followups []transcript.StoredRow
-	if err := e.st.WithTenant(ctx, e.a.tenantID, func(tx pgx.Tx) error {
+	if err := e.st.WithAccount(ctx, e.a.accountID, func(tx pgx.Tx) error {
 		var err error
-		if steps, err = store.ModelCalls(ctx, tx, store.ModelCallFilter{RunnerRunID: e.a.runID}); err != nil {
+		if steps, err = store.ReviewModelCalls(ctx, tx, e.a.reviewID); err != nil {
 			return err
 		}
-		followups, err = store.ModelCalls(ctx, tx, store.ModelCallFilter{FollowupCommentID: followupComment})
+		followups, err = store.FollowupModelCalls(ctx, tx, e.a.prID, followupComment)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -474,15 +511,15 @@ func testTranscriptsEqualRebuild(t *testing.T, e *apiEnv) {
 		path string
 		rows []transcript.StoredRow
 	}{
-		{"/api/v1/tenants/webapi-a/reviews/" + e.a.reviewID + "/transcript", steps},
-		{"/api/v1/tenants/webapi-a/followups/4242/transcript", followups},
+		{"/api/v1/accounts/github/wa/reviews/" + e.a.reviewID + "/transcript", steps},
+		{fmt.Sprintf("/api/v1/accounts/github/wa/followups/%d/transcript", followupComment), followups},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			status, body := e.getBody("member-a", tc.path)
 			if status != 200 {
 				t.Fatalf("status = %d: %s", status, body)
 			}
-			want, _ := json.Marshal(transcriptOf(transcript.Rebuild(tc.rows)))
+			want, _ := jsonv2.Marshal(transcriptOf(transcript.Rebuild(tc.rows)), jsonOptions)
 			if strings.TrimSpace(string(body)) != string(want) {
 				t.Errorf("transcript =\n%s\nwant\n%s", body, want)
 			}
@@ -492,7 +529,7 @@ func testTranscriptsEqualRebuild(t *testing.T, e *apiEnv) {
 
 func testRepoPagination(t *testing.T, e *apiEnv) {
 	var names []string
-	path := "/api/v1/tenants/webapi-a/repos?limit=1"
+	path := "/api/v1/accounts/github/wa/repos?limit=1"
 	for range 5 {
 		status, body := e.getBody("member-a", path)
 		if status != 200 {
@@ -508,10 +545,92 @@ func testRepoPagination(t *testing.T, e *apiEnv) {
 		if page.NextCursor == nil {
 			break
 		}
-		path = "/api/v1/tenants/webapi-a/repos?limit=1&cursor=" + *page.NextCursor
+		path = "/api/v1/accounts/github/wa/repos?limit=1&cursor=" + *page.NextCursor
 	}
 	if strings.Join(names, ",") != "wa/one,wa/two" {
 		t.Errorf("paged repositories = %v, want wa/one, wa/two", names)
+	}
+}
+
+// testRepoKinds: the repository list leaves out archived repositories and
+// forks, but for a fork turned on by its own entry, as wa/one's is; each
+// has a list of its own, and neither counts as the account's.
+func testPullsByAuthor(t *testing.T, e *apiEnv) {
+	for author, want := range map[string]string{"ada": `"title":"PR of webapi-a"`, "Ada": `"title":"PR of webapi-a"`, "ad": `"items":[]`} {
+		status, body := e.getBody("member-a", "/api/v1/accounts/github/wa/pulls?state=all&author="+author)
+		if status != 200 || !bytes.Contains(body, []byte(want)) {
+			t.Errorf("author=%s: status %d, body %s, want %s", author, status, body, want)
+		}
+	}
+}
+
+// testPullNumbersOutsideInt4 asks for pull numbers no int4 column can
+// hold: no such pull exists, so a search matches nothing and a lookup is
+// not found, rather than a failure to bind the number.
+func testPullNumbersOutsideInt4(t *testing.T, e *apiEnv) {
+	a := "/api/v1/accounts/github/wa"
+	for path, want := range map[string]struct {
+		status int
+		marker string
+	}{
+		a + "/pulls?state=all&q=%233000000000": {200, `"items":[]`},
+		a + "/findings?q=%233000000000":        {200, `"items":[]`},
+		a + "/pulls/wa/one/3000000000":         {404, `"code":"not_found"`},
+	} {
+		status, body := e.getBody("member-a", path)
+		if status != want.status || !bytes.Contains(body, []byte(want.marker)) {
+			t.Errorf("%s: status %d, body %s, want %d with %s", path, status, body, want.status, want.marker)
+		}
+	}
+}
+
+func testRepoKinds(t *testing.T, e *apiEnv) {
+	t.Cleanup(func() {
+		e.exec(`UPDATE repositories SET fork = false, archived = false, turned_on = NULL WHERE name IN ('wa/one', 'wa/two')`)
+	})
+	list := func(query string) string {
+		t.Helper()
+		status, body := e.getBody("member-a", "/api/v1/accounts/github/wa/repos"+query)
+		if status != 200 {
+			t.Fatalf("%s: status = %d: %s", query, status, body)
+		}
+		var page Page[Repository]
+		if err := json.Unmarshal(body, &page); err != nil {
+			t.Fatal(err)
+		}
+		out := make([]string, 0, len(page.Items))
+		for _, r := range page.Items {
+			out = append(out, fmt.Sprintf("%s:%v", r.FullName, r.Enabled))
+		}
+		return strings.Join(out, ",")
+	}
+	count := func() int {
+		t.Helper()
+		_, body := e.getBody("member-a", "/api/v1/accounts")
+		var accounts []AccountSummary
+		if err := json.Unmarshal(body, &accounts); err != nil || len(accounts) != 1 {
+			t.Fatalf("accounts = %s, %v", body, err)
+		}
+		return accounts[0].Repositories
+	}
+	// An admin turned the fork wa/one on.
+	e.exec(`UPDATE repositories SET fork = true, turned_on = name = 'wa/one' WHERE name IN ('wa/one', 'wa/two')`)
+	for _, tt := range []struct{ query, want string }{{"", "wa/one:true"}, {"?type=forks", "wa/one:true,wa/two:false"}, {"?type=archived", ""}} {
+		if got := list(tt.query); got != tt.want {
+			t.Errorf("forks: repos%s = %q, want %q", tt.query, got, tt.want)
+		}
+	}
+	if got := count(); got != 1 {
+		t.Errorf("forks: the account counts %d repositories, want 1", got)
+	}
+	e.exec(`UPDATE repositories SET archived = true WHERE name = 'wa/one'`)
+	for _, tt := range []struct{ query, want string }{{"", ""}, {"?type=forks", "wa/two:false"}, {"?type=archived", "wa/one:false"}} {
+		if got := list(tt.query); got != tt.want {
+			t.Errorf("archived: repos%s = %q, want %q", tt.query, got, tt.want)
+		}
+	}
+	if got := count(); got != 0 {
+		t.Errorf("archived: the account counts %d repositories, want 0", got)
 	}
 }
 
@@ -540,7 +659,7 @@ func (e *apiEnv) stream(ctx context.Context, who string) <-chan Event {
 			}
 			if data, ok := strings.CutPrefix(strings.TrimSpace(line), "data: "); ok {
 				var ev Event
-				if json.Unmarshal([]byte(data), &ev) == nil && ev.Tenant != "" {
+				if json.Unmarshal([]byte(data), &ev) == nil && ev.Account != "" {
 					out <- ev
 				}
 			}
@@ -549,8 +668,8 @@ func (e *apiEnv) stream(ctx context.Context, who string) <-chan Event {
 	return out
 }
 
-func testEventStreamScopesToTenant(t *testing.T, e *apiEnv) {
-	ctx, cancel := context.WithCancel(context.Background())
+func testEventStreamScopesToAccount(t *testing.T, e *apiEnv) {
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	runCtx, stopRun := context.WithCancel(ctx)
 	defer stopRun()
@@ -573,15 +692,15 @@ wait:
 		case got = <-aEvents:
 			break wait
 		case <-tick.C:
-			e.exec(`INSERT INTO runner_runs (tenant_id, kind) VALUES ($1, 'index')`, e.a.tenantID)
+			e.exec(`INSERT INTO runner_runs (account_id, kind) VALUES ($1, 'index')`, e.a.accountID)
 		case <-deadline:
 			t.Fatal("member of A received no event")
 		}
 	}
-	if got.Tenant != "webapi-a" || got.Kind != store.EventRunnerRun {
+	if got.Account != "github/wa" || got.Kind != store.EventRunnerRun {
 		t.Errorf("event = %+v, want a runner_run of webapi-a", got)
 	}
-	e.exec(`INSERT INTO runner_runs (tenant_id, kind) VALUES ($1, 'index')`, e.a.tenantID)
+	e.exec(`INSERT INTO runner_runs (account_id, kind) VALUES ($1, 'index')`, e.a.accountID)
 	select {
 	case ev := <-bEvents:
 		t.Errorf("member of B received %+v", ev)
@@ -605,5 +724,57 @@ wait:
 				t.Fatal("a stream stayed open after Run returned")
 			}
 		}
+	}
+}
+
+// putSettings replaces who's settings, as the dashboard would, or without
+// its same-origin headers.
+func (e *apiEnv) putSettings(who, body string, sameOrigin bool) int {
+	e.t.Helper()
+	req, err := http.NewRequest(http.MethodPut, e.http.URL+"/api/v1/me/settings", strings.NewReader(body))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if c := e.cookie[who]; c != nil {
+		req.AddCookie(c)
+	}
+	if sameOrigin {
+		req.Header.Set("Origin", "https://kritique.example")
+		req.Header.Set("X-Kritique", "1")
+	}
+	resp, err := e.http.Client().Do(req)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+func testUserSettings(t *testing.T, e *apiEnv) {
+	const chosen = `{"timeZone":"Europe/Amsterdam","clock":"24","theme":"dark"}`
+	if status := e.putSettings("nobody", chosen, true); status != http.StatusUnauthorized {
+		t.Fatalf("without a session: status = %d, want 401", status)
+	}
+	if status := e.putSettings("member-a", chosen, false); status != http.StatusForbidden {
+		t.Fatalf("from another origin: status = %d, want 403", status)
+	}
+	if _, body := e.getBody("member-a", "/api/v1/me"); !bytes.Contains(body, []byte(`"settings":{"timeZone":"","clock":"","theme":""}`)) {
+		t.Fatalf("before any choice: %s", body)
+	}
+	if status := e.putSettings("member-a", chosen, true); status != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", status)
+	}
+	if _, body := e.getBody("member-a", "/api/v1/me"); !bytes.Contains(body, []byte(`"settings":`+chosen)) {
+		t.Fatalf("member-a after the choice: %s", body)
+	}
+	if _, body := e.getBody("member-b", "/api/v1/me"); !bytes.Contains(body, []byte(`"settings":{"timeZone":"","clock":"","theme":""}`)) {
+		t.Fatalf("member-b after member-a's choice: %s", body)
+	}
+	// Choosing nothing again hands each back to the browser.
+	if status := e.putSettings("member-a", `{"timeZone":"","clock":"","theme":""}`, true); status != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", status)
+	}
+	if _, body := e.getBody("member-a", "/api/v1/me"); !bytes.Contains(body, []byte(`"settings":{"timeZone":"","clock":"","theme":""}`)) {
+		t.Fatalf("member-a after clearing: %s", body)
 	}
 }

@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -107,6 +108,21 @@ func TestAnthropicStepResponses(t *testing.T) {
 	}
 }
 
+// TestAnthropicRequestOnce: a step no other reads back has no cache
+// breakpoint, on the system prompt or on the last message.
+func TestAnthropicRequestOnce(t *testing.T) {
+	srv, got := fakeProvider(t, http.StatusOK, anthropicMessage(`[{"type":"text","text":"ok"}]`, "end_turn", anthropicUsage))
+	if _, err := newTestAnthropic(t, srv, nil).Step(t.Context(), StepRequest{
+		Model: "acme-large", System: "be terse", Messages: []Message{{Role: RoleUser, Text: "score this"}}, Once: true,
+	}); err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if field(got.body, "system", 0, "text") != "be terse" || field(got.body, "system", 0, "cache_control") != nil ||
+		field(got.body, "messages", 0, "content", 0, "cache_control") != nil {
+		t.Fatalf("request = %v; want no cache_control", got.body)
+	}
+}
+
 func TestAnthropicRequest(t *testing.T) {
 	srv, got := fakeProvider(t, http.StatusOK, anthropicMessage(`[{"type":"text","text":"ok"}]`, "end_turn", anthropicUsage))
 	c := newTestAnthropic(t, srv, nil)
@@ -177,6 +193,28 @@ func TestAnthropicRequest(t *testing.T) {
 	})
 }
 
+// TestAnthropicEffort: the effort goes out as output_config.effort, the
+// levels under low as low, and not at all when unset.
+func TestAnthropicEffort(t *testing.T) {
+	for _, tt := range []struct {
+		effort Effort
+		want   any
+	}{
+		{EffortXHigh, "xhigh"}, {EffortMax, "max"}, {EffortLow, "low"}, {EffortMinimal, "low"}, {EffortNone, "low"}, {"", nil},
+	} {
+		t.Run(string(tt.effort), func(t *testing.T) {
+			srv, got := fakeProvider(t, http.StatusOK, anthropicMessage(`[{"type":"text","text":"ok"}]`, "end_turn", anthropicUsage))
+			c := newTestAnthropic(t, srv, nil)
+			if _, err := c.Step(t.Context(), StepRequest{Model: "acme-large", Messages: []Message{{Role: RoleUser, Text: "hi"}}, Effort: tt.effort}); err != nil {
+				t.Fatalf("Step: %v", err)
+			}
+			if got := field(got.body, "output_config", "effort"); got != tt.want {
+				t.Fatalf("output_config.effort = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAnthropicToolChoice(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -230,6 +268,7 @@ func TestNewStepper(t *testing.T) {
 		{"openai", ProviderOpenAI, "https://gw.example.com/v1", false},
 		{"openai default url", ProviderOpenAI, "", false},
 		{"anthropic", ProviderAnthropic, "", false},
+		{"opencode default url", ProviderOpenCode, "", false},
 		{"unknown", ProviderType("cohere"), "", true},
 	}
 	for _, tt := range tests {
@@ -240,4 +279,23 @@ func TestNewStepper(t *testing.T) {
 			}
 		})
 	}
+	t.Run("openai default url ignores OPENAI_BASE_URL", func(t *testing.T) {
+		t.Setenv("OPENAI_BASE_URL", "https://elsewhere.example.com/v1")
+		var host string
+		client := &http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+			host = r.URL.Host
+			return &http.Response{StatusCode: http.StatusUnauthorized, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`)), Request: r}, nil
+		})}
+		s, err := NewStepper(ProviderOpenAI, "", "k", nil, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.(*OpenAI).client.Models.List(t.Context()); err == nil || host != "api.openai.com" {
+			t.Fatalf("reached %q (%v), want api.openai.com", host, err)
+		}
+	})
 }
+
+type roundTripper func(*http.Request) (*http.Response, error)
+
+func (f roundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

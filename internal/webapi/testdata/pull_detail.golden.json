@@ -6,7 +6,9 @@
     "author": "ada",
     "state": "open",
     "draft": false,
+    "fork": false,
     "merged": false,
+    "paused": false,
     "headSha": "abc123",
     "headRef": "widgets",
     "baseRef": "main",
@@ -22,7 +24,6 @@
     "lastReview": {
       "id": "rev-1",
       "status": "completed",
-      "mode": "single",
       "scope": "full",
       "findings": {
         "blocking": 1,
@@ -30,14 +31,15 @@
         "nit": 3
       },
       "createdAt": "2026-09-01T12:00:00Z"
-    }
+    },
+    "reviewCount": 2,
+    "costUsd": 0.84
   },
   "reviews": [
     {
       "id": "rev-1",
       "status": "completed",
       "trigger": "push",
-      "mode": "agentic",
       "scope": "incremental",
       "model": "acme/large",
       "headSha": "abc123",
@@ -50,7 +52,15 @@
       "createdAt": "2026-09-01T12:00:00Z",
       "finishedAt": "2026-09-01T12:01:30Z",
       "skipReason": "filtered",
-      "error": ""
+      "error": "",
+      "confidence": {
+        "score": 3,
+        "threshold": 5,
+        "passed": false,
+        "reason": "The unchecked error stands.",
+        "risk": "medium",
+        "model": "acme/judge"
+      }
     }
   ],
   "followups": [
@@ -59,6 +69,7 @@
       "commentId": 99,
       "repository": "alpha/one",
       "number": 7,
+      "pullUrl": "https://git.example/alpha/one/pulls/7",
       "author": "bob",
       "inline": true,
       "path": "a.go",
@@ -66,8 +77,30 @@
       "status": "answered",
       "reason": "",
       "replyCommentId": 100,
+      "commentUrl": "https://git.example/alpha/one/pulls/7#discussion_r99",
+      "replyUrl": "https://git.example/alpha/one/pulls/7#discussion_r100",
       "model": "acme/large",
       "createdAt": "2026-09-01T12:00:00Z"
     }
-  ]
+  ],
+  "job": {
+    "id": 42,
+    "kind": "review",
+    "state": "retryable",
+    "attempt": 2,
+    "maxAttempts": 5,
+    "createdAt": "2026-09-01T12:00:00Z",
+    "scheduledAt": "2026-09-01T12:01:30Z",
+    "attemptedAt": "2026-09-01T12:00:00Z",
+    "finalizedAt": null,
+    "args": {
+      "repository": "alpha/one",
+      "number": 7,
+      "head": "abc123",
+      "trigger": "push",
+      "commentId": 0
+    },
+    "lastError": "github: list files: context deadline exceeded",
+    "cause": "forge_unavailable"
+  }
 }

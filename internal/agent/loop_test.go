@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +92,8 @@ type runCase struct {
 	name      string
 	tools     []Tool
 	limits    Limits
+	validate  func(json.RawMessage) error
+	fallback  func(json.RawMessage) bool
 	setup     func(t *testing.T) (stepper model.Stepper, ctx context.Context, scripted *scriptedStepper)
 	wantStop  StopReason
 	wantSteps int
@@ -159,19 +163,198 @@ func checkInvalidSubmitJSONThenValid(t *testing.T, result Result, _ []StepEvent,
 	}
 }
 
-func setupForcedInvalidSubmitStopsNoSubmit(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+// rejectVerdict is a Validate that refuses the submit inputs without a
+// "verdict" key, with a message the model is expected to see.
+func rejectVerdict(input json.RawMessage) error {
+	if !strings.Contains(string(input), "verdict") {
+		return errors.New("verdict is required")
+	}
+	return nil
+}
+
+func setupRejectedSubmitThenValid(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
 	st := &scriptedStepper{steps: []model.StepResponse{
-		{ToolCalls: []model.ToolCall{toolCall("1", "submit_review", `{not json`)}},
+		{ToolCalls: []model.ToolCall{toolCall("1", "submit_review", `{"wrong":"shape"}`)}},
+		{ToolCalls: []model.ToolCall{toolCall("2", "submit_review", validSubmitInput)}},
 	}}
 	return st, nil, st
 }
 
-func checkForcedInvalidSubmitStopsNoSubmit(t *testing.T, result Result, _ []StepEvent, scripted *scriptedStepper) {
+func checkRejectedSubmitThenValid(t *testing.T, result Result, _ []StepEvent, scripted *scriptedStepper) {
+	if string(result.Submitted) != validSubmitInput {
+		t.Fatalf("Submitted = %s, want %s", result.Submitted, validSubmitInput)
+	}
+	last := scripted.calls[len(scripted.calls)-1]
+	lastMsg := last.Messages[len(last.Messages)-1]
+	if len(lastMsg.ToolResults) != 1 || !lastMsg.ToolResults[0].IsError {
+		t.Fatalf("expected an error ToolResult for the rejected submit, got %+v", lastMsg.ToolResults)
+	}
+	if got := lastMsg.ToolResults[0].Content; !strings.Contains(got, "verdict is required") {
+		t.Fatalf("ToolResult = %q, want the validator's message", got)
+	}
+}
+
+func setupForcedRejectedSubmitRetried(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	st := &scriptedStepper{steps: []model.StepResponse{
+		{ToolCalls: []model.ToolCall{toolCall("1", "submit_review", `{"wrong":"shape"}`)}},
+		{ToolCalls: []model.ToolCall{toolCall("2", "submit_review", validSubmitInput)}},
+	}}
+	return st, nil, st
+}
+
+func checkForcedRejectedSubmitRetried(t *testing.T, result Result, _ []StepEvent, scripted *scriptedStepper) {
+	if string(result.Submitted) != validSubmitInput {
+		t.Fatalf("Submitted = %s, want %s", result.Submitted, validSubmitInput)
+	}
+	// The retry carries the validator's message and is told to submit
+	// again.
+	last := scripted.calls[1]
+	results := last.Messages[len(last.Messages)-1].ToolResults
+	if len(results) != 1 || !results[0].IsError || !strings.Contains(results[0].Content, "verdict is required") || !toldToSubmit(last) {
+		t.Fatalf("retry request = %+v, want the rejection and the submit instruction", last.Messages)
+	}
+}
+
+// holdFallback is a Fallback that holds a refused input with a "fallback"
+// key to be an answer.
+func holdFallback(input json.RawMessage) bool { return strings.Contains(string(input), "fallback") }
+
+const fallbackSubmitInput = `{"fallback":"x"}`
+
+// setupForcedFallbackTaken submits an input rejectVerdict refuses and
+// holdFallback holds, then one it does not hold, then prose, so the forced
+// retries run out.
+func setupForcedFallbackTaken(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	st := &scriptedStepper{steps: []model.StepResponse{
+		{ToolCalls: []model.ToolCall{toolCall("1", "submit_review", fallbackSubmitInput)}},
+		{ToolCalls: []model.ToolCall{toolCall("2", "submit_review", `{"wrong":"shape"}`)}},
+		{Text: "done"},
+	}}
+	return st, nil, st
+}
+
+func checkForcedFallbackTaken(t *testing.T, result Result, _ []StepEvent, _ *scriptedStepper) {
+	if string(result.Submitted) != fallbackSubmitInput {
+		t.Fatalf("Submitted = %s, want the held input %s", result.Submitted, fallbackSubmitInput)
+	}
+	if !strings.Contains(result.Refused, "verdict is required") || result.Err != "" {
+		t.Fatalf("Refused = %q, Err = %q; want the held input's refusal and no error", result.Refused, result.Err)
+	}
+	// The conversation ends with the answer that carried the held input,
+	// as a carried conversation expects.
+	c := result.Conversation
+	if c == nil {
+		t.Fatal("Conversation = nil")
+	}
+	last := c.Messages[len(c.Messages)-1]
+	if last.Role != model.RoleAssistant || len(last.ToolCalls) != 1 || last.ToolCalls[0].ID != "1" {
+		t.Fatalf("last message = %+v, want the answer that carried the held input", last)
+	}
+}
+
+// setupForcedNothingHeld submits only inputs holdFallback does not hold.
+func setupForcedNothingHeld(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	st := &scriptedStepper{steps: []model.StepResponse{
+		{ToolCalls: []model.ToolCall{toolCall("1", "submit_review", `{"wrong":"shape"}`)}},
+		{ToolCalls: []model.ToolCall{toolCall("2", "submit_review", `{"wrong":"shape"}`)}},
+		{ToolCalls: []model.ToolCall{toolCall("3", "submit_review", `{"wrong":"shape"}`)}},
+	}}
+	return st, nil, st
+}
+
+func checkNothingSubmitted(t *testing.T, result Result, _ []StepEvent, _ *scriptedStepper) {
+	if result.Submitted != nil || result.Refused != "" {
+		t.Fatalf("Submitted = %s, Refused = %q; want neither", result.Submitted, result.Refused)
+	}
+}
+
+// setupStepperErrorAfterHeldInput submits a held input, then the script
+// runs out and the stepper errors.
+func setupStepperErrorAfterHeldInput(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	st := &scriptedStepper{steps: []model.StepResponse{
+		{ToolCalls: []model.ToolCall{toolCall("1", "submit_review", fallbackSubmitInput)}},
+	}}
+	return st, nil, st
+}
+
+func checkFallbackSubmitted(t *testing.T, result Result, _ []StepEvent, _ *scriptedStepper) {
+	if string(result.Submitted) != fallbackSubmitInput || result.Refused == "" {
+		t.Fatalf("Submitted = %s, Refused = %q; want the held input and its refusal", result.Submitted, result.Refused)
+	}
+}
+
+// cancelAfterScriptStepper answers from its script, then cancels the Run's
+// ctx and reports it.
+type cancelAfterScriptStepper struct {
+	scriptedStepper
+	cancel context.CancelFunc
+}
+
+func (s *cancelAfterScriptStepper) Step(ctx context.Context, req model.StepRequest) (model.StepResponse, error) {
+	if len(s.calls) == len(s.steps) {
+		s.cancel()
+		return model.StepResponse{}, ctx.Err()
+	}
+	return s.scriptedStepper.Step(ctx, req)
+}
+
+func setupCanceledAfterHeldInput(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	st := &cancelAfterScriptStepper{cancel: cancel, steps: []model.StepResponse{
+		{ToolCalls: []model.ToolCall{toolCall("1", "submit_review", fallbackSubmitInput)}},
+	}}
+	return st, ctx, &st.scriptedStepper
+}
+
+// setupForcedNeverSubmits answers every forced step with an invalid
+// submission, prose, or a tool call, so the retries run out.
+func setupForcedNeverSubmits(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	st := &scriptedStepper{steps: []model.StepResponse{
+		{ToolCalls: []model.ToolCall{toolCall("1", "submit_review", `{not json`)}},
+		{Text: "let me look once more"},
+		{ToolCalls: []model.ToolCall{toolCall("3", "noop", `{}`)}},
+	}}
+	return st, nil, st
+}
+
+func checkForcedNeverSubmits(t *testing.T, result Result, events []StepEvent, scripted *scriptedStepper) {
 	if result.Submitted != nil {
 		t.Fatalf("Submitted = %s, want nil", result.Submitted)
 	}
-	if len(scripted.calls) != 1 {
-		t.Fatalf("expected exactly 1 call to the stepper, got %d", len(scripted.calls))
+	if len(scripted.calls) != 1+forcedRetries {
+		t.Fatalf("%d calls to the stepper, want the forced step and %d retries", len(scripted.calls), forcedRetries)
+	}
+	for i, call := range scripted.calls {
+		if !toldToSubmit(call) {
+			t.Fatalf("request %d = %+v, want the submit instruction", i, call.Messages)
+		}
+	}
+	// The tool the model called instead of submitting was refused, not run.
+	if results := scripted.calls[2].Messages[len(scripted.calls[2].Messages)-1].ToolResults; len(results) != 0 {
+		t.Fatalf("the prose step's retry carries tool results: %+v", results)
+	}
+	if events[2].OutputBytes != 0 || !strings.Contains(result.Err, "3 step(s)") {
+		t.Fatalf("event = %+v, err = %q; want the tool refused and the forced steps counted", events[2], result.Err)
+	}
+}
+
+func setupForcedToolCallRefused(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	st := &scriptedStepper{steps: []model.StepResponse{
+		{ToolCalls: []model.ToolCall{toolCall("1", "noop", `{}`)}},
+		{ToolCalls: []model.ToolCall{toolCall("2", "submit_review", validSubmitInput)}},
+	}}
+	return st, nil, st
+}
+
+func checkForcedToolCallRefused(t *testing.T, result Result, events []StepEvent, scripted *scriptedStepper) {
+	if string(result.Submitted) != validSubmitInput {
+		t.Fatalf("Submitted = %s, want %s", result.Submitted, validSubmitInput)
+	}
+	last := scripted.calls[1]
+	results := last.Messages[len(last.Messages)-1].ToolResults
+	if len(results) != 1 || !results[0].IsError || results[0].Content != (Run{Submit: testSubmitDef}).onlySubmitText() || events[0].OutputBytes != 0 {
+		t.Fatalf("retry request = %+v, events = %+v; want the tool refused unrun", last.Messages, events)
 	}
 }
 
@@ -193,12 +376,12 @@ func checkTextOnlyTwiceStopsNoSubmit(t *testing.T, _ Result, events []StepEvent,
 	last := scripted.calls[len(scripted.calls)-1]
 	found := false
 	for _, m := range last.Messages {
-		if m.Role == model.RoleUser && m.Text == nudgeText+testSubmitDef.Name {
+		if m.Role == model.RoleUser && m.Text == (Run{Submit: testSubmitDef}).nudgeText() {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("nudge message %q not found in %+v", nudgeText, last.Messages)
+		t.Fatalf("nudge message %q not found in %+v", (Run{Submit: testSubmitDef}).nudgeText(), last.Messages)
 	}
 }
 
@@ -211,7 +394,7 @@ func setupNudgeOncePerRunNotResetByToolTurn(t *testing.T) (model.Stepper, contex
 	return st, nil, st
 }
 
-func setupBudgetForcesToolChoice(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+func setupBudgetTellsToSubmit(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
 	st := &scriptedStepper{steps: []model.StepResponse{
 		{ToolCalls: []model.ToolCall{toolCall("1", "noop", `{}`)}, Usage: model.Usage{Input: 80, Output: 10}},
 		{ToolCalls: []model.ToolCall{toolCall("2", "submit_review", validSubmitInput)}},
@@ -219,18 +402,139 @@ func setupBudgetForcesToolChoice(t *testing.T) (model.Stepper, context.Context, 
 	return st, nil, st
 }
 
-func checkBudgetForcesToolChoice(t *testing.T, _ Result, _ []StepEvent, scripted *scriptedStepper) {
+func checkBudgetTellsToSubmit(t *testing.T, _ Result, _ []StepEvent, scripted *scriptedStepper) {
 	if len(scripted.calls) != 2 {
 		t.Fatalf("expected 2 calls, got %d", len(scripted.calls))
 	}
-	forcedReq := scripted.calls[1]
-	if forcedReq.ToolChoice.Mode != model.ToolChoiceTool || forcedReq.ToolChoice.Name != "submit_review" {
-		t.Fatalf("ToolChoice = %+v, want a forced submit_review", forcedReq.ToolChoice)
+	// The step is told to submit in its last user message, with the tool
+	// choice left to the model, never forced.
+	if !toldToSubmit(scripted.calls[1]) || scripted.calls[1].ToolChoice != (model.ToolChoice{}) {
+		t.Fatalf("second request = %+v, want the submit instruction in its last user message and no tool choice", scripted.calls[1])
 	}
-	// The first request must NOT have been forced: the budget only crosses
+	// The first request must NOT have been told: the budget only crosses
 	// the 90% threshold after step 0's usage lands.
-	if scripted.calls[0].ToolChoice.Mode == model.ToolChoiceTool {
-		t.Fatalf("first request was forced, want unforced: %+v", scripted.calls[0].ToolChoice)
+	if toldToSubmit(scripted.calls[0]) {
+		t.Fatalf("first request was told to submit: %+v", scripted.calls[0].Messages)
+	}
+}
+
+// toldToSubmit reports whether req's last message is a user message that
+// ends with the submit instruction.
+func toldToSubmit(req model.StepRequest) bool {
+	last := req.Messages[len(req.Messages)-1]
+	return last.Role == model.RoleUser && strings.HasSuffix(last.Text, (Run{Submit: testSubmitDef}).submitNowText())
+}
+
+// setupBudgetForcedNeverSubmits crosses the budget's 90% mark on the first
+// step, then never submits while staying under the budget itself.
+func setupBudgetForcedNeverSubmits(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	st := &scriptedStepper{steps: []model.StepResponse{
+		{ToolCalls: []model.ToolCall{toolCall("1", "noop", `{}`)}, Usage: model.Usage{Input: 80, Output: 10}},
+		{ToolCalls: []model.ToolCall{toolCall("2", "noop", `{}`)}},
+		{ToolCalls: []model.ToolCall{toolCall("3", "noop", `{}`)}},
+		{ToolCalls: []model.ToolCall{toolCall("4", "noop", `{}`)}},
+	}}
+	return st, nil, st
+}
+
+func checkBudgetForcedNeverSubmits(t *testing.T, result Result, _ []StepEvent, scripted *scriptedStepper) {
+	if len(scripted.calls) != 2+forcedRetries || !strings.Contains(result.Err, "3 step(s)") {
+		t.Fatalf("%d calls, err %q; want a free step, a forced one and %d retries", len(scripted.calls), result.Err, forcedRetries)
+	}
+}
+
+func setupTruncatedSubmitStops(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	st := &scriptedStepper{steps: []model.StepResponse{
+		{ToolCalls: []model.ToolCall{toolCall("1", "submit_review", `{"verdict":"app`)}, Stop: model.StopMaxTokens},
+		{ToolCalls: []model.ToolCall{toolCall("2", "submit_review", validSubmitInput)}},
+	}}
+	return st, nil, st
+}
+
+func checkTruncatedSubmitStops(t *testing.T, result Result, _ []StepEvent, scripted *scriptedStepper) {
+	if len(scripted.calls) != 1 {
+		t.Fatalf("expected the loop to stop without retrying, got %d calls", len(scripted.calls))
+	}
+	if !strings.Contains(result.Err, "cut off") || !strings.Contains(result.Err, "16384") {
+		t.Fatalf("Err = %q, want the cap the submission was cut off at", result.Err)
+	}
+}
+
+// lastUserText is the text of req's last message, "" when it is not a
+// user message.
+func lastUserText(req model.StepRequest) string {
+	last := req.Messages[len(req.Messages)-1]
+	if last.Role != model.RoleUser {
+		return ""
+	}
+	return last.Text
+}
+
+func setupCutOffStepGoesOn(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	st := &scriptedStepper{steps: []model.StepResponse{
+		{Stop: model.StopMaxTokens},
+		{Text: "still thinking..."},
+		{ToolCalls: []model.ToolCall{toolCall("1", "submit_review", validSubmitInput)}},
+	}}
+	return st, nil, st
+}
+
+func checkCutOffStepGoesOn(t *testing.T, _ Result, _ []StepEvent, scripted *scriptedStepper) {
+	run := Run{Submit: testSubmitDef}
+	if got, want := lastUserText(scripted.calls[1]), run.cutOffText(DefaultLimits.MaxOutputTokensPerStep); got != want {
+		t.Fatalf("after the cut-off step the model was told %q, want %q", got, want)
+	}
+	// The cut-off step left the nudge for a turn that answered in prose.
+	if got := lastUserText(scripted.calls[2]); got != run.nudgeText() {
+		t.Fatalf("after the prose turn the model was told %q, want the nudge", got)
+	}
+}
+
+// setupCutOffStepsInARow is cut off twice, calls a tool, which starts the
+// count again, then is cut off until the run ends.
+func setupCutOffStepsInARow(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	cut := model.StepResponse{Stop: model.StopMaxTokens}
+	st := &scriptedStepper{steps: []model.StepResponse{
+		cut, cut,
+		{ToolCalls: []model.ToolCall{toolCall("1", "noop", `{}`)}},
+		cut, cut, cut, cut,
+	}}
+	return st, nil, st
+}
+
+// setupCutOffAfterProse is cut off twice, answers in prose, which starts
+// the count again, then is cut off before it submits.
+func setupCutOffAfterProse(t *testing.T) (model.Stepper, context.Context, *scriptedStepper) {
+	cut := model.StepResponse{Stop: model.StopMaxTokens}
+	st := &scriptedStepper{steps: []model.StepResponse{
+		cut, cut,
+		{Text: "still thinking..."},
+		cut,
+		{ToolCalls: []model.ToolCall{toolCall("1", "submit_review", validSubmitInput)}},
+	}}
+	return st, nil, st
+}
+
+func checkCutOffAfterProse(t *testing.T, _ Result, _ []StepEvent, scripted *scriptedStepper) {
+	run := Run{Submit: testSubmitDef}
+	goOn := run.cutOffText(DefaultLimits.MaxOutputTokensPerStep)
+	want := []string{"", goOn, goOn, run.nudgeText(), goOn}
+	for i, call := range scripted.calls {
+		if got := lastUserText(call); got != want[i] {
+			t.Fatalf("request %d ends with %q, want %q", i, got, want[i])
+		}
+	}
+}
+
+func checkCutOffStepsInARow(t *testing.T, _ Result, _ []StepEvent, scripted *scriptedStepper) {
+	run := Run{Submit: testSubmitDef}
+	goOn := run.cutOffText(DefaultLimits.MaxOutputTokensPerStep)
+	// The opening message and the tool's results carry no text.
+	want := []string{"", goOn, goOn, "", goOn, goOn, run.nudgeText()}
+	for i, call := range scripted.calls {
+		if got := lastUserText(call); got != want[i] {
+			t.Fatalf("request %d ends with %q, want %q", i, got, want[i])
+		}
 	}
 }
 
@@ -252,16 +556,25 @@ func setupMaxStepsReachedWithoutSubmit(t *testing.T) (model.Stepper, context.Con
 	st := &scriptedStepper{steps: []model.StepResponse{
 		{ToolCalls: []model.ToolCall{toolCall("1", "noop", `{}`)}},
 		{ToolCalls: []model.ToolCall{toolCall("2", "noop", `{}`)}},
+		{ToolCalls: []model.ToolCall{toolCall("3", "noop", `{}`)}},
+		{ToolCalls: []model.ToolCall{toolCall("4", "noop", `{}`)}},
 	}}
 	return st, nil, st
 }
 
-func checkMaxStepsReachedWithoutSubmit(t *testing.T, _ Result, _ []StepEvent, scripted *scriptedStepper) {
-	// The final step must still have been forced to offer submit_review,
-	// even though the model chose not to take it.
-	last := scripted.calls[len(scripted.calls)-1]
-	if last.ToolChoice.Mode != model.ToolChoiceTool || last.ToolChoice.Name != "submit_review" {
-		t.Fatalf("final ToolChoice = %+v, want a forced submit_review", last.ToolChoice)
+func checkMaxStepsReachedWithoutSubmit(t *testing.T, result Result, _ []StepEvent, scripted *scriptedStepper) {
+	// The last step and each retry must have been told to submit, even
+	// though the model chose not to; the first, free, step must not.
+	if toldToSubmit(scripted.calls[0]) {
+		t.Fatalf("first request was told to submit: %+v", scripted.calls[0].Messages)
+	}
+	for i, call := range scripted.calls[1:] {
+		if !toldToSubmit(call) {
+			t.Fatalf("request %d = %+v, want the submit instruction in its last user message", i+1, call.Messages)
+		}
+	}
+	if !strings.Contains(result.Err, "3 step(s)") {
+		t.Fatalf("Err = %q, want the forced steps counted", result.Err)
 	}
 }
 
@@ -358,8 +671,10 @@ func checkToolOutputTruncated(t *testing.T, _ Result, _ []StepEvent, scripted *s
 		t.Fatalf("ToolResults = %+v, want exactly 1", lastMsg.ToolResults)
 	}
 	content := lastMsg.ToolResults[0].Content
-	if !strings.HasPrefix(content, "abcde") || !strings.Contains(content, "[truncated 5 bytes]") {
-		t.Fatalf("content = %q, want a 5-byte prefix plus a truncation marker", content)
+	kept := strings.LastIndex(content, "\n[truncated ")
+	if len(content) > 40 || !strings.HasPrefix(content, "abcdefghij") || kept < 0 ||
+		!strings.HasSuffix(content, fmt.Sprintf("\n[truncated %d bytes]", 100-kept)) {
+		t.Fatalf("content = %q, want at most 40 bytes: a prefix and a note of the rest", content)
 	}
 }
 
@@ -443,6 +758,54 @@ func checkStepEventToolsAndOutputBytesPopulated(t *testing.T, _ Result, events [
 	}
 }
 
+// outageStepper fails transiently outage times, then answers with a
+// submit_review.
+type outageStepper struct {
+	outage, calls int
+}
+
+func (s *outageStepper) Step(context.Context, model.StepRequest) (model.StepResponse, error) {
+	s.calls++
+	if s.calls <= s.outage {
+		return model.StepResponse{}, fmt.Errorf("model: review: %w", io.ErrUnexpectedEOF)
+	}
+	return model.StepResponse{ToolCalls: []model.ToolCall{{ID: "1", Name: testSubmitDef.Name, Input: json.RawMessage(`{}`)}}}, nil
+}
+
+func TestRunWaitsOutATransientStepFailure(t *testing.T) {
+	old := stepRetryWaits
+	stepRetryWaits = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { stepRetryWaits = old })
+	tests := []struct {
+		name      string
+		outage    int
+		wantStop  StopReason
+		wantCalls int
+	}{
+		{"an outage shorter than the waits is answered", 2, StopSubmitted, 3},
+		{"an outage past the waits ends the run", 5, StopError, 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &outageStepper{outage: tt.outage}
+			res := Run{Stepper: s, Model: "m", User: "review", Submit: testSubmitDef}.Do(t.Context())
+			if res.Stop != tt.wantStop || s.calls != tt.wantCalls {
+				t.Fatalf("stop = %s (%s) after %d calls, want %s after %d", res.Stop, res.Err, s.calls, tt.wantStop, tt.wantCalls)
+			}
+		})
+	}
+
+	t.Run("a wait the ctx cut ends the run canceled", func(t *testing.T) {
+		stepRetryWaits = []time.Duration{time.Hour}
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		defer cancel()
+		s := &outageStepper{outage: 5}
+		if res := (Run{Stepper: s, Model: "m", User: "review", Submit: testSubmitDef}).Do(ctx); res.Stop != StopCanceled || s.calls != 1 {
+			t.Fatalf("stop = %s after %d calls, want canceled after one", res.Stop, s.calls)
+		}
+	})
+}
+
 func TestRun(t *testing.T) {
 	cases := []runCase{
 		{
@@ -472,14 +835,83 @@ func TestRun(t *testing.T) {
 		},
 		{
 			// MaxSteps: 1 makes the only step the last step, which forces
-			// submit_review; an invalid submit on a forced step must not
-			// get a second chance.
-			name:      "forced_invalid_submit_stops_no_submit",
+			// submit_review; a forced step that does not submit is retried
+			// until the retries run out, each told to submit again, and a
+			// tool called instead is refused rather than run.
+			name:      "forced_never_submits_stops_after_retries",
+			tools:     []Tool{&fakeTool{name: "noop", output: "ok"}},
 			limits:    Limits{MaxSteps: 1},
-			setup:     setupForcedInvalidSubmitStopsNoSubmit,
-			wantStop:  StopNoSubmit,
+			setup:     setupForcedNeverSubmits,
+			wantStop:  StopMaxSteps,
+			wantSteps: 1 + forcedRetries,
+			check:     checkForcedNeverSubmits,
+		},
+		{
+			name:      "forced_tool_call_refused_then_submit",
+			tools:     []Tool{&fakeTool{name: "noop", output: "ok"}},
+			limits:    Limits{MaxSteps: 1},
+			setup:     setupForcedToolCallRefused,
+			wantStop:  StopSubmitted,
+			wantSteps: 2,
+			check:     checkForcedToolCallRefused,
+		},
+		{
+			name:      "rejected_submit_then_valid",
+			validate:  rejectVerdict,
+			setup:     setupRejectedSubmitThenValid,
+			wantStop:  StopSubmitted,
+			wantSteps: 2,
+			check:     checkRejectedSubmitThenValid,
+		},
+		{
+			name:      "forced_rejected_submit_retried",
+			limits:    Limits{MaxSteps: 1},
+			validate:  rejectVerdict,
+			setup:     setupForcedRejectedSubmitRetried,
+			wantStop:  StopSubmitted,
+			wantSteps: 2,
+			check:     checkForcedRejectedSubmitRetried,
+		},
+		{
+			// The forced retries run out, and the Run ends with the last
+			// refused input Fallback held rather than with none.
+			name:      "forced_retries_spent_takes_fallback",
+			limits:    Limits{MaxSteps: 1},
+			validate:  rejectVerdict,
+			fallback:  holdFallback,
+			setup:     setupForcedFallbackTaken,
+			wantStop:  StopSubmitted,
+			wantSteps: 1 + forcedRetries,
+			check:     checkForcedFallbackTaken,
+		},
+		{
+			name:      "forced_retries_spent_nothing_held",
+			limits:    Limits{MaxSteps: 1},
+			validate:  rejectVerdict,
+			fallback:  holdFallback,
+			setup:     setupForcedNothingHeld,
+			wantStop:  StopMaxSteps,
+			wantSteps: 1 + forcedRetries,
+			check:     checkNothingSubmitted,
+		},
+		{
+			name:      "stepper_error_takes_fallback",
+			validate:  rejectVerdict,
+			fallback:  holdFallback,
+			setup:     setupStepperErrorAfterHeldInput,
+			wantStop:  StopSubmitted,
 			wantSteps: 1,
-			check:     checkForcedInvalidSubmitStopsNoSubmit,
+			check:     checkFallbackSubmitted,
+		},
+		{
+			// A canceled Run posts nothing, whatever it held.
+			name:      "canceled_does_not_take_fallback",
+			validate:  rejectVerdict,
+			fallback:  holdFallback,
+			setup:     setupCanceledAfterHeldInput,
+			wantStop:  StopCanceled,
+			wantSteps: 1,
+			check:     checkNothingSubmitted,
 		},
 		{
 			name:      "text_only_twice_stops_no_submit",
@@ -499,13 +931,65 @@ func TestRun(t *testing.T) {
 			wantSteps: 3,
 		},
 		{
-			name:      "budget_forces_tool_choice",
+			name:      "budget_tells_to_submit",
 			tools:     []Tool{&fakeTool{name: "noop", output: "ok"}},
 			limits:    Limits{MaxTokens: 100},
-			setup:     setupBudgetForcesToolChoice,
+			setup:     setupBudgetTellsToSubmit,
 			wantStop:  StopSubmitted,
 			wantSteps: 2,
-			check:     checkBudgetForcesToolChoice,
+			check:     checkBudgetTellsToSubmit,
+		},
+		{
+			// Forced by the budget rather than the step cap, the retries
+			// still run out, and the run is no submit: the budget itself
+			// was not reached.
+			name:      "budget_forced_never_submits_stops_no_submit",
+			tools:     []Tool{&fakeTool{name: "noop", output: "ok"}},
+			limits:    Limits{MaxTokens: 100},
+			setup:     setupBudgetForcedNeverSubmits,
+			wantStop:  StopNoSubmit,
+			wantSteps: 2 + forcedRetries,
+			check:     checkBudgetForcedNeverSubmits,
+		},
+		{
+			// A submission the output cap cut off ends the run at once:
+			// sent back as an error, the model would only be cut off
+			// again.
+			name:      "truncated_submit_stops",
+			setup:     setupTruncatedSubmitStops,
+			wantStop:  StopTruncated,
+			wantSteps: 1,
+			check:     checkTruncatedSubmitStops,
+		},
+		{
+			// A step the output cap cut off before any tool call had not
+			// finished: it is told to go on, and the nudge is kept for a
+			// turn that answers in prose.
+			name:      "cut_off_step_goes_on",
+			setup:     setupCutOffStepGoesOn,
+			wantStop:  StopSubmitted,
+			wantSteps: 3,
+			check:     checkCutOffStepGoesOn,
+		},
+		{
+			// Cut off more than cutOffRetries times in a row, the model is
+			// nudged to submit, and the next cut-off ends the run as a turn
+			// with no tool call would.
+			name:      "cut_off_steps_in_a_row_fall_back_to_the_nudge",
+			tools:     []Tool{&fakeTool{name: "noop", output: "ok"}},
+			setup:     setupCutOffStepsInARow,
+			wantStop:  StopNoSubmit,
+			wantSteps: 7,
+			check:     checkCutOffStepsInARow,
+		},
+		{
+			// A turn in prose ends a run of cut-off steps as a tool call
+			// does: the cut-off after it is told to go on.
+			name:      "prose_ends_a_run_of_cut_off_steps",
+			setup:     setupCutOffAfterProse,
+			wantStop:  StopSubmitted,
+			wantSteps: 5,
+			check:     checkCutOffAfterProse,
 		},
 		{
 			name:      "budget_exhausted_stops_immediately",
@@ -522,7 +1006,7 @@ func TestRun(t *testing.T) {
 			limits:    Limits{MaxSteps: 2},
 			setup:     setupMaxStepsReachedWithoutSubmit,
 			wantStop:  StopMaxSteps,
-			wantSteps: 2,
+			wantSteps: 2 + forcedRetries,
 			check:     checkMaxStepsReachedWithoutSubmit,
 		},
 		{
@@ -577,8 +1061,8 @@ func TestRun(t *testing.T) {
 		},
 		{
 			name:      "tool_output_truncated",
-			tools:     []Tool{&fakeTool{name: "big", output: "abcdefghij"}},
-			limits:    Limits{MaxToolOutputBytes: 5},
+			tools:     []Tool{&fakeTool{name: "big", output: strings.Repeat("abcdefghij", 10)}},
+			limits:    Limits{MaxToolOutputBytes: 40},
 			setup:     setupToolOutputTruncated,
 			wantStop:  StopSubmitted,
 			wantSteps: 2,
@@ -630,11 +1114,13 @@ func TestRun(t *testing.T) {
 			}
 			var events []StepEvent
 			run := Run{
-				Stepper: stepper,
-				Tools:   tt.tools,
-				Submit:  testSubmitDef,
-				Limits:  tt.limits,
-				OnStep:  func(e StepEvent) { events = append(events, e) },
+				Stepper:  stepper,
+				Tools:    tt.tools,
+				Submit:   testSubmitDef,
+				Validate: tt.validate,
+				Fallback: tt.fallback,
+				Limits:   tt.limits,
+				OnStep:   func(e StepEvent) { events = append(events, e) },
 			}
 
 			result := run.Do(ctx)
@@ -652,33 +1138,10 @@ func TestRun(t *testing.T) {
 	}
 }
 
-func TestStopReasonValid(t *testing.T) {
-	tests := []struct {
-		reason StopReason
-		want   bool
-	}{
-		{StopSubmitted, true},
-		{StopMaxSteps, true},
-		{StopBudget, true},
-		{StopNoSubmit, true},
-		{StopCanceled, true},
-		{StopError, true},
-		{StopReason(""), false},
-		{StopReason("bogus"), false},
-	}
-	for _, tt := range tests {
-		t.Run(string(tt.reason), func(t *testing.T) {
-			if got := tt.reason.Valid(); got != tt.want {
-				t.Errorf("StopReason(%q).Valid() = %v, want %v", tt.reason, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestLimitsWithDefaults(t *testing.T) {
 	t.Run("all zero", func(t *testing.T) {
 		got := Limits{}.WithDefaults()
-		want := Limits{MaxSteps: 60, MaxToolOutputBytes: 32 << 10, MaxTokens: 4_000_000, MaxOutputTokensPerStep: 8192}
+		want := Limits{MaxSteps: 60, MaxToolOutputBytes: 32 << 10, MaxTokens: 4_000_000, MaxOutputTokensPerStep: 16384}
 		if got != want {
 			t.Fatalf("WithDefaults() = %+v, want %+v", got, want)
 		}
@@ -689,7 +1152,7 @@ func TestLimitsWithDefaults(t *testing.T) {
 		if got.MaxSteps != 5 || got.MaxTokens != 10 {
 			t.Fatalf("WithDefaults() = %+v, want set fields preserved", got)
 		}
-		if got.MaxToolOutputBytes != 32<<10 || got.MaxOutputTokensPerStep != 8192 {
+		if got.MaxToolOutputBytes != 32<<10 || got.MaxOutputTokensPerStep != 16384 {
 			t.Fatalf("WithDefaults() = %+v, want zero fields filled", got)
 		}
 	})

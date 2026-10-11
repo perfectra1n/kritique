@@ -20,28 +20,39 @@ var ErrGatewayToken = errors.New("store: gateway token is not valid")
 
 // GatewayGrant is what a run token lets its bearer do at the model gateway.
 type GatewayGrant struct {
-	RunID, TenantID, RepositoryID string
-	// ReviewID or TaskRunID, exactly one, is what the run works on.
-	ReviewID, TaskRunID string
+	RunID, AccountID, ReviewID, RepositoryID string
+	// FollowupCommentID is the comment a follow-up's run answers, 0 for a
+	// review's run. A follow-up's ReviewID is the pull request's last
+	// completed review, "" without one.
+	FollowupCommentID int64
+	// TaskRunID is the task run an agentic task's run works on, "" for a
+	// review's or a follow-up's; a task run's token has no review.
+	TaskRunID string
 	// Model and Fallback are the provider/model references the run may
-	// call; Fallback may be empty.
-	Model, Fallback string
+	// call; Fallback may be empty. Effort is how hard they reason, a
+	// model.Effort, or empty for the provider's default.
+	Model, Fallback, Effort string
 	// Budget is the tokens the run may spend, Spent what it has.
 	Budget, Spent int64
+	// Continues is the run whose kept conversation a review's run may
+	// carry on, "" for none, and Session the conversation its steps are
+	// sent as, "" for its own.
+	Continues, Session string
 }
 
 // MintGatewayToken stores a new run token for g, valid until expires, and
 // returns it. Only its SHA-256 is kept.
 func (s *Store) MintGatewayToken(ctx context.Context, g GatewayGrant, expires time.Time) (string, error) {
 	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("store: mint gateway token: %w", err)
-	}
+	_, _ = rand.Read(raw) // never fails
 	token := gatewayTokenPrefix + hex.EncodeToString(raw)
 	_, err := s.app.Exec(ctx, `INSERT INTO gateway_tokens
-		(token_hash, runner_run_id, tenant_id, review_id, task_run_id, repository_id, model, fallback, budget_tokens, expires_at)
-		VALUES ($1, $2, $3, nullif($4, '')::uuid, nullif($5, '')::uuid, $6, $7, $8, $9, $10)`,
-		tokenHash(token), g.RunID, g.TenantID, g.ReviewID, g.TaskRunID, g.RepositoryID, g.Model, g.Fallback, g.Budget, expires)
+		(token_hash, runner_run_id, account_id, review_id, repository_id, model, fallback, effort, budget_tokens, expires_at, followup_comment_id,
+		 continues, session, task_run_id)
+		VALUES ($1, $2, $3, nullif($4, '')::uuid, $5, $6, $7, $8, $9, $10, nullif($11::bigint, 0), nullif($12, '')::uuid, $13,
+		 nullif($14, '')::uuid)`,
+		tokenHash(token), g.RunID, g.AccountID, g.ReviewID, g.RepositoryID, g.Model, g.Fallback, g.Effort, g.Budget, expires, g.FollowupCommentID,
+		g.Continues, g.Session, g.TaskRunID)
 	if err != nil {
 		return "", fmt.Errorf("store: mint gateway token: %w", err)
 	}
@@ -55,9 +66,12 @@ func (s *Store) LookupGatewayToken(ctx context.Context, token string) (GatewayGr
 		return GatewayGrant{}, ErrGatewayToken
 	}
 	var g GatewayGrant
-	err := s.app.QueryRow(ctx, `SELECT runner_run_id, tenant_id, coalesce(review_id::text, ''), coalesce(task_run_id::text, ''), repository_id,
-		model, fallback, budget_tokens, spent_tokens FROM gateway_tokens WHERE token_hash = $1 AND expires_at > now()`, tokenHash(token)).
-		Scan(&g.RunID, &g.TenantID, &g.ReviewID, &g.TaskRunID, &g.RepositoryID, &g.Model, &g.Fallback, &g.Budget, &g.Spent)
+	err := s.app.QueryRow(ctx, `SELECT runner_run_id, account_id, coalesce(review_id::text, ''), repository_id, model, fallback, effort,
+		budget_tokens, spent_tokens, coalesce(followup_comment_id, 0), coalesce(continues::text, ''), session,
+		coalesce(task_run_id::text, '')
+		FROM gateway_tokens WHERE token_hash = $1 AND expires_at > now()`, tokenHash(token)).
+		Scan(&g.RunID, &g.AccountID, &g.ReviewID, &g.RepositoryID, &g.Model, &g.Fallback, &g.Effort, &g.Budget, &g.Spent, &g.FollowupCommentID,
+			&g.Continues, &g.Session, &g.TaskRunID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return GatewayGrant{}, ErrGatewayToken
 	}

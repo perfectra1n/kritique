@@ -1,66 +1,82 @@
 <script lang="ts">
-  // Maps the active route to its page. Keyed so switching tenant or record
+  // Maps the active route to its page. Keyed so switching account or record
   // starts the page fresh (filters, cursors), while switching review tabs
-  // keeps the review page mounted.
+  // or the pull list's filters keeps the page mounted.
   import type { Route } from '../routes';
-  import Placeholder from '../Placeholder.svelte';
   import Overview from './Overview.svelte';
-  import Operator from './Operator.svelte';
-  import TenantOverview from './TenantOverview.svelte';
+  import Console from './Console.svelte';
+  import Analytics from './Analytics.svelte';
   import Repos from './Repos.svelte';
   import Repo from './Repo.svelte';
   import Pulls from './Pulls.svelte';
   import Pull from './Pull.svelte';
   import Review from './review/Review.svelte';
   import Queue from './Queue.svelte';
+  import InstanceQueue from './InstanceQueue.svelte';
+  import Preferences from './Preferences.svelte';
+  import Findings from './Findings.svelte';
+  import Rules from './Rules.svelte';
   import Usage from './Usage.svelte';
   import Followups from './Followups.svelte';
   import TaskRuns from './TaskRuns.svelte';
   import TaskRun from './TaskRun.svelte';
   import Admin from './admin/Admin.svelte';
+  import SettingsNav from './SettingsNav.svelte';
+  import { sectionOf } from '../sections';
 
   let { route }: { route: Route } = $props();
+  // The Configuration page lists its parts beside it, as the account's
+  // settings list their pages.
+  const settings = $derived(sectionOf(route) === 'settings' || route.name === 'console');
 
   function keyOf(r: Route): string {
     if (r.name === 'review') return JSON.stringify({ n: r.name, s: r.slug, id: r.id });
+    if (r.name === 'pulls' || r.name === 'findings' || r.name === 'tasks') return JSON.stringify({ n: r.name, s: r.slug });
     return JSON.stringify(r);
   }
   const key = $derived(keyOf(route));
 </script>
 
 <!-- data-route exposes the parsed route to the router tests. -->
-<div class="route-host" data-route={JSON.stringify(route)}>
+<div class="route-host" class:with-subnav={settings} data-route={JSON.stringify(route)}>
+{#if settings}<SettingsNav {route} />{/if}
 {#key key}
   {#if route.name === 'overview'}
     <Overview />
-  {:else if route.name === 'operator'}
-    <Operator />
-  {:else if route.name === 'tenant'}
-    <TenantOverview slug={route.slug} />
+  {:else if route.name === 'console'}
+    <Console />
+  {:else if route.name === 'instanceQueue'}
+    <InstanceQueue />
+  {:else if route.name === 'preferences'}
+    <Preferences />
+  {:else if route.name === 'account'}
+    <Analytics slug={route.slug} />
   {:else if route.name === 'repos'}
     <Repos slug={route.slug} />
   {:else if route.name === 'repo'}
-    <Repo slug={route.slug} owner={route.owner} repo={route.repo} installation={route.installation} />
+    <Repo slug={route.slug} owner={route.owner} repo={route.repo} />
   {:else if route.name === 'pulls'}
-    <Pulls slug={route.slug} />
+    <Pulls slug={route.slug} filter={route.filter} />
   {:else if route.name === 'pull'}
-    <Pull slug={route.slug} owner={route.owner} repo={route.repo} number={route.number} installation={route.installation} />
+    <Pull slug={route.slug} owner={route.owner} repo={route.repo} number={route.number} />
   {:else if route.name === 'review'}
-    <Review slug={route.slug} id={route.id} tab={route.tab} />
+    <Review slug={route.slug} id={route.id} tab={route.tab} finding={route.finding} />
+  {:else if route.name === 'findings'}
+    <Findings slug={route.slug} filter={route.filter} />
+  {:else if route.name === 'rules'}
+    <Rules slug={route.slug} />
   {:else if route.name === 'queue'}
     <Queue slug={route.slug} />
   {:else if route.name === 'usage'}
     <Usage slug={route.slug} />
   {:else if route.name === 'followups'}
     <Followups slug={route.slug} />
-  {:else if route.name === 'taskRuns'}
-    <TaskRuns slug={route.slug} owner={route.owner} repo={route.repo} installation={route.installation} />
+  {:else if route.name === 'tasks'}
+    <TaskRuns slug={route.slug} filter={route.filter} />
   {:else if route.name === 'taskRun'}
     <TaskRun slug={route.slug} id={route.id} />
   {:else if route.name === 'admin'}
     <Admin slug={route.slug} section={route.section} />
-  {:else}
-    <Placeholder {route} />
   {/if}
 {/key}
 </div>

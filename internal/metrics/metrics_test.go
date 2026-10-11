@@ -15,13 +15,14 @@ func TestMetricsRecordAndNilIsSafe(t *testing.T) {
 	none.Review("t", "completed", time.Second)
 	none.ModelCall("t", "m", "review", "ok", 1, 0, 1, 0.1)
 	none.TranscriptWrite("review", "ok")
+	none.ConfidenceScored("t", 5, "low")
+	none.Leading(true)
 
 	reg := prometheus.NewRegistry()
 	m := New(reg)
 	m.Webhook("onedr0p-github", "enqueued")
 	m.Review("onedr0p", "completed", 12*time.Second)
-	m.Findings("onedr0p", "important", 2)
-	m.ContextChunks("onedr0p", "similar", 4)
+	m.Findings("onedr0p", "important", "correctness", 2)
 	m.IndexRun("onedr0p", "full", "completed", 565)
 	m.RunnerRun("onedr0p", "index", "success", 4*time.Second)
 	m.LeaseWait("onedr0p", "openai/gpt-6-sol", 5*time.Millisecond)
@@ -30,9 +31,9 @@ func TestMetricsRecordAndNilIsSafe(t *testing.T) {
 
 	want := `# HELP kritique_model_tokens_total Tokens spent, by role and direction (input, cached, output); cached is the part of input the provider served from its prompt cache.
 # TYPE kritique_model_tokens_total counter
-kritique_model_tokens_total{direction="cached",model="openai/gpt-6-sol",role="review",tenant="onedr0p"} 1574
-kritique_model_tokens_total{direction="input",model="openai/gpt-6-sol",role="review",tenant="onedr0p"} 1706
-kritique_model_tokens_total{direction="output",model="openai/gpt-6-sol",role="review",tenant="onedr0p"} 83
+kritique_model_tokens_total{account="onedr0p",direction="cached",model="openai/gpt-6-sol",role="review"} 1574
+kritique_model_tokens_total{account="onedr0p",direction="input",model="openai/gpt-6-sol",role="review"} 1706
+kritique_model_tokens_total{account="onedr0p",direction="output",model="openai/gpt-6-sol",role="review"} 83
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "kritique_model_tokens_total"); err != nil {
 		t.Fatal(err)
@@ -49,5 +50,21 @@ kritique_model_tokens_total{direction="output",model="openai/gpt-6-sol",role="re
 	m.TranscriptWrite("agent_step", "error")
 	if v := testutil.ToFloat64(m.transcripts.WithLabelValues("agent_step", "error")); v != 1 {
 		t.Fatalf("transcript writes = %v", v)
+	}
+	m.ConfidenceScored("onedr0p", 4, "high")
+	m.ConfidenceScored("onedr0p", 4, "high")
+	if v := testutil.ToFloat64(m.confidence.WithLabelValues("onedr0p", "4", "high")); v != 2 {
+		t.Fatalf("confidence scores = %v", v)
+	}
+	if v := testutil.ToFloat64(m.leader); v != 0 {
+		t.Fatalf("leader before leading = %v", v)
+	}
+	m.Leading(true)
+	if v := testutil.ToFloat64(m.leader); v != 1 {
+		t.Fatalf("leader while leading = %v", v)
+	}
+	m.Leading(false)
+	if v := testutil.ToFloat64(m.leader); v != 0 {
+		t.Fatalf("leader after stepping down = %v", v)
 	}
 }

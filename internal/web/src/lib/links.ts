@@ -1,40 +1,43 @@
 // Route builders for DTOs that carry a repository full name rather than
-// separate owner/repo fields.
-import type { Route } from './routes';
+// separate owner/repo fields, and the API paths of an account.
+import { slugPath, type Route } from './routes';
 import { splitRepo } from './format';
 
-// installation names which installation holding the repository a route or
-// action means; it is needed only where several hold the same owner/repo.
-export function pullRoute(slug: string, p: { repository: string; number: number }, installation?: string): Route {
-  const n = splitRepo(p.repository);
-  return { name: 'pull', slug, owner: n.owner, repo: n.repo, number: p.number, ...(installation ? { installation } : {}) };
+// pullKey names a pull request across the account's repositories.
+export function pullKey(p: { repository: string; number: number }): string {
+  return `${p.repository}#${p.number}`;
 }
 
-export function repoRoute(slug: string, fullName: string, installation?: string): Route {
+export function pullRoute(slug: string, p: { repository: string; number: number }): Route {
+  const n = splitRepo(p.repository);
+  return { name: 'pull', slug, owner: n.owner, repo: n.repo, number: p.number };
+}
+
+export function repoRoute(slug: string, fullName: string): Route {
   const n = splitRepo(fullName);
-  return { name: 'repo', slug, owner: n.owner, repo: n.repo, ...(installation ? { installation } : {}) };
+  return { name: 'repo', slug, owner: n.owner, repo: n.repo };
 }
 
-// installationQuery is the ?installation= an API path carries, or ''.
-export function installationQuery(installation?: string): string {
-  return installation ? `?installation=${encodeURIComponent(installation)}` : '';
+// accountApi is the API path of the account slug.
+export function accountApi(slug: string): string {
+  return `/api/v1/accounts/${slugPath(slug)}`;
 }
 
-// API paths for the dashboard actions.
-function tenantApi(slug: string): string {
-  return `/api/v1/tenants/${encodeURIComponent(slug)}`;
-}
-
-export function rerunPath(slug: string, p: { repository: string; number: number }, installation?: string): string {
+export function rerunPath(slug: string, p: { repository: string; number: number }): string {
   const n = splitRepo(p.repository);
-  return `${tenantApi(slug)}/pulls/${encodeURIComponent(n.owner)}/${encodeURIComponent(n.repo)}/${p.number}/rerun${installationQuery(installation)}`;
+  return `${accountApi(slug)}/pulls/${encodeURIComponent(n.owner)}/${encodeURIComponent(n.repo)}/${p.number}/rerun`;
 }
 
 export function cancelPath(slug: string, reviewId: string): string {
-  return `${tenantApi(slug)}/reviews/${encodeURIComponent(reviewId)}/cancel`;
+  return `${accountApi(slug)}/reviews/${encodeURIComponent(reviewId)}/cancel`;
 }
 
-export function reindexPath(slug: string, fullName: string, installation?: string): string {
+export function reindexPath(slug: string, fullName: string): string {
   const n = splitRepo(fullName);
-  return `${tenantApi(slug)}/repos/${encodeURIComponent(n.owner)}/${encodeURIComponent(n.repo)}/reindex${installationQuery(installation)}`;
+  return `${accountApi(slug)}/repos/${encodeURIComponent(n.owner)}/${encodeURIComponent(n.repo)}/reindex`;
+}
+
+export function turnedOnPath(slug: string, fullName: string): string {
+  const n = splitRepo(fullName);
+  return `${accountApi(slug)}/repos/${encodeURIComponent(n.owner)}/${encodeURIComponent(n.repo)}/turned-on`;
 }

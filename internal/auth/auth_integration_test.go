@@ -3,32 +3,23 @@
 package auth
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
 )
-
-func testEnv(t *testing.T, key string) string {
-	t.Helper()
-	v := os.Getenv(key)
-	if v == "" {
-		t.Skipf("%s not set", key)
-	}
-	return v
-}
 
 func randomHex(t *testing.T) string {
 	t.Helper()
@@ -49,93 +40,67 @@ func mustParseURL(t *testing.T, s string) *url.URL {
 }
 
 const authConfigYAML = `
-web:
-  signIn:
-    - name: corp
-      type: oidc
-      issuer: %[1]s
-      clientId: kritique-client
-      clientSecret: { env: KRITIQUE_TEST_TOKEN }
-    - name: gh
-      type: github
-      host: %[2]s
-      clientId: kritique-client
-      clientSecret: { env: KRITIQUE_TEST_TOKEN }
-    - name: fj
-      type: forgejo
-      host: %[3]s
-      clientId: kritique-client
-      clientSecret: { env: KRITIQUE_TEST_TOKEN }
-  operators: ["corp:op-oidc", "gh:OpGH", "email:ops@ops.example"]
-tenants:
-  - slug: auth-personal
-    installations:
-      - {name: auth-personal-bot, forge: github, host: "%[2]s", account: alice-gh, app: &app {clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}}
-  - slug: auth-acme
-    installations:
-      - {name: auth-acme-bot, forge: github, host: "%[2]s", account: acme, app: *app}
-  - slug: auth-widgets
-    installations:
-      - {name: auth-widgets-bot, forge: github, host: "%[2]s", account: Widgets, app: *app}
-  - slug: auth-pending
-    installations:
-      - {name: auth-pending-bot, forge: github, host: "%[2]s", account: pendco, app: *app}
-  - slug: auth-fj
-    installations:
-      - {name: auth-fj-bot, forge: forgejo, host: "%[3]s", account: fjorg, token: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
-  - slug: auth-invite
-    installations:
-      - {name: auth-invite-bot, forge: forgejo, host: "%[3]s", account: nobody, token: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
+auth:
+  admin:
+    password: { env: KRITIQUE_TEST_ADMIN_PASSWORD }
+  oidc:
+    issuer: %[1]s
+    clientId: kritique-client
+    clientSecret: { env: KRITIQUE_TEST_TOKEN }
+    rolesClaim: groups
+    roleMappingExpr: '"ops" in roles ? "admin" : ("staff" in roles ? "member" : "")'
+  github:
+    clientId: kritique-client
+    clientSecret: { env: KRITIQUE_TEST_TOKEN }
+    roleMappingExpr: 'login == "opgh" ? "admin" : ("mapped-org" in orgs ? dyn({"github/acme": "member"}) : "")'
+apps:
+  auth-personal-bot: {accounts: [alice-gh], clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
+  auth-acme-bot: {accounts: [acme], clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
+  auth-widgets-bot: {accounts: [Widgets], clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
+  auth-pending-bot: {accounts: [pendco], clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
+  auth-other-bot: {accounts: [nobody], clientId: Iv1.x, privateKey: {env: KRITIQUE_TEST_TOKEN}, webhookSecret: {env: KRITIQUE_TEST_TOKEN}}
 `
 
 type authEnv struct {
-	t        *testing.T
-	st       *store.Store
-	h        *Handler
-	mux      *http.ServeMux
-	current  *configfile.Current
-	file     *configfile.File
-	oidc     *fakeOAuth
-	gh, fj   *fakeOAuth
-	gh2      *fakeOAuth
-	now      time.Time
-	tenantID map[string]string
+	t         *testing.T
+	st        *store.Store
+	h         *Handler
+	mux       *http.ServeMux
+	current   *configfile.Current
+	file      *configfile.File
+	oidc      *fakeOAuth
+	oidc2     *fakeOAuth
+	gh        *fakeOAuth
+	now       time.Time
+	accountID map[string]string
 }
 
 func newAuthEnv(t *testing.T) *authEnv {
 	t.Helper()
-	ctx := context.Background()
-	st, err := store.Open(ctx, store.Options{
-		AppURL: testEnv(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: testEnv(t, "KRITIQUE_TEST_OWNER_URL"),
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	ctx := t.Context()
+	st := storetest.Open(t)
 	e := &authEnv{
-		t: t, st: st, oidc: newFakeOIDC(t), gh: newFakeGitHub(t), gh2: newFakeGitHub(t), fj: newFakeForgejo(t),
-		now: time.Now(), tenantID: map[string]string{},
+		t: t, st: st, oidc: newFakeOIDC(t), oidc2: newFakeOIDC(t), gh: newFakeGitHub(t),
+		now: time.Now(), accountID: map[string]string{},
 	}
 	t.Setenv("KRITIQUE_TEST_TOKEN", fakeClientSecret)
-	e.file, err = configfile.Parse(fmt.Appendf(nil, authConfigYAML, e.oidc.srv.URL, e.gh.srv.URL, e.fj.srv.URL))
+	t.Setenv("KRITIQUE_TEST_ADMIN_PASSWORD", adminTestPassword)
+	var err error
+	e.file, err = configfiletest.Parse(t, fmt.Sprintf(authConfigYAML, e.oidc.srv.URL))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if err := st.ApplyConfig(ctx, e.file, "auth-test"); err != nil {
+	if err := st.ApplyConfig(ctx, e.file); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
-	for i := range e.file.Tenants {
-		e.tenantID[e.file.Tenants[i].Slug] = e.file.Tenants[i].ID()
+	for i := range e.file.Accounts {
+		e.accountID[e.file.Accounts[i].Name] = e.file.Accounts[i].ID()
 	}
 	e.current = configfile.NewCurrent(e.file)
 	e.h, err = New(Config{
 		Store: st, Current: e.current, WebURL: mustParseURL(t, "https://kritique.example.com/dash/"),
-		HTTPClient: trustingClient(e.oidc, e.gh, e.gh2, e.fj), Now: func() time.Time { return e.now },
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		HTTPClient: trustingClient(e.gh, e.oidc, e.oidc2), Now: func() time.Time { return e.now },
+		Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -242,29 +207,27 @@ func (e *authEnv) principal(c *http.Cookie) *Principal {
 	return got
 }
 
-func (e *authEnv) roles(p *Principal) map[string]Role {
+// accounts lists the names of the running accounts p reads.
+func (e *authEnv) accounts(p *Principal) []string {
 	e.t.Helper()
 	if p == nil {
 		e.t.Fatal("no principal")
 	}
-	bySlug := map[string]Role{}
-	for slug, id := range e.tenantID {
-		if r, ok := p.Memberships[id]; ok {
-			bySlug[slug] = r
+	var out []string
+	for name, id := range e.accountID {
+		if p.CanRead(id) {
+			out = append(out, name)
 		}
 	}
-	return bySlug
+	slices.Sort(out)
+	return out
 }
 
-func assertRoles(t *testing.T, got, want map[string]Role) {
+func assertAccounts(t *testing.T, got []string, want ...string) {
 	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("roles = %v, want %v", got, want)
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Fatalf("roles = %v, want %v", got, want)
-		}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("accounts = %v, want %v", got, want)
 	}
 }
 
@@ -280,11 +243,14 @@ func assertFailed(t *testing.T, w *httptest.ResponseRecorder, status int, code s
 	}
 }
 
+// adminTestPassword is the local admin's password, KRITIQUE_TEST_ADMIN_PASSWORD.
+const adminTestPassword = "correct horse battery staple"
+
 func TestOIDCSignIn(t *testing.T) {
 	e := newAuthEnv(t)
-	alice := &fakeUser{Login: "alice-oidc-" + randomHex(t), Email: "alice@oidc.example", EmailVerified: true}
+	alice := &fakeUser{Login: "alice-oidc-" + randomHex(t), Email: "alice@oidc.example", EmailVerified: true, Groups: []string{"staff"}}
 
-	w := e.signIn("corp", e.oidc, alice, "#/reviews/42")
+	w := e.signIn("oidc", e.oidc, alice, "#/reviews/42")
 	if w.Code != http.StatusFound || w.Header().Get("Location") != "https://kritique.example.com/dash/#/reviews/42" {
 		t.Fatalf("callback: status %d location %q body %s", w.Code, w.Header().Get("Location"), w.Body.String())
 	}
@@ -298,223 +264,199 @@ func TestOIDCSignIn(t *testing.T) {
 		t.Fatalf("session cookie = %+v", cookie)
 	}
 	p := e.principal(cookie)
-	if p == nil || p.Identity.Provider != "corp" || p.Identity.Subject != alice.Login || p.Identity.Login != alice.Login ||
-		!p.Account.EmailVerified || p.Account.Email != alice.Email || p.Operator || len(p.Memberships) != 0 {
+	if p == nil || p.Identity.Provider != "oidc" || p.Identity.Subject != alice.Login || p.Identity.Login != alice.Login ||
+		!p.User.EmailVerified || p.User.Email != alice.Email || p.Admin || !p.AllAccounts {
 		t.Fatalf("principal = %+v", p)
 	}
 
 	t.Run("return_to outside the dashboard falls back to its root", func(t *testing.T) {
-		w := e.signIn("corp", e.oidc, alice, "https://evil.example/")
+		w := e.signIn("oidc", e.oidc, alice, "https://evil.example/")
 		if w.Header().Get("Location") != "https://kritique.example.com/dash/#/" {
 			t.Fatalf("location = %q", w.Header().Get("Location"))
 		}
 	})
 	t.Run("state cannot be replayed", func(t *testing.T) {
-		l := e.startLogin("corp", "")
-		if w := e.finish("corp", e.oidc, l, alice); w.Code != http.StatusFound {
+		l := e.startLogin("oidc", "")
+		if w := e.finish("oidc", e.oidc, l, alice); w.Code != http.StatusFound {
 			t.Fatalf("first callback: %d %s", w.Code, w.Body.String())
 		}
-		assertFailed(t, e.finish("corp", e.oidc, l, alice), http.StatusBadRequest, "invalid_state")
+		assertFailed(t, e.finish("oidc", e.oidc, l, alice), http.StatusBadRequest, "invalid_state")
 	})
 	t.Run("login CSRF: a callback in a browser that did not start the sign-in", func(t *testing.T) {
-		l := e.startLogin("corp", "")
+		l := e.startLogin("oidc", "")
 		code := e.oidc.authorize(l.loc.String(), alice, "")
 		q := url.Values{"code": {code}, "state": {l.state()}}
-		assertFailed(t, e.callback("corp", q), http.StatusBadRequest, "invalid_state")
-		assertFailed(t, e.callback("corp", q, &http.Cookie{Name: loginCookieName(e.h.webURL), Value: "attacker-browser"}), http.StatusBadRequest, "invalid_state")
+		assertFailed(t, e.callback("oidc", q), http.StatusBadRequest, "invalid_state")
+		assertFailed(t, e.callback("oidc", q, &http.Cookie{Name: loginCookieName(e.h.webURL), Value: "attacker-browser"}), http.StatusBadRequest, "invalid_state")
 		// Neither attempt burned the state: the browser that started the
 		// sign-in can still finish it.
-		if w := e.callback("corp", q, l.cookie); w.Code != http.StatusFound {
+		if w := e.callback("oidc", q, l.cookie); w.Code != http.StatusFound {
 			t.Fatalf("callback in the starting browser: %d %s", w.Code, w.Body.String())
 		}
 	})
 	t.Run("state is bound to its sign-in", func(t *testing.T) {
-		l := e.startLogin("corp", "")
-		assertFailed(t, e.callback("gh", url.Values{"code": {"x"}, "state": {l.state()}}, l.cookie), http.StatusBadRequest, "invalid_state")
+		l := e.startLogin("oidc", "")
+		assertFailed(t, e.callback("github", url.Values{"code": {"x"}, "state": {l.state()}}, l.cookie), http.StatusBadRequest, "invalid_state")
 	})
 	t.Run("expired state", func(t *testing.T) {
-		l := e.startLogin("corp", "")
+		l := e.startLogin("oidc", "")
 		e.now = e.now.Add(store.LoginStateTTL + time.Second)
 		defer func() { e.now = e.now.Add(-store.LoginStateTTL - time.Second) }()
-		assertFailed(t, e.callback("corp", url.Values{"code": {"x"}, "state": {l.state()}}, l.cookie), http.StatusBadRequest, "invalid_state")
+		assertFailed(t, e.callback("oidc", url.Values{"code": {"x"}, "state": {l.state()}}, l.cookie), http.StatusBadRequest, "invalid_state")
 	})
 	t.Run("nonce mismatch", func(t *testing.T) {
-		l := e.startLogin("corp", "")
+		l := e.startLogin("oidc", "")
 		code := e.oidc.authorize(l.loc.String(), alice, "another-nonce")
-		assertFailed(t, e.callback("corp", url.Values{"code": {code}, "state": {l.state()}}, l.cookie), http.StatusBadGateway, "exchange_failed")
+		assertFailed(t, e.callback("oidc", url.Values{"code": {code}, "state": {l.state()}}, l.cookie), http.StatusBadGateway, "exchange_failed")
 	})
 	t.Run("PKCE verifier must match the challenge", func(t *testing.T) {
-		l := e.startLogin("corp", "")
+		l := e.startLogin("oidc", "")
 		q := l.loc.Query()
 		q.Set("code_challenge", "not-the-challenge")
 		l.loc.RawQuery = q.Encode()
-		assertFailed(t, e.finish("corp", e.oidc, l, alice), http.StatusBadGateway, "exchange_failed")
+		assertFailed(t, e.finish("oidc", e.oidc, l, alice), http.StatusBadGateway, "exchange_failed")
 	})
 	t.Run("signing in again ends the browser's previous session", func(t *testing.T) {
-		old := e.mustSignIn("corp", e.oidc, alice)
-		fresh := e.mustSignIn("corp", e.oidc, alice, old)
+		old := e.mustSignIn("oidc", e.oidc, alice)
+		fresh := e.mustSignIn("oidc", e.oidc, alice, old)
 		if e.principal(old) != nil || e.principal(fresh) == nil {
 			t.Fatal("the previous session survived a new sign-in in the same browser")
 		}
 	})
 	t.Run("provider error is not echoed", func(t *testing.T) {
-		l := e.startLogin("corp", "")
-		w := e.callback("corp", url.Values{"error": {"<script>x</script>"}, "state": {l.state()}}, l.cookie)
+		l := e.startLogin("oidc", "")
+		w := e.callback("oidc", url.Values{"error": {"<script>x</script>"}, "state": {l.state()}}, l.cookie)
 		assertFailed(t, w, http.StatusBadRequest, "sign_in_denied")
 		if strings.Contains(w.Body.String(), "script") {
 			t.Fatalf("provider error leaked: %s", w.Body.String())
 		}
 	})
-	t.Run("operator by subject", func(t *testing.T) {
-		op := &fakeUser{Login: "op-oidc", Email: "op@oidc.example"}
-		if p := e.principal(e.mustSignIn("corp", e.oidc, op)); p == nil || !p.Operator {
-			t.Fatalf("principal = %+v, want an operator", p)
+	t.Run("an admin by role", func(t *testing.T) {
+		op := &fakeUser{Login: "op-oidc-" + randomHex(t), Email: "op@oidc.example", Groups: []string{"ops"}}
+		if p := e.principal(e.mustSignIn("oidc", e.oidc, op)); p == nil || !p.Admin {
+			t.Fatalf("principal = %+v, want an admin", p)
 		}
 	})
-	t.Run("operator by verified email only", func(t *testing.T) {
-		unverified := &fakeUser{Login: "ops-unverified-" + randomHex(t), Email: "ops@ops.example"}
-		if p := e.principal(e.mustSignIn("corp", e.oidc, unverified)); p == nil || p.Operator {
-			t.Fatalf("principal = %+v, want no operator for an unverified email", p)
-		}
-		verified := &fakeUser{Login: "ops-verified-" + randomHex(t), Email: "OPS@ops.example", EmailVerified: true}
-		if p := e.principal(e.mustSignIn("corp", e.oidc, verified)); p == nil || !p.Operator {
-			t.Fatalf("principal = %+v, want an operator for a verified email", p)
-		}
+	t.Run("nobody the mapping places is refused", func(t *testing.T) {
+		stranger := &fakeUser{Login: "stranger-" + randomHex(t), Email: "s@oidc.example", EmailVerified: true, Groups: []string{"other"}}
+		assertFailed(t, e.signIn("oidc", e.oidc, stranger, ""), http.StatusForbidden, "not_allowed")
 	})
 }
 
-func TestGitHubSignInMemberships(t *testing.T) {
+func TestGitHubSignInGrants(t *testing.T) {
 	e := newAuthEnv(t)
 	alice := &fakeUser{ID: 1001, Login: "Alice-GH", Email: "alice@gh.example", EmailVerified: true,
 		Orgs: map[string]string{"acme": "member", "widgets": "admin", "pendco": "pending"}}
-	firstCookie := e.mustSignIn("gh", e.gh, alice)
+	firstCookie := e.mustSignIn("github", e.gh, alice)
 	p := e.principal(firstCookie)
-	assertRoles(t, e.roles(p), map[string]Role{"auth-personal": RoleAdmin, "auth-acme": RoleMember, "auth-widgets": RoleAdmin})
-	if p.Identity.Subject != "1001" || p.Identity.Login != "Alice-GH" || p.Account.Email != "alice@gh.example" || !p.Account.EmailVerified {
+	assertAccounts(t, e.accounts(p), "alice-gh", "acme", "Widgets")
+	if p.Identity.Subject != "1001" || p.Identity.Login != "Alice-GH" || p.User.Email != "alice@gh.example" || !p.User.EmailVerified ||
+		p.Admin || p.AllAccounts {
 		t.Fatalf("principal = %+v", p)
-	}
-	if !p.CanAdmin(e.tenantID["auth-widgets"]) || p.CanAdmin(e.tenantID["auth-acme"]) || !p.CanRead(e.tenantID["auth-acme"]) || p.CanRead(e.tenantID["auth-fj"]) {
-		t.Fatalf("role checks wrong for %+v", p.Memberships)
 	}
 
 	delete(alice.Orgs, "acme")
-	again := e.principal(e.mustSignIn("gh", e.gh, alice))
-	assertRoles(t, e.roles(again), map[string]Role{"auth-personal": RoleAdmin, "auth-widgets": RoleAdmin})
-	if again.Account.ID != p.Account.ID {
-		t.Fatalf("second sign-in made account %s, want %s", again.Account.ID, p.Account.ID)
+	again := e.principal(e.mustSignIn("github", e.gh, alice))
+	assertAccounts(t, e.accounts(again), "alice-gh", "Widgets")
+	if again.User.ID != p.User.ID {
+		t.Fatalf("second sign-in made user %s, want %s", again.User.ID, p.User.ID)
 	}
-	// The first session sees the refreshed memberships too: they are read
-	// per request.
-	assertRoles(t, e.roles(e.principal(firstCookie)), e.roles(again))
+	// A session keeps the grant it signed in with.
+	assertAccounts(t, e.accounts(e.principal(firstCookie)), "alice-gh", "acme", "Widgets")
 
-	op := &fakeUser{ID: 1002, Login: "opgh", Email: "op@gh.example"}
-	if p := e.principal(e.mustSignIn("gh", e.gh, op)); !p.Operator || !p.CanAdmin(e.tenantID["auth-acme"]) {
-		t.Fatalf("principal = %+v, want an operator", p)
-	}
+	t.Run("an admin by login", func(t *testing.T) {
+		op := &fakeUser{ID: 1002, Login: "opgh", Email: "op@gh.example"}
+		if p := e.principal(e.mustSignIn("github", e.gh, op)); !p.Admin || !p.CanRead(e.accountID["acme"]) {
+			t.Fatalf("principal = %+v, want an admin", p)
+		}
+	})
+	t.Run("a mapped account", func(t *testing.T) {
+		bob := &fakeUser{ID: 1003, Login: "bob", Orgs: map[string]string{"mapped-org": "member"}}
+		assertAccounts(t, e.accounts(e.principal(e.mustSignIn("github", e.gh, bob))), "acme")
+	})
+	t.Run("a stranger is refused", func(t *testing.T) {
+		assertFailed(t, e.signIn("github", e.gh, &fakeUser{ID: 1004, Login: "mallory"}, ""), http.StatusForbidden, "not_allowed")
+	})
 }
 
-func TestForgejoSignInMemberships(t *testing.T) {
-	e := newAuthEnv(t)
-	tests := []struct {
-		user *fakeUser
-		want map[string]Role
-	}{
-		{&fakeUser{ID: 2001, Login: "bob-fj", Email: "bob@fj.example", EmailVerified: true, Orgs: map[string]string{"fjorg": "admin"}},
-			map[string]Role{"auth-fj": RoleAdmin}},
-		{&fakeUser{ID: 2002, Login: "carol-fj", Orgs: map[string]string{"fjorg": "member", "acme": "admin"}},
-			map[string]Role{"auth-fj": RoleMember}},
-		{&fakeUser{ID: 2003, Login: "nobody"}, map[string]Role{"auth-invite": RoleAdmin}},
-		{&fakeUser{ID: 2004, Login: "dave-fj"}, map[string]Role{}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.user.Login, func(t *testing.T) {
-			p := e.principal(e.mustSignIn("fj", e.fj, tt.user))
-			assertRoles(t, e.roles(p), tt.want)
-			if p.Identity.Subject != fmt.Sprint(tt.user.ID) || p.Account.EmailVerified != tt.user.EmailVerified {
-				t.Fatalf("principal = %+v", p)
-			}
-		})
-	}
+// localSignIn posts the password form.
+func (e *authEnv) localSignIn(user, password string) *httptest.ResponseRecorder {
+	e.t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "/auth/local", strings.NewReader(fmt.Sprintf(`{"user":%q,"password":%q}`, user, password)))
+	r.Header.Set("X-Kritique", "1")
+	r.Header.Set("Origin", "https://kritique.example.com")
+	r.RemoteAddr = "192.0.2.1:1234"
+	return e.do(r)
 }
 
-func insertInvite(t *testing.T, st *store.Store, tenantID, email string, role Role, expires time.Time) string {
+func sessionFrom(t *testing.T, w *httptest.ResponseRecorder, webURL *url.URL) *http.Cookie {
 	t.Helper()
-	var id string
-	if err := st.App().QueryRow(context.Background(), `INSERT INTO invites (id, tenant_id, email, role, expires_at)
-		VALUES (gen_random_uuid(), $1, $2, $3, $4) RETURNING id`, tenantID, email, role, expires).Scan(&id); err != nil {
-		t.Fatalf("insert invite: %v", err)
+	for _, c := range w.Result().Cookies() {
+		if c.Name == SessionCookieName(webURL) && c.Value != "" {
+			return c
+		}
 	}
-	return id
+	t.Fatalf("no session cookie (status %d body %s)", w.Code, w.Body.String())
+	return nil
 }
 
-func TestInviteAcceptance(t *testing.T) {
+func TestLocalAdminSignIn(t *testing.T) {
 	e := newAuthEnv(t)
-	ctx := context.Background()
-	suffix := randomHex(t)
-	email := "carol-" + suffix + "@invite.example"
-	pending := insertInvite(t, e.st, e.tenantID["auth-invite"], strings.ToUpper(email), RoleMember, e.now.Add(time.Hour))
-	insertInvite(t, e.st, e.tenantID["auth-acme"], email, RoleAdmin, e.now.Add(-time.Minute))
-
-	unverified := &fakeUser{Login: "carol-unverified-" + suffix, Email: email}
-	assertRoles(t, e.roles(e.principal(e.mustSignIn("corp", e.oidc, unverified))), map[string]Role{})
-
-	carol := &fakeUser{Login: "carol-" + suffix, Email: email, EmailVerified: true}
-	p := e.principal(e.mustSignIn("corp", e.oidc, carol))
-	assertRoles(t, e.roles(p), map[string]Role{"auth-invite": RoleMember})
-	var acceptedBy *string
-	if err := e.st.App().QueryRow(ctx, `SELECT accepted_by FROM invites WHERE id = $1 AND accepted_at IS NOT NULL`, pending).Scan(&acceptedBy); err != nil ||
-		acceptedBy == nil || *acceptedBy != p.Account.ID {
-		t.Fatalf("invite accepted_by = %v, %v; want %s", acceptedBy, err, p.Account.ID)
+	if w := e.localSignIn("admin", "wrong"); w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong password: %d %s", w.Code, w.Body.String())
 	}
-	// An accepted invite survives the next sign-in's forge refresh.
-	assertRoles(t, e.roles(e.principal(e.mustSignIn("corp", e.oidc, carol))), map[string]Role{"auth-invite": RoleMember})
+	w := e.localSignIn("admin", adminTestPassword)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("sign-in: %d %s", w.Code, w.Body.String())
+	}
+	cookie := sessionFrom(t, w, e.h.webURL)
+	p := e.principal(cookie)
+	if p == nil || !p.Admin || p.Identity.Provider != "local" || p.Identity.Login != "admin" || p.User.DisplayName != "admin" {
+		t.Fatalf("principal = %+v", p)
+	}
+	again := e.principal(sessionFrom(t, e.localSignIn("admin", adminTestPassword), e.h.webURL))
+	if again == nil || again.User.ID != p.User.ID {
+		t.Fatalf("second sign-in = %+v, want user %s", again, p.User.ID)
+	}
 
-	t.Run("forge and invite memberships combine to the higher role", func(t *testing.T) {
-		dana := &fakeUser{ID: 3001, Login: "dana-" + suffix, Email: "dana-" + suffix + "@gh.example", EmailVerified: true,
-			Orgs: map[string]string{"widgets": "admin"}}
-		insertInvite(t, e.st, e.tenantID["auth-widgets"], dana.Email, RoleMember, e.now.Add(time.Hour))
-		insertInvite(t, e.st, e.tenantID["auth-acme"], dana.Email, RoleAdmin, e.now.Add(time.Hour))
-		// Forge admin plus a member invite is admin while the forge says so.
-		assertRoles(t, e.roles(e.principal(e.mustSignIn("gh", e.gh, dana))), map[string]Role{"auth-widgets": RoleAdmin, "auth-acme": RoleAdmin})
-		// Once the forge admin lapses, the invite's member role is what is left.
-		delete(dana.Orgs, "widgets")
-		assertRoles(t, e.roles(e.principal(e.mustSignIn("gh", e.gh, dana))), map[string]Role{"auth-widgets": RoleMember, "auth-acme": RoleAdmin})
+	t.Run("rotating the password ends the session", func(t *testing.T) {
+		t.Setenv("KRITIQUE_TEST_ADMIN_PASSWORD", "rotated")
+		rotated, err := configfiletest.Parse(t, fmt.Sprintf(authConfigYAML, e.oidc.srv.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.current.Set(rotated)
+		defer e.current.Set(e.file)
+		if p := e.principal(cookie); p != nil {
+			t.Fatalf("principal = %+v after the password changed", p)
+		}
 	})
 }
 
 func TestSessionLifecycle(t *testing.T) {
 	e := newAuthEnv(t)
-	ctx := context.Background()
-	user := &fakeUser{ID: 4001, Login: "erin-" + randomHex(t), Email: "erin@fj.example"}
-	cookie := e.mustSignIn("fj", e.fj, user)
+	user := &fakeUser{ID: 4001, Login: "erin-" + randomHex(t), Email: "erin@gh.example", Orgs: map[string]string{"acme": "member"}}
+	cookie := e.mustSignIn("github", e.gh, user)
 	p := e.principal(cookie)
 	if p == nil {
 		t.Fatal("no principal for a fresh session")
 	}
-	lastSeen := func() time.Time {
-		t.Helper()
-		var ts time.Time
-		if err := e.st.App().QueryRow(ctx, `SELECT last_seen_at FROM sessions WHERE account_id = $1`, p.Account.ID).Scan(&ts); err != nil {
-			t.Fatalf("last_seen_at: %v", err)
-		}
-		return ts
-	}
-	first := lastSeen()
-	e.now = e.now.Add(30 * time.Second)
-	e.principal(cookie)
-	if !lastSeen().Equal(first) {
-		t.Fatal("last_seen_at written within a minute of the last write")
-	}
-	e.now = e.now.Add(time.Minute)
-	e.principal(cookie)
-	if !lastSeen().After(first) {
-		t.Fatal("last_seen_at not refreshed after a minute")
-	}
 
 	t.Run("a sign-in removed from the file ends its sessions", func(t *testing.T) {
 		trimmed := *e.file
-		trimmed.Web.SignIn = e.file.Web.SignIn[:2]
+		trimmed.Auth.GitHub = nil
 		e.current.Set(&trimmed)
+		defer e.current.Set(e.file)
+		if p := e.principal(cookie); p != nil {
+			t.Fatalf("principal = %+v, want none", p)
+		}
+	})
+	t.Run("a changed role mapping ends its sessions", func(t *testing.T) {
+		changed, err := configfiletest.Parse(t, strings.Replace(fmt.Sprintf(authConfigYAML, e.oidc.srv.URL), `login == "opgh"`, `login == "someone"`, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.current.Set(changed)
 		defer e.current.Set(e.file)
 		if p := e.principal(cookie); p != nil {
 			t.Fatalf("principal = %+v, want none", p)
@@ -526,7 +468,7 @@ func TestSessionLifecycle(t *testing.T) {
 		}
 	})
 	t.Run("logout", func(t *testing.T) {
-		other := e.mustSignIn("fj", e.fj, user)
+		other := e.mustSignIn("github", e.gh, user)
 		r := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 		r.Header.Set("X-Kritique", "1")
 		r.Header.Set("Origin", "https://kritique.example.com")
@@ -545,6 +487,14 @@ func TestSessionLifecycle(t *testing.T) {
 		if e.principal(cookie) == nil {
 			t.Fatal("logout ended another session")
 		}
+		stands := func(c *http.Cookie) bool {
+			r := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+			r.AddCookie(c)
+			return e.h.Stands(r)
+		}
+		if stands(other) || !stands(cookie) {
+			t.Fatalf("Stands = %v for the signed-out session and %v for the other; want false and true", stands(other), stands(cookie))
+		}
 	})
 	t.Run("expiry", func(t *testing.T) {
 		e.now = e.now.Add(configfile.DefaultSessionTTL)
@@ -557,23 +507,23 @@ func TestSessionLifecycle(t *testing.T) {
 func TestIdentitiesNotLinkedAcrossProviders(t *testing.T) {
 	e := newAuthEnv(t)
 	email := "shared-" + randomHex(t) + "@example.com"
-	viaOIDC := e.principal(e.mustSignIn("corp", e.oidc, &fakeUser{Login: "shared-oidc-" + randomHex(t), Email: email, EmailVerified: true}))
-	viaGitHub := e.principal(e.mustSignIn("gh", e.gh, &fakeUser{ID: 5001, Login: "shared-gh", Email: email, EmailVerified: true}))
-	viaForgejo := e.principal(e.mustSignIn("fj", e.fj, &fakeUser{ID: 5001, Login: "shared-fj", Email: email, EmailVerified: true}))
-	if viaOIDC.Account.ID == viaGitHub.Account.ID || viaGitHub.Account.ID == viaForgejo.Account.ID || viaOIDC.Account.ID == viaForgejo.Account.ID {
-		t.Fatalf("accounts linked by email: oidc %s github %s forgejo %s", viaOIDC.Account.ID, viaGitHub.Account.ID, viaForgejo.Account.ID)
+	viaOIDC := e.principal(e.mustSignIn("oidc", e.oidc, &fakeUser{Login: "shared-oidc-" + randomHex(t), Email: email, EmailVerified: true, Groups: []string{"staff"}}))
+	viaGitHub := e.principal(e.mustSignIn("github", e.gh, &fakeUser{ID: 5001, Login: "shared-gh", Email: email, EmailVerified: true,
+		Orgs: map[string]string{"acme": "member"}}))
+	if viaOIDC.User.ID == viaGitHub.User.ID {
+		t.Fatalf("accounts linked by email: oidc %s github %s", viaOIDC.User.ID, viaGitHub.User.ID)
 	}
 }
 
 func TestSignInMovedToAnotherOrigin(t *testing.T) {
 	e := newAuthEnv(t)
-	user := &fakeUser{ID: 6001, Login: "frank-" + randomHex(t), Email: "frank@gh.example", EmailVerified: true}
-	before := e.mustSignIn("gh", e.gh, user)
+	user := &fakeUser{Login: "frank-" + randomHex(t), Email: "frank@example.com", EmailVerified: true, Groups: []string{"staff"}}
+	before := e.mustSignIn("oidc", e.oidc, user)
 	was := e.principal(before)
 
-	// The same sign-in name, now pointing at another GitHub host whose
-	// user 6001 is someone else entirely.
-	moved, err := configfile.Parse(fmt.Appendf(nil, authConfigYAML, e.oidc.srv.URL, e.gh2.srv.URL, e.fj.srv.URL))
+	// The same sign-in, now pointing at another issuer whose subject of the
+	// same name is someone else entirely.
+	moved, err := configfiletest.Parse(t, fmt.Sprintf(authConfigYAML, e.oidc2.srv.URL))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -581,8 +531,8 @@ func TestSignInMovedToAnotherOrigin(t *testing.T) {
 	if p := e.principal(before); p != nil {
 		t.Fatalf("session from the old origin still authenticates: %+v", p)
 	}
-	now := e.principal(e.mustSignIn("gh", e.gh2, user))
-	if now == nil || now.Account.ID == was.Account.ID {
-		t.Fatalf("same subject on a new origin linked to account %s", was.Account.ID)
+	now := e.principal(e.mustSignIn("oidc", e.oidc2, user))
+	if now == nil || now.User.ID == was.User.ID {
+		t.Fatalf("same subject on a new origin linked to user %s", was.User.ID)
 	}
 }

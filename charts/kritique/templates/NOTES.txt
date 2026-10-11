@@ -1,25 +1,20 @@
-kritique {{ .Chart.AppVersion }} is installed as {{ include "kritique.fullname" . }} with roles: {{ include "kritique.enabledRoles" . }}.
+kritique {{ .Chart.AppVersion }} is installed as {{ include "kritique.fullname" . }}, {{ .Values.replicas }} replica(s) of kritique serve.
 
-{{ if include "kritique.hasIngest" . -}}
-Point each installation's webhook at:
+Open {{ tpl .Values.config.webUrl . }} to sign in. The GitHub Apps, model providers
+and review settings come from the configuration file (configFile), how kritique
+runs from the keys of config (see docs/configuration.md); the dashboard turns
+each repository on or off.
 
-  https://<your host>/hooks/<installation name>
-
-with the installation's webhook secret, content type application/json, and the
-pull_request, issue_comment, pull_request_review_comment, push and installation
-events. Inside the cluster the listener is
+GitHub delivers each app's webhook to {{ tpl .Values.config.webUrl . | trimSuffix "/" }}/hooks/<app name>,
+which kritique serves beside the dashboard:
+{{- if or .Values.ingress.enabled .Values.httpRoute.enabled }} the chart's
+{{ if .Values.ingress.enabled }}Ingress{{ else }}HTTPRoute{{ end }} routes to it; its host must be that URL's.
+{{- else }} route that URL to
 {{ include "kritique.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}.
 {{- end }}
 
-{{ if include "kritique.hasWorker" . -}}
 Runner Jobs appear in this namespace as kritique-run-*; every run is also recorded
 in the runner_runs table.
-{{- end }}
-
-{{ if not (include "kritique.embeddingEnabled" .) -}}
-Indexing is off (embedding.model is empty): reviews run without the similar-code
-context stage.
-{{- end }}
 
 Health: /healthz and /readyz, metrics: /metrics, all on port {{ .Values.service.metricsPort }}
 of every pod ({{ include "kritique.fullname" . }}-metrics Service).

@@ -1,10 +1,13 @@
-// Package webapi is the dashboard's JSON API and static UI server: the
-// read endpoints over one tenant's reviews, repositories, usage and queue,
-// and the server-sent event stream that keeps the UI live. The web role
-// runs it; internal/auth decides who a request acts as.
+// Package webapi is the dashboard's JSON API and static UI server: reads
+// over each account's reviews, repositories, usage and queue, and over the
+// running configuration, its setup and connections; re-runs, cancels,
+// reindexes and turning repositories on or off, with their audit log; and
+// the server-sent event stream that keeps the UI live. kritique serve runs
+// it; internal/auth decides who a request acts as.
 package webapi
 
 import (
+	"cmp"
 	"context"
 	"io/fs"
 	"log/slog"
@@ -17,7 +20,6 @@ import (
 	"github.com/perfectra1n/kritique/internal/auth"
 	"github.com/perfectra1n/kritique/internal/config"
 	"github.com/perfectra1n/kritique/internal/configfile"
-	"github.com/perfectra1n/kritique/internal/sealbox"
 	"github.com/perfectra1n/kritique/internal/store"
 )
 
@@ -25,10 +27,9 @@ import (
 type Config struct {
 	Store   *store.Store
 	Current *configfile.Current
-	Auth    *auth.Handler
-	// Keyring seals the secrets of dashboard tenants; nil disables writing
-	// them.
-	Keyring *sealbox.Keyring
+	// Auth signs the dashboard in and stands behind every route; it is
+	// required, as Store and Current are.
+	Auth *auth.Handler
 	// Actions queues re-runs, cancels and reindexes; nil disables them.
 	Actions Actions
 	// Version is the build's version, shown by /api/v1/meta.
@@ -36,33 +37,42 @@ type Config struct {
 	// UI is the built dashboard, served under the base path; nil serves
 	// no UI.
 	UI fs.FS
-	// WebURL is the dashboard's external URL; its path is the base path
-	// every route is served under.
+	// WebURL is the dashboard's external URL, required; its path is the
+	// base path every route is served under.
 	WebURL *url.URL
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 	// Now defaults to time.Now.
 	Now func() time.Time
 	// Env is this process's environment as the configuration read it,
-	// shown to operators; secrets show only whether they are set.
+	// shown to admins; secrets show only whether they are set.
 	Env []config.EnvVar
+	// GitHubAPI is the GitHub API the connections' Apps call, "" for
+	// api.github.com; tests point it at a server of their own.
+	GitHubAPI string
+	// Reach lists, by lowercased account login, the repositories a Forgejo
+	// or Gitea connection reaches, as the poller's does; nil leaves their
+	// repositories to the leader's sync.
+	Reach func(ctx context.Context, in *configfile.Connection) (map[string][]store.ReachedRepository, error)
 }
 
 // Server serves the dashboard.
 type Server struct {
-	store    *store.Store
-	current  *configfile.Current
-	auth     *auth.Handler
-	keyring  *sealbox.Keyring
-	actions  Actions
-	version  string
-	webURL   *url.URL
-	ui       fs.FS
-	basePath string
-	logger   *slog.Logger
-	now      func() time.Time
-	hub      *hub
-	env      []config.EnvVar
+	store     *store.Store
+	current   *configfile.Current
+	auth      *auth.Handler
+	actions   Actions
+	version   string
+	webURL    *url.URL
+	ui        fs.FS
+	basePath  string
+	logger    *slog.Logger
+	now       func() time.Time
+	hub       *hub
+	env       []config.EnvVar
+	githubAPI string
+	apps      appCache
+	reach     func(ctx context.Context, in *configfile.Connection) (map[string][]store.ReachedRepository, error)
 }
 
 // New builds a Server from cfg.
@@ -73,14 +83,13 @@ func New(cfg Config) *Server {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	var base string
-	if cfg.WebURL != nil {
-		base = strings.TrimRight(cfg.WebURL.Path, "/")
-	}
+	h := newHub(cfg.Current, cfg.Logger)
+	h.stands = cfg.Auth.Stands
 	return &Server{
-		store: cfg.Store, current: cfg.Current, auth: cfg.Auth, keyring: cfg.Keyring, actions: cfg.Actions, version: cfg.Version,
-		webURL: cfg.WebURL, ui: cfg.UI, basePath: base,
-		logger: cfg.Logger, now: cfg.Now, hub: newHub(cfg.Current, cfg.Logger), env: cfg.Env,
+		store: cfg.Store, current: cfg.Current, auth: cfg.Auth, actions: cfg.Actions, version: cfg.Version,
+		webURL: cfg.WebURL, ui: cfg.UI, basePath: strings.TrimRight(cfg.WebURL.Path, "/"),
+		logger: cfg.Logger, now: cfg.Now, hub: h, env: cfg.Env,
+		githubAPI: cfg.GitHubAPI, reach: cfg.Reach,
 	}
 }
 
@@ -97,7 +106,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 // Handler is the whole dashboard: API, sign-in routes and UI.
 func (s *Server) Handler() http.Handler {
-	var h = s.routes()
+	h := s.routes()
 	if p := s.basePath; p != "" {
 		outer := http.NewServeMux()
 		// The bare prefix redirects to its trailing-slash form so the UI's
@@ -160,14 +169,14 @@ func (s *Server) routes() http.Handler {
 	})
 }
 
-// registerAPI mounts every /api route. Each group of routes lives in its
-// own routes_*.go file as a method that registers on mux.
+// registerAPI mounts every /api route. Each group of routes registers on
+// mux from the file that holds its handlers.
 func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/events", s.hub.serve)
 	s.registerReads(mux)
 	s.registerTasks(mux)
-	s.registerManage(mux)
-	s.registerMembers(mux)
+	s.registerConnections(mux)
+	s.registerSetup(mux)
 	s.registerActions(mux)
 	s.registerAudit(mux)
 }
@@ -206,10 +215,7 @@ func (s *Server) uiHandler() http.Handler {
 // isBareDir reports whether urlPath names a directory of ui with no
 // index.html, which http.FileServerFS would otherwise list.
 func isBareDir(ui fs.FS, urlPath string) bool {
-	name := strings.TrimPrefix(path.Clean("/"+urlPath), "/")
-	if name == "" {
-		name = "."
-	}
+	name := cmp.Or(strings.TrimPrefix(path.Clean("/"+urlPath), "/"), ".")
 	st, err := fs.Stat(ui, name)
 	if err != nil || !st.IsDir() {
 		return false
@@ -218,8 +224,8 @@ func isBareDir(ui fs.FS, urlPath string) bool {
 	return err != nil
 }
 
-// contentSecurityPolicy allows only the dashboard's own scripts, styles
-// and connections; img-src also admits https for forge avatars.
+// contentSecurityPolicy allows only the dashboard's own scripts, styles,
+// connections and forms; img-src also admits https for forge avatars.
 const contentSecurityPolicy = "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; " +
 	"script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 
@@ -242,16 +248,12 @@ type statusRecorder struct {
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
-	if r.status == 0 {
-		r.status = code
-	}
+	r.status = cmp.Or(r.status, code)
 	r.ResponseWriter.WriteHeader(code)
 }
 
 func (r *statusRecorder) Write(b []byte) (int, error) {
-	if r.status == 0 {
-		r.status = http.StatusOK
-	}
+	r.status = cmp.Or(r.status, http.StatusOK)
 	return r.ResponseWriter.Write(b)
 }
 

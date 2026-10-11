@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/forge"
@@ -23,11 +23,11 @@ func TestInput(t *testing.T) {
 		want tasks.Input
 	}{
 		{"issue", webhook.Event{
-			Kind: webhook.KindIssue, Action: "opened", Forge: configfile.ForgeGitea, RawEvent: "issues", Sender: "devin", Raw: raw,
+			Kind: webhook.KindIssue, Action: "opened", Forge: configfile.ForgeGitHub, RawEvent: "issues", Sender: "devin", Raw: raw,
 			Repository: repo, Subject: &webhook.Subject{Kind: webhook.SubjectIssue, Number: 7},
 			Issue: &webhook.Issue{Number: 7, Title: "t", Body: "b", State: "open", Author: "devin", Labels: []string{"bug"}, URL: "u"},
 		}, tasks.Input{
-			Forge: "gitea", Event: tasks.EventIssue, RawEvent: "issues", Action: "opened", Sender: "devin",
+			Forge: "github", Event: tasks.EventIssue, RawEvent: "issues", Action: "opened", Sender: "devin",
 			Subject: &tasks.Subject{Kind: "issue", Number: 7, Title: "t", Body: "b", State: "open", Author: "devin", URL: "u", Labels: []string{"bug"}},
 			Raw:     map[string]any{"action": "opened", "number": float64(7)},
 			Repo:    tasks.Repo{Owner: "acme", Name: "widgets", DefaultBranch: "main"},
@@ -81,7 +81,7 @@ func TestDecodeRaw(t *testing.T) {
 }
 
 func TestSubject(t *testing.T) {
-	got := Subject(forge.Issue{Number: 4, Title: "t", State: "closed", Author: "a", Labels: []string{"l"}, Assignees: []string{"b"}, IsPull: true, URL: "u"}, nil)
+	got := Subject(forge.Issue{Number: 4, Title: "t", State: "closed", Author: "a", Labels: []string{"l"}, Assignees: []string{"b"}, PullRequest: true, URL: "u"}, nil)
 	want := &tasks.Subject{Kind: "pull", Number: 4, Title: "t", State: "closed", Author: "a", URL: "u", Labels: []string{"l"}, Assignees: []string{"b"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Subject = %+v, want %+v", got, want)
@@ -99,11 +99,11 @@ func TestSubject(t *testing.T) {
 		raw   map[string]any
 		want  bool
 	}{
-		{"forge says draft", forge.Issue{Number: 4, IsPull: true, Draft: true}, nil, true},
-		{"delivery says draft", forge.Issue{Number: 4, IsPull: true}, raw(4, true), true},
-		{"forge draft not clobbered", forge.Issue{Number: 4, IsPull: true, Draft: true}, raw(4, false), true},
-		{"another pull request's draft", forge.Issue{Number: 4, IsPull: true}, raw(5, true), false},
-		{"ready", forge.Issue{Number: 4, IsPull: true}, raw(4, false), false},
+		{"forge says draft", forge.Issue{Number: 4, PullRequest: true, Draft: true}, nil, true},
+		{"delivery says draft", forge.Issue{Number: 4, PullRequest: true}, raw(4, true), true},
+		{"forge draft not clobbered", forge.Issue{Number: 4, PullRequest: true, Draft: true}, raw(4, false), true},
+		{"another pull request's draft", forge.Issue{Number: 4, PullRequest: true}, raw(5, true), false},
+		{"ready", forge.Issue{Number: 4, PullRequest: true}, raw(4, false), false},
 		{"issue", forge.Issue{Number: 4, Draft: true}, raw(4, true), false},
 	}
 	for _, tt := range drafts {

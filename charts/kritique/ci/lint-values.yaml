@@ -9,29 +9,21 @@ database:
   runner:
     existingSecret: kritique-postgres-runner
 config:
-  file:
-    providers:
-      openrouter:
-        type: openrouter
-        apiKey: { file: /var/run/secrets/kritique/providers/openrouter-api-key }
-    defaults:
-      models:
-        review: openrouter/openai/gpt-6-sol
-      filter: "!pr.draft"
-    tenants:
-      - slug: example
-        installations:
-          - name: example-github
-            forge: github
-            account: example
-            app:
-              clientId: Iv1.example
-              privateKey: { file: /var/run/secrets/kritique/bot/private-key.pem }
-              webhookSecret: { file: /var/run/secrets/kritique/bot/webhook-secret }
-secretMounts:
-  - name: bot
-    secretName: kritique-bot
-    mountPath: /var/run/secrets/kritique/bot
-  - name: providers
-    secretName: kritique-providers
-    mountPath: /var/run/secrets/kritique/providers
+  webUrl: https://kritique.example.com
+  authAdminPassword:
+    valueFrom:
+      secretKeyRef: { name: kritique-auth, key: password }
+configFile:
+  apps:
+    github:
+      accounts: [org-1]
+      clientId: Iv1.example
+      privateKey: { env: GITHUB_APP_PRIVATE_KEY }
+      webhookSecret: { env: GITHUB_APP_WEBHOOK_SECRET }
+env:
+  GITHUB_APP_PRIVATE_KEY:
+    valueFrom:
+      secretKeyRef: { name: kritique-bot, key: private-key.pem }
+  GITHUB_APP_WEBHOOK_SECRET:
+    valueFrom:
+      secretKeyRef: { name: kritique-bot, key: webhook-secret }

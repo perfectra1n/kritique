@@ -1,20 +1,23 @@
 // Package chunk cuts source files into declarations. It is the one place
 // that speaks tree-sitter: the runner uses it for the PR-head overlay,
-// definitions and callers, and the indexer will use it for the embedding
-// index, so both see the same chunks.
+// definitions and callers, and the indexer for the embedding index, so
+// both see the same chunks.
 //
 // Parsing is pure Go through gotreesitter with every grammar embedded, so
-// any file an operator points the service at parses without a rebuild. A
+// any file a repository holds parses without a rebuild. A
 // language whose grammar carries no tags query (configuration formats,
 // mostly) has no declarations and falls back to fixed windows.
 package chunk
 
 import (
 	"bytes"
+	"cmp"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/odvcencio/gotreesitter"
@@ -40,18 +43,19 @@ func (d Decl) Lines() int { return d.EndLine - d.StartLine + 1 }
 // Contains reports whether line falls inside the declaration.
 func (d Decl) Contains(line int) bool { return line >= d.StartLine && line <= d.EndLine }
 
-// Limits bound one parse. Files over MaxBytes are not parsed at all;
-// ParseTimeout stops a pathological parse.
+// Limits bound one parse: a file over MaxBytes, defaultMaxBytes when zero,
+// is not parsed at all.
 type Limits struct {
-	MaxBytes       int
-	ParseTimeoutUs int
+	MaxBytes int
 }
 
-// DefaultLimits are used when a zero Limits is given.
-var DefaultLimits = Limits{MaxBytes: 1 << 20, ParseTimeoutUs: 5_000_000}
+const defaultMaxBytes = 1 << 20
+
+// parseTimeout stops a pathological parse.
+const parseTimeout = 5 * time.Second
 
 // Parser cuts files. It caches one tree-sitter parser per language and
-// serialises access to each, since parsers are not safe for concurrent use.
+// serialises every parse, since parsers are not safe for concurrent use.
 type Parser struct {
 	Limits Limits
 
@@ -94,11 +98,7 @@ type File struct {
 // cases, not failures.
 func (p *Parser) Parse(path string, src []byte) *File {
 	f := &File{Path: path, Source: src}
-	lim := p.Limits
-	if lim.MaxBytes == 0 {
-		lim = DefaultLimits
-	}
-	if len(src) == 0 || len(src) > lim.MaxBytes || bytes.IndexByte(src, 0) >= 0 {
+	if len(src) == 0 || len(src) > cmp.Or(p.Limits.MaxBytes, defaultMaxBytes) || bytes.IndexByte(src, 0) >= 0 {
 		return f
 	}
 	lp := p.language(path)
@@ -113,11 +113,23 @@ func (p *Parser) Parse(path string, src []byte) *File {
 	tree, err := lp.parser.ParseStrict(src)
 	p.mu.Unlock()
 	if err != nil || tree == nil || tree.RootNode() == nil {
+		// A parse stopped early returns its partial tree with the error.
+		tree.Release()
 		return f
 	}
 	f.lang, f.tree = lp.lang, tree
 	f.Decls = declarations(lp, tree, src)
 	return f
+}
+
+// Close gives the parse tree's memory back to the library's pool, which
+// a parse takes a fresh arena from otherwise. The declarations and the
+// source stay; Identifiers, which walks the tree, finds none afterwards.
+func (f *File) Close() {
+	if f.tree != nil {
+		f.tree.Release()
+		f.tree = nil
+	}
 }
 
 func (p *Parser) language(path string) *languageParser {
@@ -130,13 +142,9 @@ func (p *Parser) language(path string) *languageParser {
 	if lp, ok := p.parsers[entry.Name]; ok {
 		return lp
 	}
-	lim := p.Limits
-	if lim.ParseTimeoutUs == 0 {
-		lim = DefaultLimits
-	}
 	lang := entry.Language()
 	parser := gotreesitter.NewParser(lang)
-	parser.SetTimeoutMicros(uint64(lim.ParseTimeoutUs))
+	parser.SetTimeoutMicros(uint64(parseTimeout.Microseconds()))
 	lp := &languageParser{entry: *entry, lang: lang, parser: parser}
 	if q := strings.TrimSpace(grammars.ResolveTagsQuery(*entry)); q != "" {
 		// A tags query that fails to compile leaves the language without
@@ -170,10 +178,7 @@ func declarations(lp *languageParser, tree *gotreesitter.Tree, src []byte) []Dec
 	var walk func(ss []gotreesitter.OutlineSymbol, owner string)
 	walk = func(ss []gotreesitter.OutlineSymbol, owner string) {
 		for _, s := range ss {
-			scope := s.Owner
-			if scope == "" {
-				scope = owner
-			}
+			scope := cmp.Or(s.Owner, owner)
 			add(Decl{
 				Symbol: s.Name, Kind: s.Kind, Scope: scope,
 				StartLine: int(s.Range.StartPoint.Row) + 1, EndLine: int(s.Range.EndPoint.Row) + 1,
@@ -205,11 +210,8 @@ func declarations(lp *languageParser, tree *gotreesitter.Tree, src []byte) []Dec
 			}
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].StartByte != out[j].StartByte {
-			return out[i].StartByte < out[j].StartByte
-		}
-		return out[i].EndByte > out[j].EndByte
+	slices.SortFunc(out, func(a, b Decl) int {
+		return cmp.Or(cmp.Compare(a.StartByte, b.StartByte), cmp.Compare(b.EndByte, a.EndByte))
 	})
 	return out
 }
@@ -327,7 +329,7 @@ func (f *File) Identifiers(lines []int) []string {
 		want[l] = true
 	}
 	counts := map[string]int{}
-	lo, hi := minKey(want), maxKey(want)
+	lo, hi := slices.Min(lines), slices.Max(lines)
 	var walk func(n *gotreesitter.Node)
 	walk = func(n *gotreesitter.Node) {
 		row := int(n.StartPoint().Row) + 1
@@ -347,37 +349,9 @@ func (f *File) Identifiers(lines []int) []string {
 		}
 	}
 	walk(f.tree.RootNode())
-	out := make([]string, 0, len(counts))
-	for id := range counts {
-		out = append(out, id)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if counts[out[i]] != counts[out[j]] {
-			return counts[out[i]] > counts[out[j]]
-		}
-		return out[i] < out[j]
-	})
+	out := slices.Collect(maps.Keys(counts))
+	slices.SortFunc(out, func(a, b string) int { return cmp.Or(cmp.Compare(counts[b], counts[a]), cmp.Compare(a, b)) })
 	return out
-}
-
-func minKey(m map[int]bool) int {
-	min := 0
-	for k := range m {
-		if min == 0 || k < min {
-			min = k
-		}
-	}
-	return min
-}
-
-func maxKey(m map[int]bool) int {
-	max := 0
-	for k := range m {
-		if k > max {
-			max = k
-		}
-	}
-	return max
 }
 
 // Window returns the fixed-size fallback: the lines from first-radius to
@@ -442,8 +416,8 @@ func Windows(src []byte, size, overlap int) []Decl {
 	return out
 }
 
-// Ignored reports whether path matches any of the doublestar globs.
-func Ignored(globs []string, path string) bool {
+// Matches reports whether path matches any of the doublestar globs.
+func Matches(globs []string, path string) bool {
 	for _, g := range globs {
 		if ok, _ := doublestar.Match(g, path); ok {
 			return true

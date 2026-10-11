@@ -11,15 +11,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
+
 	"github.com/perfectra1n/kritique/internal/agent"
 )
 
 // commandTool is the run tool for the commands p allows that this image
-// has on its PATH, over a checkout of tree written to scratch space. It is
-// nil, with a no-op cleanup, when there is nothing to offer or the
-// commands cannot be kept from the runner's secrets; the review then goes
-// on with the read-only tools alone. cleanup removes the scratch space.
-func commandTool(ctx context.Context, p Spec, tree *agent.Tree, maxOutput int, logger *slog.Logger) (run *agent.RunTool, cleanup func()) {
+// has on its PATH, over a checkout of tree written to scratch space, and
+// fetch_repo, which writes beside the checkout, when one of the commands
+// already reaches the network. Both are nil, with a no-op cleanup, when
+// there is nothing to offer or the commands cannot be kept from the
+// runner's secrets; the review then goes on with the read-only tools
+// alone. cleanup removes the scratch space.
+func commandTool(
+	ctx context.Context, p Spec, tree *agent.Tree, gitToken string, maxOutput int, logger *slog.Logger,
+) (run *agent.RunTool, fetch *fetchRepoTool, cleanup func()) {
 	cleanup = func() {}
 	found := map[string]string{}
 	for _, name := range p.Agent.Commands {
@@ -31,44 +38,87 @@ func commandTool(ctx context.Context, p Spec, tree *agent.Tree, maxOutput int, l
 		found[name] = path
 	}
 	if len(found) == 0 {
-		return nil, cleanup
+		return nil, nil, cleanup
 	}
 	if err := hideEnviron(); err != nil {
 		logger.Warn("commands not offered: the runner's environment cannot be hidden from them", "error", err)
-		return nil, cleanup
+		return nil, nil, cleanup
 	}
 	scratch, err := os.MkdirTemp("", "kritique-run-")
 	if err != nil {
 		logger.Warn("commands not offered: no scratch space", "error", err)
-		return nil, cleanup
+		return nil, nil, cleanup
 	}
 	cleanup = func() { _ = os.RemoveAll(scratch) }
 	// HOME is apart from the checkout, or a repository could plant the
-	// ~/.curlrc curl reads before its arguments.
-	dir, home := filepath.Join(scratch, "checkout"), filepath.Join(scratch, "home")
-	for _, d := range []string{dir, home} {
+	// ~/.curlrc curl reads before its arguments; the runner writes its own.
+	dir, home, up := filepath.Join(scratch, "checkout"), filepath.Join(scratch, "home"), filepath.Join(scratch, upstreamDir)
+	for _, d := range []string{dir, home, up} {
 		if err := os.Mkdir(d, 0o755); err != nil {
 			logger.Warn("commands not offered: no scratch space", "error", err)
-			return nil, cleanup
+			return nil, nil, cleanup
+		}
+	}
+	if found["curl"] != "" {
+		if err := os.WriteFile(filepath.Join(home, ".curlrc"), []byte(curlrc), 0o644); err != nil {
+			logger.Warn("commands not offered: no scratch space", "error", err)
+			return nil, nil, cleanup
 		}
 	}
 	started := time.Now()
 	stats, err := tree.Checkout(ctx, dir, agent.MaxCheckoutBytes)
 	if err != nil {
 		logger.Warn("commands not offered: checkout failed", "error", err)
-		return nil, cleanup
+		return nil, nil, cleanup
 	}
 	logger.Info("checkout written", "files", stats.Files, "bytes", stats.Bytes, "skipped", stats.Skipped,
 		"truncated", stats.Truncated, "elapsed", time.Since(started).Round(time.Millisecond))
-	note := "The checkout leaves out ignored paths, symlinks and files over 1 MiB."
+	if err := markRepository(dir, p.CloneURL); err != nil {
+		logger.Warn("checkout not marked as a repository", "error", err)
+	}
+	note := fmt.Sprintf("The checkout leaves out ignored paths, symlinks and files over %d MiB.", agent.MaxBlobBytes>>20)
 	if stats.Truncated {
 		note += fmt.Sprintf(" It stopped at %d MiB, so the paths that sort last are missing.", agent.MaxCheckoutBytes>>20)
 	}
 	env, proxied := commandEnv(home)
-	return agent.NewRunTool(agent.RunConfig{
-		Dir: dir, Env: env, Commands: found, Timeout: time.Duration(p.Agent.CommandTimeoutSeconds) * time.Second,
-		MaxOutputBytes: maxOutput, Proxied: proxied, Note: note,
-	}), cleanup
+	// gh reaches GitHub over HTTPS, which the gateway cannot add a
+	// credential to, so it carries the run's read-only token.
+	commandEnvs := map[string][]string{"gh": {"GH_TOKEN=" + gitToken, "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"}}
+	// A cut output is kept beside the checkout, where fetch_repo writes,
+	// within the budget the two share; one file holds at most what
+	// read_file reads of a diff, in line ranges.
+	budget := agent.NewWriteBudget(fetchWriteBytes)
+	run = agent.NewRunTool(agent.RunConfig{
+		Dir: dir, Env: env, CommandEnv: commandEnvs, Commands: found, Timeout: time.Duration(p.Agent.CommandTimeoutSeconds) * time.Second,
+		MaxOutputBytes: maxOutput, Proxied: proxied, Note: note, Logger: logger,
+		Mask: Secrets{GitToken: gitToken}.Mask,
+		Keep: &agent.Kept{Dir: up, Rel: upstreamRel, FileBytes: fetchDiffBytes, Budget: budget},
+	})
+	// An operator who allows only rg or fd has not let the agent reach the
+	// network, so fetch_repo comes with a command that does.
+	if found["gh"] != "" || found["curl"] != "" {
+		fetch = &fetchRepoTool{dir: up, budget: budget}
+	}
+	return run, fetch, cleanup
+}
+
+// curlrc is the configuration curl reads from HOME. Without a terminal
+// curl prints its progress meter to stderr, which the run tool keeps in
+// the result, and --silent would drop its warnings and errors with it.
+// The gateway hands redirects back to the client, so curl follows them
+// itself; it sends credentials only to the initial host.
+const curlrc = "no-progress-meter\nlocation\n"
+
+// markRepository gives the checkout an empty .git whose origin is the
+// repository's clone URL: no history, but enough for a tool that locates a
+// repository by its working tree, such as flate, to find this one.
+func markRepository(dir, cloneURL string) error {
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		return err
+	}
+	_, err = repo.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{cloneURL}})
+	return err
 }
 
 // commandEnv is the whole environment of a command: PATH, home as HOME,
@@ -77,11 +127,11 @@ func commandTool(ctx context.Context, p Spec, tree *agent.Tree, maxOutput int, l
 // HTTPS proxy, the egress gateway.
 func commandEnv(home string) (env []string, proxied bool) {
 	env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}
-	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} {
+	for _, name := range []string{"HTTP_PROXY", httpsProxyEnv, "NO_PROXY"} {
 		lower := strings.ToLower(name)
 		if v := cmp.Or(os.Getenv(name), os.Getenv(lower)); v != "" {
 			env = append(env, name+"="+v, lower+"="+v)
-			proxied = proxied || name == "HTTPS_PROXY"
+			proxied = proxied || name == httpsProxyEnv
 		}
 	}
 	return env, proxied

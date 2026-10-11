@@ -1,0 +1,693 @@
+# Configuration
+
+kritique takes its settings from three places, each for what it suits:
+
+| Where                                                                                                                                                                                          | What                                                                                                                                                              | Changed by                         |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| The configuration file, and its `KRITIQUE_AUTH_*`, `KRITIQUE_APPS_*`, `KRITIQUE_PROVIDERS_*`, `KRITIQUE_REVIEW_*`, `KRITIQUE_CONFIDENCE_*`, `KRITIQUE_TRIGGER_*` and `KRITIQUE_EMBEDDING_*` variables | What is reviewed and how: sign-in, the GitHub Apps, model providers, the embedder, egress, the repository settings, the repository entries and the accounts       | a restart                          |
+| The other `KRITIQUE_*` variables                                                                                                                                                                | How kritique runs: its addresses, the database, `KRITIQUE_WEB_URL`, logging, polling, onboarding, retention and runner Jobs ([how kritique runs](#how-kritique-runs)) | a restart                          |
+| The dashboard                                                                                                                                                                                  | Whether each repository is on or off                                                                                                                              | an admin, on the Repositories page |
+
+A repository's own [`.kritique.yaml`](repository-config.md) narrows what the
+configuration sets for it, from its own git.
+
+- **The file** is optional: `KRITIQUE_CONFIG_FILE` names it, and the chart's
+  `configFile` renders it, so the configuration lives in git with the rest
+  of the deployment.
+- **A secret** in the file is `{ env: NAME }`, the variable holding it,
+  never the value itself; the chart's `env` and `envFrom` set such a
+  variable from an existing Secret. Once the configuration is read,
+  kritique removes every variable a secret came from from its own
+  environment.
+- **Variables** also set sign-in, one app, one provider, the review
+  models, some review, confidence and trigger settings, and the embedder.
+  A variable wins over the file and carries a secret itself, so a small
+  deployment can be configured from the environment alone. A variable
+  under one of the prefixes above that names no key is refused at startup
+  rather than ignored; `KRITIQUE_REVIEW_WORKERS`, a process setting, is the
+  one exception.
+- **The chart's `config`** has a key for every `KRITIQUE_*` variable it
+  does not derive from its other values, its name without the prefix in
+  camelCase (`KRITIQUE_AUTH_OIDC_ISSUER` is `authOidcIssuer`); a secret's
+  key takes a `valueFrom` from a Secret.
+- **An expression:** a key whose value is a [CEL](https://cel.dev)
+  expression ends in `Expr`, or is the `expr` of a condition:
+  `roleMappingExpr`, and each item of a rule's `when` and of
+  `trigger.include` and `trigger.exclude`.
+- **When it is read:** once, at startup, with its variables. A change
+  takes a restart, and the chart rolls the pods when its `configFile`
+  changes. Content that does not load, or that would leave the dashboard
+  no way to sign in, fails startup, so a rolling update leaves the old
+  pods serving.
+
+## `auth`
+
+`auth` sets how people sign in and what each may do. Its variables are
+keys of the chart's `config`, the secrets among them from existing Secrets.
+
+| Key                      | Environment variable                        |
+| ------------------------ | ------------------------------------------- |
+| `sessionTTL`             | `KRITIQUE_AUTH_SESSION_TTL`                  |
+| `admin.user`             | `KRITIQUE_AUTH_ADMIN_USER`                   |
+| `admin.password`         | `KRITIQUE_AUTH_ADMIN_PASSWORD`               |
+| `oidc.name`              | `KRITIQUE_AUTH_OIDC_NAME`                    |
+| `oidc.issuer`            | `KRITIQUE_AUTH_OIDC_ISSUER`                  |
+| `oidc.clientId`          | `KRITIQUE_AUTH_OIDC_CLIENT_ID`               |
+| `oidc.clientSecret`      | `KRITIQUE_AUTH_OIDC_CLIENT_SECRET`           |
+| `oidc.scopes`            | `KRITIQUE_AUTH_OIDC_SCOPES`, comma-separated |
+| `oidc.rolesClaim`        | `KRITIQUE_AUTH_OIDC_ROLES_CLAIM`             |
+| `oidc.roleMappingExpr`   | `KRITIQUE_AUTH_OIDC_ROLE_MAPPING_EXPR`       |
+| `oidc.defaultRole`       | `KRITIQUE_AUTH_OIDC_DEFAULT_ROLE`            |
+| `github.clientId`        | `KRITIQUE_AUTH_GITHUB_CLIENT_ID`             |
+| `github.clientSecret`    | `KRITIQUE_AUTH_GITHUB_CLIENT_SECRET`         |
+| `github.roleMappingExpr` | `KRITIQUE_AUTH_GITHUB_ROLE_MAPPING_EXPR`     |
+| `forgejo.url`             | `KRITIQUE_AUTH_FORGEJO_URL`                  |
+| `forgejo.clientId`        | `KRITIQUE_AUTH_FORGEJO_CLIENT_ID`            |
+| `forgejo.clientSecret`    | `KRITIQUE_AUTH_FORGEJO_CLIENT_SECRET`        |
+| `forgejo.roleMappingExpr` | `KRITIQUE_AUTH_FORGEJO_ROLE_MAPPING_EXPR`    |
+| `gitea.*`                 | `KRITIQUE_AUTH_GITEA_*`, as `forgejo.*`      |
+
+```yaml
+auth:
+  admin:
+    password: { env: ADMIN_PASSWORD }
+  oidc:
+    name: Company SSO
+    issuer: https://idp.example.com
+    clientId: kritique-dashboard
+    clientSecret: { env: OIDC_CLIENT_SECRET }
+    scopes: [openid, email, profile]
+    rolesClaim: groups
+    roleMappingExpr: '"kritique-admins" in roles ? "admin" : ("kritique-users" in roles ? "member" : "")'
+  github:
+    clientId: Iv1.abc123
+    clientSecret: { env: GITHUB_CLIENT_SECRET }
+    roleMappingExpr: 'login == "user-1" ? "admin" : ""'
+```
+
+- `admin` is the local admin. It signs in on the sign-in page with a
+  username, `admin` unless `user` sets another, and `password`. It exists
+  only while a password is set: it is the way into a fresh instance, and a
+  way in when every provider is down. Ten failed attempts from one address
+  within 15 minutes lock that address out until the window passes; each
+  replica counts its own.
+- `oidc` signs in through any OpenID Connect issuer, an `https` URL. The
+  sign-in page labels it `name`, or "SSO" when unset.
+- `github` signs in on github.com with an OAuth App's client, or a GitHub
+  App's own: the App kritique reviews through can serve both, with a client
+  secret generated on its settings page (see [setup](setup.md)).
+- `forgejo` and `gitea` sign in through an OAuth2 application of the
+  instance at `url`, created under its site or user settings. A person's
+  organizations there place them as GitHub's do, on the `forgejo/` or
+  `gitea/` accounts of the same names.
+- `sessionTTL` is how long a dashboard session lasts, between 5 minutes and
+  30 days. It defaults to 12 hours.
+
+A provider must allow the callback URL `<KRITIQUE_WEB_URL>/auth/callback/<type>`:
+`oidc`, `github`, `forgejo` or `gitea`. The dashboard refuses to start
+with no way to sign in. The configuration is refused when nothing could
+make an admin: set an admin password, or a `roleMappingExpr` on a
+provider.
+
+### Roles
+
+| Role   | What it may do                                                                                                                                                                                                   |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Admin  | runs the instance from the dashboard: turns repositories on and off, queues re-runs, cancels and reindexes, and reads every account, the audit log and the [Configuration page](dashboard.md#configuration-page) |
+| Member | reads reviews, conversations and transcripts, with no write access: every account, or only the accounts serving the forge accounts their sign-in placed them on                                                  |
+
+The Configuration page lists the instance settings read-only, each with
+its source: the environment, the configuration file, or kritique's default.
+A secret shows only whether it is set, and a URL's credentials are hidden.
+Every admin write is audit-logged in the same transaction as the change it
+makes.
+
+A session holds the role its sign-in gave it. Editing a provider's role
+mapping, or rotating the admin password, ends the sessions it granted, so
+the next request signs in again under the new rules.
+
+#### Role mappings
+
+A `roleMappingExpr` is a [CEL](https://cel.dev) expression evaluated at
+sign-in. It yields one of:
+
+- a role for every account: `"admin"`, `"member"` or `""` for none;
+- a map from forge account to `"member"`, which reads only the accounts
+  serving those accounts, such as `{"github/org-1": "member"}`; `"*"` as a
+  key stands for every account.
+
+CEL gives both branches of a conditional one type, so an expression that
+yields a role on one branch and a map on the other wraps one in `dyn()`.
+
+| Provider | Variables the expression sees                                                                                                                                              |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OIDC     | `claims`, the ID token's claims merged with the UserInfo response; `roles`, the values of the claim `rolesClaim` names, read from a list, a map's keys, or a single string |
+| GitHub   | `login`; `email`; `orgs`, the organizations the user is an active member of; `teams`, each as `"<org>/<team>"`                                                             |
+| Forgejo, Gitea | as GitHub's, a team named by its name                                                                                                                                |
+
+When the mapping places nobody:
+
+- An OIDC sign-in is refused, unless `defaultRole: member` lets it read
+  every account. `defaultRole` defaults to `none`, so a wrong mapping fails
+  closed.
+- A GitHub sign-in reads the accounts serving the user's own account, or an
+  organization they are an active member of, and is refused when there are
+  none. Accounts a mapping names are added to those.
+
+A mapping that fails to evaluate refuses the sign-in.
+
+## `apps`
+
+`apps` declares the GitHub Apps, and the Forgejo and Gitea bot accounts,
+kritique serves accounts through. The [setup guide](setup.md) covers
+creating a GitHub App.
+
+```yaml
+apps:
+  github:
+    accounts: [org-1, user-1]
+    clientId: Iv1.example
+    privateKey: { env: GITHUB_APP_PRIVATE_KEY }
+    webhookSecret: { env: GITHUB_APP_WEBHOOK_SECRET }
+```
+
+| Key             | What                                                                                                           |
+| --------------- | -------------------------------------------------------------------------------------------------------------- |
+| the entry's key | the app's name, which is its webhook path, `/hooks/<name>`                                                     |
+| `accounts`      | the users and organizations it serves; a webhook for any other is ignored, and an account is served by one app |
+| `clientId`      | the App's client ID, inline or, like the secrets, as a reference                                               |
+| `privateKey`    | the App's private key                                                                                          |
+| `webhookSecret` | the same value as the App's webhook secret                                                                     |
+
+The same app can come from the environment instead:
+
+| Variable                      | Key                          |
+| ----------------------------- | ---------------------------- |
+| `KRITIQUE_APPS_NAME`           | the key, `github` unless set |
+| `KRITIQUE_APPS_ACCOUNTS`       | `accounts`, comma-separated  |
+| `KRITIQUE_APPS_CLIENT_ID`      | `clientId`                   |
+| `KRITIQUE_APPS_PRIVATE_KEY`    | `privateKey`                 |
+| `KRITIQUE_APPS_WEBHOOK_SECRET` | `webhookSecret`              |
+
+The environment declares at most one app. It replaces the file's app of
+the same name whole, or is added to the file's when none has that name.
+
+### Forgejo and Gitea
+
+An app with `forge: forgejo` or `forge: gitea` serves accounts on a
+self-hosted instance through a bot account's token instead of an App:
+
+```yaml
+apps:
+  home-forgejo:
+    forge: forgejo
+    url: https://git.example.com
+    accounts: [user-1, org-2]
+    token: { env: FORGEJO_TOKEN }
+    gitToken: { env: FORGEJO_READ_TOKEN }
+    webhookSecret: { env: FORGEJO_WEBHOOK_SECRET }
+```
+
+| Key             | What                                                                                                                                         |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `forge`         | `forgejo` or `gitea`; `github`, the default, for a GitHub App                                                                                |
+| `url`           | the instance's base URL, `http` or `https`, with its path when it is served under one; the API is under it at `/api/v1`                      |
+| `token`         | the bot's API token, which posts the reviews: it needs write access to issues and repositories, and repository admin to read a commenter's permission or dismiss an approval |
+| `gitToken`      | optional: a read-only token runners fetch the repository with; without one they get `token`, which can write, and kritique logs a warning   |
+| `webhookSecret` | the secret of the repository or organization webhook pointed at `/hooks/<name>`, sending pull request, issue comment, push and repository events |
+
+`KRITIQUE_APPS_FORGE`, `KRITIQUE_APPS_URL`, `KRITIQUE_APPS_TOKEN` and
+`KRITIQUE_APPS_GIT_TOKEN` declare the same keys from the environment. An
+app takes the keys of its forge alone: `clientId` and `privateKey` on a
+Forgejo or Gitea app, or `url` and the tokens on a GitHub one, are refused.
+
+What a review does there, and what it leaves out:
+
+| Feature                         | Forgejo                                                     | Gitea                                                          |
+| ------------------------------- | ----------------------------------------------------------- | -------------------------------------------------------------- |
+| summary, inline comments, status | yes, the status as `kritique/review`                       | yes                                                            |
+| approval and its dismissal      | yes; without repository admin the bot deletes its approval  | yes, likewise                                                  |
+| 👀 and 👍 reactions               | yes                                                         | yes                                                            |
+| a finding's suggestion          | a plain code block: no one-click suggestion                 | a plain code block                                             |
+| a comment over a range of lines | on its last line                                            | on its last line                                               |
+| replies in a finding's thread   | yes                                                         | yes where the instance has the replies API, else beside it     |
+| resolving a finding's thread    | no: the API has none, so threads are left open              | yes where the instance has the resolve API                     |
+| a person resolving a thread     | no webhook says so: dismiss with a mention instead          | likewise                                                       |
+| `gh` in runners                 | never offered                                               | never offered                                                  |
+
+## `providers` and `embedding`
+
+`providers` are the instance's model keys, and `embedding` the embedder
+that builds each repository's similar-code index from one of them.
+[Models](models.md) describes both, with retries, fallback, local models
+and OpenCode.
+
+```yaml
+providers:
+  openrouter:
+    type: openrouter
+    apiKey: { env: OPENROUTER_API_KEY }
+embedding:
+  model: openrouter/voyageai/voyage-code-4
+  dims: 1024
+```
+
+## Repository settings and `repositories`
+
+The repository settings are written at the file's root and apply to every
+repository, and `repositories` holds the entries that change them for
+some: `owner/*` for every repository of an account, and `owner/name` for
+one. They come in five groups, with a few keys beside them:
+
+| Group        | Keys                                                                                                     | What they set                              |
+| ------------ | -------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `review`     | `model`, `fallback`, `effort`, `fixes`, `approve`, `incremental`, `diagram`, `cost`                      | what a review runs on and what it says     |
+| `confidence` | `model`, `fallback`, `effort`, `threshold`, `gate`, `risk`, `instructions`                               | how a review is judged                     |
+| `trigger`    | `include`, `exclude`, `settle`, `limit`                                                                  | which pull requests are reviewed, and when |
+| `comments`   | `inline`, `summary`, `finding`                                                                           | what is posted                             |
+| `agent`      | `steps`, `output`, `tokens`, `prompt`, `timeout`, `commands`, `commandTimeout`                           | the bounds of a review's tool loop         |
+| beside them  | `enabled`, `rules`, `context`, `skills`, `ignore`, `tasks`, `taskBounds`, and `limits` at the root alone |                                            |
+
+`ignore` lists globs of the paths kritique never looks at: they are left out
+of a review's context and of the index, on top of kritique's own (vendored
+trees, lockfiles, generated and minified code, source maps and logs), and a
+pull request that changes nothing else is skipped.
+
+```yaml
+review:
+  model: openrouter/vendor/large-model
+  fallback: openrouter/vendor/small-model
+trigger:
+  settle: 30s
+  exclude:
+    - expr: pr.draft
+    - { name: forks, expr: pr.fork }
+rules:
+  - { id: no-tokens, rule: "Never log a token, key or password." }
+  - id: renovate
+    rule: Say what the update breaks, from the release notes in the body.
+    when: [{ expr: pr.headRef.startsWith("renovate/") }]
+skills:
+  scope:
+    review-renovate-pr:
+      when: [{ expr: pr.headRef.startsWith("renovate/") }]
+repositories:
+  org-1/*:
+    review: { model: org-1-key/vendor/large-model }
+    rules:
+      - {
+          id: wrap-errors,
+          rule: 'Wrap errors with fmt.Errorf("<package>: %w", err).',
+          paths: ["**/*.go"],
+        }
+  org-1/repo-1:
+    review: { approve: true }
+    trigger:
+      include:
+        - expr: pr.baseRef == "main"
+    agent: { commands: [gh, curl] }
+```
+
+### What only the admin sets
+
+The root and each entry take the keys a repository's own `.kritique.yaml`
+takes, which the [`.kritique.yaml` reference](repository-config.md)
+describes, and these, which are the admin's alone:
+
+| Key                       | What                                                                                                                                                                                                                                                                                 |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `confidence.instructions` | guidance to the scorer on rating risk ([risk](confidence.md#risk))                                                                                                                                                                                                                   |
+| `review.cost`             | `true` ends the summary's footer with what the pull request's reviews have cost together, every model call charged to one of them. Off unless set: the comment is public, on a fork's pull request too, and the figure is the instance's spend                                       |
+| `review.incremental`      | how many files of the change may move since the last review before a re-review covers the whole pull request again; 25 unless set ([incremental reviews](#incremental-reviews))                                                                                                      |
+| `trigger.settle`          | how long a new head waits before its review starts, so a burst of pushes is reviewed once; no wait unless set                                                                                                                                                                        |
+| `trigger.limit`           | how many automatic reviews a pull request gets before kritique pauses them, so a long-lived pull request stops spending on every push; unlimited unless set. The summary of the last one says so, and `@<app slug> review` and `resume` still work ([commands](reviews.md#commands)) |
+| `agent`                   | the bounds of a review's tool loop ([the agent](#the-agent))                                                                                                                                                                                                                         |
+| `taskBounds`              | what [event tasks](tasks.md) may do, and whether they run at all ([tasks](#tasks-and-taskbounds))                                                                                                                                                                                    |
+| `limits`                  | at the root alone: every account's limits ([`accounts`](#accounts))                                                                                                                                                                                                                  |
+| `enabled`                 | at the root and `owner/*` only: where repositories start ([which repositories run](#which-repositories-run)). A repository's `.kritique.yaml` can only set `enabled: false`, which turns its own repository off                                                                      |
+
+### Precedence
+
+A value applies in this order: kritique's default, the file's root,
+`owner/*`, `owner/name`, and the repository's `.kritique.yaml`. A narrower
+value replaces the broader one's, except:
+
+| Key                                  | Across the root, `owner/*` and `owner/name`                              | From a `.kritique.yaml`                                           |
+| ------------------------------------ | ------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| `ignore`                             | globs add up                                                             | globs add up                                                      |
+| `rules`                              | add up by id                                                             | added; a rule under an admin's id is dropped                      |
+| `context`                            | replaces                                                                 | added                                                             |
+| `trigger.include`, `trigger.exclude` | add up by name ([trigger conditions](#which-pull-requests-are-reviewed)) | judged beside the admin's lists; a name an admin's has is dropped |
+| `skills.paths`                       | replaces                                                                 | replaces                                                          |
+| `skills.scope`                       | adds up by skill name                                                    | adds up by skill name, the file's winning                         |
+| `review.fixes`                       | replaces                                                                 | can only turn it on                                               |
+| `confidence.risk`                    | replaces                                                                 | can only lower it                                                 |
+| `enabled`                            | replaces                                                                 | can only turn it off                                              |
+| `tasks`                              | add up by name; `enabled: false` switches one off                        | added after; one under an admin's task's name is dropped          |
+| `taskBounds`                         | replaces key by key                                                      | the admin's alone                                                 |
+
+### Confidence and risk
+
+`confidence` sets a second model's score of each reviewed pull request,
+whether the commit status is gated on it, and how risky a change may be
+and still be approved. [Confidence and approvals](confidence.md) describes
+the keys, how a score is reached, the risk tables and how approvals follow
+them.
+
+### Which pull requests are reviewed
+
+`trigger.include` and `trigger.exclude` decide which pull requests are
+reviewed: one is reviewed when one `include` condition holds, or there are
+none, and no `exclude` condition holds. A condition has:
+
+| Key     | What                                                                                                           |
+| ------- | -------------------------------------------------------------------------------------------------------------- |
+| `expr`  | a CEL expression over the pull request ([the `pr` variable](repository-config.md#include-and-exclude-recipes)) |
+| `paths` | globs that hold when a changed path matches one of them                                                        |
+| `name`  | optional; names the condition in a skipped review's commit status, and lets a narrower scope replace it        |
+
+A condition takes an `expr`, `paths` or both, when both must hold.
+
+```yaml
+trigger:
+  include:
+    - expr: pr.baseRef == "main"
+  exclude:
+    - expr: pr.draft
+    - { name: skip-label, expr: 'pr.labels.exists(l, l.name == "skip-review")' }
+    - { name: migrations, paths: ["db/migrations/**"] }
+```
+
+In an expression, `pr.lines` is the lines the pull request's diff adds
+and removes, paths the `ignore` globs match left out. A size limit is an
+exclusion on it:
+
+```yaml
+trigger:
+  exclude: [{ name: too-large, expr: pr.lines > 2000 }]
+```
+
+- **When it is decided:** a condition on the pull request alone is decided
+  at once, and a pull request it keeps out leaves no review behind. A
+  condition with `paths` or `pr.lines` is decided once the pull request is
+  fetched, before any model is called, and a pull request it keeps out
+  shows as a skipped review; its commit status names the exclusion that
+  held when it has a name. The lists are then judged with the first 64 KiB
+  of the description.
+- **Across scopes:** the lists add up across the root, `owner/*` and
+  `owner/name`, and a named condition replaces the broader scope's of that
+  name where it stands. A name may not be given twice in one list.
+- **A repository's lists:** a `.kritique.yaml` has lists of its own,
+  judged beside the admin's: a pull request must pass both, and a
+  condition in the file under a name an admin's has is dropped.
+- **Checked at startup:** an expression is compiled and smoke-tested
+  against a sample pull request, so a broken one fails startup.
+- **Forks:** a pull request from a fork is reviewed like any other unless
+  excluded, such as with `exclude: [{ name: forks, expr: pr.fork }]`.
+- **Asked-for reviews:** a review someone asks for, with
+  `@<app slug> review` or a re-run from the dashboard, passes the admin's
+  lists whatever they say; a `.kritique.yaml`'s lists still apply to it.
+
+### Incremental reviews
+
+A later push is reviewed against what changed since the last review, as
+long as no more than `review.incremental` files of the change moved; past
+that, the re-review covers the whole pull request again. What moves
+between the two heads outside the change's own paths is the base, under a
+merge or a rebase, and does not count; nor does what the base gained in
+the change's own files since the last review, as long as the merge base
+that review was made against can still be fetched. A re-run at the head
+the last review saw, a re-run someone asked for with `@<app slug> review`
+or from the dashboard, or a merge or rebase that leaves the change as it
+was, always covers the whole pull request. A re-review that covers the
+whole pull request is still shown the last review's findings, on the diff
+or off it, to report again those that still hold, except
+a re-run at the head the last review saw, or one someone asked for, which
+look afresh. A finding reported again keeps the inline thread its first
+report opened, however it is worded now. Each review
+also leaves notes, which no comment shows, on what it checked beyond the
+diff and found sound, and the next re-review is shown them beside the
+findings.
+
+An incremental re-review carries on the last review's conversation
+instead when it can, so the model keeps what it read and the provider
+serves the earlier part of the conversation from its prompt cache. It is
+told the head moved, shown the diff since, and asked for the whole review
+again. That takes all of these:
+
+- the merge base has not moved since the last review, so the diff since
+  shows everything that changed;
+- the last review's conversation was kept on the same review model less
+  than 25 minutes before, or 4 for an Anthropic model, whose cache lasts
+  5 minutes;
+- it is under 100,000 tokens, past which every step's reading it again
+  costs more than starting afresh, and under a quarter of the review's
+  `agent.tokens`, or what the monthly cap leaves of them;
+- the review would send the same system prompt and tools, and the pull
+  request's title, description and linked issues are as they were.
+
+Otherwise the re-review starts afresh, with the last review's findings
+and notes. On the dashboard, a review that carried on names the review
+before on its Timeline, and its Conversation starts where that review's
+left off, linking to it.
+
+An incremental re-review reports what the new commits brought. A finding
+in the diff that the last review did not make, more than 3 lines from
+every line changed since, is held back: the summary lists it folded away,
+with no inline comment, and it counts toward nothing, the score, the
+status and the approval included. A file where one of the last review's
+findings went unreported is spared, since that finding may be back under
+a new title.
+
+### The agent
+
+`agent` bounds a review's tool loop, and a follow-up's:
+
+| Key              | Default              | What                                                                                         |
+| ---------------- | -------------------- | -------------------------------------------------------------------------------------------- |
+| `steps`          | 60                   | model calls the loop may make                                                                |
+| `output`         | 32768                | bytes one tool call may return; a command's output cut to it is kept whole beside the checkout |
+| `tokens`         | 4,000,000            | prompt and output tokens the review, or each part of a split one, may spend across its steps |
+| `prompt`         | 24000, at least 8000 | tokens of the prompt a review, its confidence score and a follow-up start from               |
+| `parts`          | 8                    | the most parts a review over 64 KiB of diff is split into; 1 never splits                    |
+| `timeout`        | 20m, at most 2h35m   | the loop's wall time, each part's in a split review                                          |
+| `commands`       | none                 | the programs its run tool may execute                                                        |
+| `commandTimeout` | 30s, at least 1s     | one command's wall time                                                                      |
+
+- **Submitting:** the last step is told to submit, as is any step once the
+  review has spent nine tenths of its `tokens`. A step told to submit that
+  does not, because the submission was rejected, it answered in prose or
+  it called another tool, which is refused, is told again, up to twice, so
+  the steps spent reading are not lost to one slip at the end. `steps: 1`
+  is the cheapest review: one step, which must submit the findings, over
+  the same prompt.
+- **Output per step:** a step may produce 16384 tokens, and a model
+  reasoning at a high [`review.effort`](models.md#effort) can spend them
+  all before it calls a tool. Such a step is told to go on rather than to
+  submit, up to twice in a row; a third in a row is taken as an answer in
+  prose.
+- **The prompt** holds the system prompt, the pull request, as much of the
+  diff as fits, whole files only, and then the context. A file left out is
+  named in the review's notes, and a review's or a follow-up's agent reads
+  its part of the diff with `read_diff`, which numbers each line as the
+  head has it; the scorer, which has no tools, never sees it. The list of
+  changed files marks each one the change adds, deletes or renames, and a
+  review's findings may point at any line of the pull request's diff, in a
+  file left out as in one shown. A model with a larger context window can
+  take more, so a large file is reviewed from the start. Every step sends
+  the prompt again and counts it against `tokens`, so a larger `prompt`
+  leaves the agent fewer steps unless `tokens` is raised with it, and one
+  near `tokens` leaves it none.
+- **Large reviews:** a review whose diff is over 64 KiB, counting only the
+  files no `ignore` glob matches, is split into parts of about 64 KiB each,
+  cut at directory boundaries where it can, at most `parts` of them. Each
+  part is reviewed by an agent of its own with the bounds above, from its
+  own files' diff and the context built from it, and reports findings only
+  on its own files; it can still read any other file. The parts run as
+  many at once as the review model has [`concurrency`](#accounts) slots
+  free when the review starts, its own and those no other review holds,
+  and the rest as those end; the parts' tool calls run one at a time. They
+  are published as one review, its summary written from theirs by one more
+  call to the review model, which is tried again and falls back as a
+  review's step is ([retries](models.md#retries)) and counts towards
+  `tokensPerMonth`; when that call still fails or the cap is reached, the
+  summary joins the parts' own.
+  A part that ends before it submits leaves its files unreviewed: the
+  summary names them, and the review counts as incomplete for the commit
+  status, approves nothing, withdrawing an approval given before, and is no
+  review a later one builds on. An incremental re-review splits only the
+  diff since the last review, when that is over 64 KiB. The token grant and
+  the Job deadline are sized for the parts from the pull request's size as
+  the forge reports it, the deadline for running them in the slots taken.
+- **Commands:** the runner's `-tools` image has `gh`, `curl`, `fd`, `jq`,
+  `rg` and `yq`. The agent is told to use `gh` for GitHub, which signs in
+  with a token minted for the run that can only read the repository under
+  review and public repositories. With `gh` or `curl` the agent can also
+  fetch another repository's files, or list its tags, with `fetch_repo`,
+  such as the upstream of a dependency on any host.
+  [Runner tools](security.md#runner-tools) says what bounds a command and
+  a fetch.
+
+### Tasks and `taskBounds`
+
+`tasks` declares [event tasks](tasks.md): a prompt run when a forge event
+fires, such as a new issue or a published release, whose answer may
+comment, label, assign or close within what the task declares.
+`taskBounds` turns them on and bounds them, key by key at every scope;
+tasks are off, the admin's own included, until `enabled: true`.
+
+```yaml
+taskBounds:
+  enabled: true
+  events: ["issue.*", "pull_request.*", "comment.*", "raw:release.*"]
+tasks:
+  - name: welcome
+    on: [{ pull_request: [opened] }]
+    mode: single
+    actions: { comment: {} }
+repositories:
+  org-1/*:
+    taskBounds: { repository: false }
+```
+
+The admin's tasks merge by name across the root, `owner/*` and
+`owner/name`, and are trusted; a repository's `.kritique.yaml` adds its own
+after them, clipped to `taskBounds` and held to the admin's models,
+`agent` limits and `agent.commands` ([bounds](tasks.md#bounds)).
+
+### Environment variables
+
+Some of the root's settings can come from the environment; the provider's
+and the embedder's variables are on [Models](models.md#from-the-environment):
+
+| Variable                       | Key                                                            |
+| ------------------------------ | -------------------------------------------------------------- |
+| `KRITIQUE_REVIEW_MODEL`         | `review.model`                                                 |
+| `KRITIQUE_REVIEW_FALLBACK`      | `review.fallback`                                              |
+| `KRITIQUE_REVIEW_EFFORT`        | `review.effort`, a level or empty ([effort](models.md#effort)) |
+| `KRITIQUE_REVIEW_APPROVE`       | `review.approve`, `true` or `false`                            |
+| `KRITIQUE_REVIEW_FIXES`         | `review.fixes`, `true` or `false`                              |
+| `KRITIQUE_REVIEW_INCREMENTAL`   | `review.incremental`, a whole number of files                  |
+| `KRITIQUE_REVIEW_DIAGRAM`       | `review.diagram`, `true` or `false`                            |
+| `KRITIQUE_REVIEW_COST`          | `review.cost`, `true` or `false`                               |
+| `KRITIQUE_CONFIDENCE_MODEL`     | `confidence.model`                                             |
+| `KRITIQUE_CONFIDENCE_FALLBACK`  | `confidence.fallback`                                          |
+| `KRITIQUE_CONFIDENCE_EFFORT`    | `confidence.effort`, a level or empty                          |
+| `KRITIQUE_CONFIDENCE_THRESHOLD` | `confidence.threshold`, a whole number from 0 to 5             |
+| `KRITIQUE_CONFIDENCE_GATE`      | `confidence.gate`, `true` or `false`                           |
+| `KRITIQUE_CONFIDENCE_RISK`      | `confidence.risk`, `low`, `medium`, `high` or `critical`       |
+| `KRITIQUE_TRIGGER_SETTLE`       | `trigger.settle`, a duration such as `30s`                     |
+| `KRITIQUE_TRIGGER_LIMIT`        | `trigger.limit`, a whole number of reviews                     |
+
+The Configuration page lists what the file and the environment set under
+"Instance settings", with where each comes from.
+
+### Which repositories run
+
+kritique registers every repository each App reaches, once the
+configuration is applied and again on every poll, and "Resync from GitHub"
+on the Repositories page does the same at once. Each also disables the
+repositories the App no longer reaches, such as one deleted, renamed or
+transferred on GitHub, unless the configuration lists them; a listing that
+fails or comes back empty disables nothing. Whether one runs is decided in
+this order:
+
+1. an archived repository never runs: unarchive it on GitHub, then
+   resync;
+2. one an admin turned on or off on the Repositories page runs as they
+   chose;
+3. a fork does not run, since an account can reach many forks it never
+   meant to review;
+4. any other runs as `enabled` says, at the root or `owner/*`: on unless
+   one sets `enabled: false`.
+
+An `owner/name` entry may not set `enabled`: the dashboard owns a
+repository's on or off, and the configuration only says where one starts.
+A repository that is off, that the App no longer reaches, or whose account
+no App serves is neither reviewed, polled nor indexed. Its index is
+dropped once it has been off for `KRITIQUE_INDEX_GRACE`, counted from the
+leader's hourly sweep that first finds it off; one that runs again before
+then keeps its index.
+
+## `accounts`
+
+An account is a user or organization an app serves, `<forge>/<name>`
+such as `github/org-1` or `forgejo/user-1`. Its entry under `accounts`,
+keyed by its name, holds what is the account's alone, on every forge an
+app serves that name on:
+
+```yaml
+accounts:
+  org-1:
+    limits: { reviewsPerDay: 50, tokensPerMonth: 20000000 }
+    providers:
+      org-1-key: { type: openrouter, apiKey: { env: ORG_1_OPENROUTER_API_KEY } }
+```
+
+`limits` caps the account; the root's `limits` sets every account's, and
+an account's entry replaces it key by key:
+
+| Key              | Default   | What                                                                                                                                                       |
+| ---------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `concurrency`    | 2         | how many model calls it runs at once; index runs hold all but one while they embed, so a review's similar-code lookup has a slot unless `concurrency` is 1 |
+| `reviewsPerDay`  | unlimited | reviews in a calendar day                                                                                                                                  |
+| `tokensPerMonth` | unlimited | input and output tokens in a calendar month                                                                                                                |
+
+`providers` are its own model keys, which its repositories' models can
+name ([an account's own keys](models.md#an-accounts-own-keys)).
+
+An account runs while an app serves it. An entry for an account no app
+serves is kept, but not run, and the Configuration page lists it as not
+served.
+
+## `egress`
+
+`egress` is what runner pods may reach through kritique's gateway beyond
+`github.com` and `api.github.com`, which a GitHub app allows, and a Forgejo
+or Gitea app's host: a host on a private address needs an `allow` entry
+covering the address too, and runners reach it over HTTPS on port 443
+alone. `allow` and `deny`
+list hosts, IP addresses and CIDRs, and `credentials` names hosts the
+gateway adds a token to. [Security](security.md#the-egress-gateway)
+describes them with the gateway.
+
+```yaml
+egress:
+  allow: ["*", 10.10.0.5]
+  deny: ["*.pastebin.com", 203.0.113.0/24]
+  credentials:
+    api.github.com: { env: GITHUB_TOKEN }
+```
+
+## How kritique runs
+
+These come from the environment rather than the file, each a camelCased
+key of the chart's `config` (`KRITIQUE_POLL_INTERVAL` is `pollInterval`)
+except where noted; a restart changes them. The chart sets the rest of
+the process's variables, its addresses, database URLs and roles and the
+runner image, from its other values.
+
+| Variable                           | What                                                                                                                                                                                                                             |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `KRITIQUE_POLL_INTERVAL`            | how often the leader lists each app's open pull requests, its backstop for missed webhooks; `0s` turns it off; 10m unless set                                                                                                    |
+| `KRITIQUE_POLL_LOOKBACK`            | how far back a first or long-idle poll looks; 24h unless set                                                                                                                                                                     |
+| `KRITIQUE_ONBOARD_WINDOW`           | how many onboarding index jobs the leader keeps queued or running at once; 4 unless set                                                                                                                                          |
+| `KRITIQUE_INDEX_GRACE`              | how long the index of a repository that stopped running is kept; 720h unless set                                                                                                                                                 |
+| `KRITIQUE_TRANSCRIPT_RETENTION`     | how long a review's full model transcript is kept, at least 24h; 720h unless set                                                                                                                                                 |
+| `KRITIQUE_DIFF_RETENTION`           | how long a review keeps the diff it was made from, the context it read and the repository files it named, at least 24h; 720h unless set                                                                                          |
+| `KRITIQUE_REVIEW_WORKERS`           | review jobs one replica runs at once; 2 unless set                                                                                                                                                                               |
+| `KRITIQUE_INDEX_WORKERS`            | index jobs one replica runs at once; 1 unless set                                                                                                                                                                                |
+| `KRITIQUE_LEADER_RETRY_INTERVAL`    | how often a replica retries the leader lock, and the holder checks it still has it; 15s unless set                                                                                                                               |
+| `KRITIQUE_GATEWAY_TOKEN_TTL`        | how long a run's gateway token outlives its Job's deadline, in case the replica that minted it dies first; 1h unless set                                                                                                         |
+| `KRITIQUE_LOG_LEVEL`                | `debug`, `info`, `warn` or `error`; `info` unless set                                                                                                                                                                            |
+| `KRITIQUE_LOG_FORMAT`               | `json` or `text`; `json` unless set                                                                                                                                                                                              |
+| `KRITIQUE_RUNNER_DEADLINE`          | a runner Job's deadline, at most 2h; 15m unless set                                                                                                                                                                              |
+| `KRITIQUE_RUNNER_RUNTIME_CLASS`     | the RuntimeClass of runner Jobs, e.g. `gvisor`; the cluster default unless set                                                                                                                                                   |
+| `KRITIQUE_RUNNER_IMAGE_PULL_POLICY` | the runner container's imagePullPolicy, `Always`, `IfNotPresent` or `Never`; the chart's `runner.image.pullPolicy` renders it                                                                                                    |
+| `KRITIQUE_RUNNER_RESOURCES`         | a runner pod's resources, as JSON; the chart's `runner.resources` renders it                                                                                                                                                     |
+| `KRITIQUE_RUNNER_TOOLS`             | command-line tools a runner pod mounts from an image for the agent's run tool, as JSON: each a `name`, a digest-pinned `image`, the `path` of its binaries and the `commands` it provides; the chart's `runner.tools` renders it |
+
+A transcript may contain repository content the agent read, and every
+member of its account can read it. A review past the diff retention keeps
+its findings, summary and what it read by name and size; the dashboard's
+diff and raw views say the bodies were not kept.

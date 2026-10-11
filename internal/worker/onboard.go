@@ -25,8 +25,8 @@ const (
 // Onboarder feeds onboarding index jobs to the index queue a few at a time:
 // after a first install, or a model change that drops every index, all
 // repositories need one at once, and inserting them all would put the
-// first-declared tenant's hundreds ahead of everyone else's. It keeps at
-// most indexing.onboardWindow of them queued or running, tenants taking turns and the
+// first-declared account's hundreds ahead of everyone else's. It keeps at
+// most indexing.onboardWindow of them queued or running, accounts taking turns and the
 // repositories whose pull requests moved last going first. A leader duty.
 type Onboarder struct {
 	Store *store.Store
@@ -54,24 +54,32 @@ func (o *Onboarder) Run(ctx context.Context) {
 	}
 }
 
-// Offer queues onboarding jobs up to the window.
+// Offer queues onboarding jobs up to the window, and none while the
+// running configuration has no embedder.
 func (o *Onboarder) Offer(ctx context.Context) error {
+	f := o.Current.Get()
+	if f.Embedding == nil {
+		return nil
+	}
 	inFlight, err := o.Store.OnboardingInFlight(ctx)
 	if err != nil {
 		return err
 	}
-	window := o.Current.Get().OnboardWindow()
+	window := f.OnboardWindow()
 	room := window - inFlight
 	if room <= 0 {
 		return nil
 	}
-	refs, err := o.Store.OnboardCandidates(ctx, room, onboardRetryAfter)
+	refs, err := o.Store.OnboardCandidates(ctx, room, onboardRetryAfter, func(accountID, fullName string, t configfile.RepoTraits) bool {
+		a, ok := f.AccountByID(accountID)
+		return ok && f.Runs(a, fullName, t)
+	})
 	if err != nil || len(refs) == 0 {
 		return err
 	}
 	params := make([]river.InsertManyParams, 0, len(refs))
 	for _, r := range refs {
-		args := jobs.IndexArgs{TenantID: r.TenantID, RepositoryID: r.ID, Trigger: jobs.TriggerOnboard}
+		args := jobs.IndexArgs{AccountID: r.AccountID, RepositoryID: r.ID, Trigger: jobs.TriggerOnboard}
 		params = append(params, river.InsertManyParams{Args: args})
 	}
 	results, err := o.Queue.InsertMany(ctx, params)

@@ -1,9 +1,3 @@
-// actions.go holds the enqueue helpers the web dashboard's API handlers call,
-// each running inside the caller's tenant transaction (store.WithTenant) so
-// the web role can audit an action in the same transaction it takes effect
-// in. Row-level security on pull_requests/reviews already scopes every query
-// here to the transaction's tenant; the explicit tenant_id predicates below
-// are defense in depth, matching the rest of the codebase.
 package jobs
 
 import (
@@ -18,8 +12,9 @@ import (
 	"github.com/riverqueue/river/rivertype"
 )
 
-// ErrNoHead is returned by EnqueueRerun when the pull request has no open
-// head to re-review: it is closed, or the number does not exist.
+// ErrNoHead is returned when the pull request has no head to review: the
+// number does not exist, or, for any review but a re-run someone asks
+// for, it is closed.
 var ErrNoHead = errors.New("jobs: pull request has no head to re-review")
 
 // ErrNotCancelable is returned by RequestCancel when the review is not in a
@@ -33,7 +28,7 @@ var ErrNotCancelable = errors.New("jobs: review is not in a cancelable state")
 var ErrRerunQueued = errors.New("jobs: a review of this head is already queued or running")
 
 // ErrRepositoryNotFound is returned by EnqueueReindex when repositoryID does
-// not exist in tenantID.
+// not exist in accountID.
 var ErrRepositoryNotFound = errors.New("jobs: repository not found")
 
 // ErrReindexQueued is returned by EnqueueReindex when a forced reindex of
@@ -41,19 +36,40 @@ var ErrRepositoryNotFound = errors.New("jobs: repository not found")
 var ErrReindexQueued = errors.New("jobs: reindex already queued")
 
 // EnqueueRerun re-queues a review of number's current head, the way a human
-// asks kritique to look again. It gives the job a fresh, random Request value
+// asks kritique to look again, a merged or closed pull request's too: a look
+// back at what was missed, which the worker reviews with no commit status
+// and no approval. It gives the job a fresh, random Request value
 // so it inserts even when a review of the same head already completed,
 // bypassing the push-triggered dedup that keys on
-// tenant+repository+number+head alone; while a review of that head is
+// account+repository+number+head alone; while a review of that head is
 // running or prepared, or a review job for it has yet to finish, it is
-// ErrRerunQueued instead.
+// ErrRerunQueued instead. Row-level security on pull_requests and reviews
+// already scopes every query to the transaction's account; the explicit
+// account_id predicates are defense in depth.
 func EnqueueRerun(
-	ctx context.Context, tx pgx.Tx, c *river.Client[pgx.Tx], tenantID, repositoryID string, number int,
+	ctx context.Context, tx pgx.Tx, c *river.Client[pgx.Tx], accountID, repositoryID string, number int,
+) (int64, error) {
+	return enqueueFresh(ctx, tx, c, accountID, repositoryID, number, TriggerManual)
+}
+
+// EnqueueLabelChange queues a review of number's current head for trigger,
+// a label added or removed (see LabelChange). The head's earlier job, the
+// one that ended in the skip the label may lift, still holds the key a
+// push dedupes on, so the job gets a fresh Request as a re-run does, and is
+// ErrRerunQueued under the same conditions.
+func EnqueueLabelChange(
+	ctx context.Context, tx pgx.Tx, c *river.Client[pgx.Tx], accountID, repositoryID string, number int, trigger string,
+) (int64, error) {
+	return enqueueFresh(ctx, tx, c, accountID, repositoryID, number, trigger)
+}
+
+func enqueueFresh(
+	ctx context.Context, tx pgx.Tx, c *river.Client[pgx.Tx], accountID, repositoryID string, number int, trigger string,
 ) (int64, error) {
 	var headSHA string
 	err := tx.QueryRow(ctx, `SELECT head_sha FROM pull_requests
-		WHERE tenant_id = $1 AND repository_id = $2 AND number = $3 AND state = 'open'`,
-		tenantID, repositoryID, number).Scan(&headSHA)
+		WHERE account_id = $1 AND repository_id = $2 AND number = $3 AND (state = 'open' OR $4)`,
+		accountID, repositoryID, number, trigger == TriggerManual).Scan(&headSHA)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, ErrNoHead
 	}
@@ -62,21 +78,21 @@ func EnqueueRerun(
 	}
 	// Two re-runs of one pull request at once would each see the other's
 	// job not yet committed; the lock makes the second wait and see it.
-	key := "kritique:rerun:" + tenantID + ":" + repositoryID + ":" + strconv.Itoa(number)
+	key := "kritique:rerun:" + accountID + ":" + repositoryID + ":" + strconv.Itoa(number)
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key); err != nil {
 		return 0, fmt.Errorf("jobs: lock pull request: %w", err)
 	}
 	var busy bool
 	err = tx.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM reviews r JOIN pull_requests p ON p.id = r.pull_request_id
-			WHERE p.tenant_id = $1::text::uuid AND p.repository_id = $2::text::uuid AND p.number = $3 AND r.head_sha = $4
+			WHERE p.account_id = $1::text::uuid AND p.repository_id = $2::text::uuid AND p.number = $3 AND r.head_sha = $4
 				AND r.status IN ('running', 'prepared'))
 		OR EXISTS (
 			SELECT 1 FROM river_job
-			WHERE kind = $5 AND state IN ('available', 'pending', 'retryable', 'running', 'scheduled')
-				AND args->>'tenant_id' = $1::text AND args->>'repository_id' = $2::text AND (args->>'number')::int = $3
+			WHERE kind = $5 AND state IN (`+LiveStatesSQL()+`)
+				AND args->>'account_id' = $1::text AND args->>'repository_id' = $2::text AND (args->>'number')::int = $3
 				AND args->>'head_sha' = $4)`,
-		tenantID, repositoryID, number, headSHA, ReviewArgs{}.Kind()).Scan(&busy)
+		accountID, repositoryID, number, headSHA, ReviewArgs{}.Kind()).Scan(&busy)
 	if err != nil {
 		return 0, fmt.Errorf("jobs: look up running reviews: %w", err)
 	}
@@ -84,13 +100,29 @@ func EnqueueRerun(
 		return 0, ErrRerunQueued
 	}
 	res, err := c.InsertTx(ctx, tx, ReviewArgs{
-		TenantID: tenantID, RepositoryID: repositoryID, Number: number, HeadSHA: headSHA,
-		Trigger: TriggerManual, Request: uuid.NewString(),
+		AccountID: accountID, RepositoryID: repositoryID, Number: number, HeadSHA: headSHA,
+		Trigger: trigger, Request: uuid.NewString(),
 	}, nil)
 	if err != nil {
 		return 0, fmt.Errorf("jobs: enqueue rerun: %w", err)
 	}
 	return res.Job.ID, nil
+}
+
+// HeadQueued reports whether a review job for the pull request's head has
+// yet to finish, whatever Request it carries.
+func HeadQueued(ctx context.Context, tx pgx.Tx, accountID, repositoryID string, number int, headSHA string) (bool, error) {
+	var queued bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM river_job
+		WHERE kind = $5 AND state IN (`+LiveStatesSQL()+`)
+			AND args->>'account_id' = $1::text AND args->>'repository_id' = $2::text AND (args->>'number')::int = $3
+			AND args->>'head_sha' = $4)`,
+		accountID, repositoryID, number, headSHA, ReviewArgs{}.Kind()).Scan(&queued)
+	if err != nil {
+		return false, fmt.Errorf("jobs: look up queued reviews: %w", err)
+	}
+	return queued, nil
 }
 
 // RequestCancel asks the worker running reviewID to stop. It only applies
@@ -99,17 +131,14 @@ func EnqueueRerun(
 // nothing a cancel can reach.
 // The row update and the JobCancelTx call share tx, so a rollback undoes
 // both together.
-func RequestCancel(ctx context.Context, tx pgx.Tx, c *river.Client[pgx.Tx], reviewID string, by string) error {
+func RequestCancel(ctx context.Context, tx pgx.Tx, c *river.Client[pgx.Tx], reviewID string) error {
 	if _, err := uuid.Parse(reviewID); err != nil {
 		return ErrNotCancelable
 	}
-	if _, err := uuid.Parse(by); err != nil {
-		return ErrNotCancelable
-	}
 	var jobID int64
-	err := tx.QueryRow(ctx, `UPDATE reviews SET cancel_requested_at = now(), canceled_by = $2
+	err := tx.QueryRow(ctx, `UPDATE reviews SET cancel_requested_at = now()
 		WHERE id = $1 AND status IN ('running', 'prepared') AND river_job_id IS NOT NULL
-		RETURNING river_job_id`, reviewID, by).Scan(&jobID)
+		RETURNING river_job_id`, reviewID).Scan(&jobID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotCancelable
 	}
@@ -141,20 +170,20 @@ func RequestCancel(ctx context.Context, tx pgx.Tx, c *river.Client[pgx.Tx], revi
 
 // EnqueueReindex forces a full reindex of a repository even when an active
 // generation already covers its current commit. Returns ErrRepositoryNotFound
-// if repositoryID does not exist in tenantID, and ErrReindexQueued if a
+// if repositoryID does not exist in accountID, and ErrReindexQueued if a
 // forced reindex of the repository is already queued or running: an
 // onboarding or push job does not stand in for one.
-func EnqueueReindex(ctx context.Context, tx pgx.Tx, c *river.Client[pgx.Tx], tenantID, repositoryID string) (int64, error) {
+func EnqueueReindex(ctx context.Context, tx pgx.Tx, c *river.Client[pgx.Tx], accountID, repositoryID string) (int64, error) {
 	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM repositories WHERE tenant_id = $1 AND id = $2)`,
-		tenantID, repositoryID).Scan(&exists); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM repositories WHERE account_id = $1 AND id = $2)`,
+		accountID, repositoryID).Scan(&exists); err != nil {
 		return 0, fmt.Errorf("jobs: look up repository: %w", err)
 	}
 	if !exists {
 		return 0, ErrRepositoryNotFound
 	}
 	res, err := c.InsertTx(ctx, tx, IndexArgs{
-		TenantID: tenantID, RepositoryID: repositoryID, CommitSHA: "", Trigger: TriggerReindex, Full: true,
+		AccountID: accountID, RepositoryID: repositoryID, CommitSHA: "", Trigger: TriggerReindex, Full: true,
 	}, nil)
 	if err != nil {
 		return 0, fmt.Errorf("jobs: enqueue reindex: %w", err)

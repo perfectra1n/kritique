@@ -1,23 +1,34 @@
 package gitfetch
 
 import (
+	"cmp"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
+
+	"github.com/perfectra1n/kritique/internal/gittest"
 )
 
 // repo builds a local repository with a base commit and two head commits:
 // one that changes a file, and a rebase of that same change on top of an
-// unrelated commit, so the patch id can be checked for stability.
+// unrelated commit that edits one file and adds another, so the patch id
+// can be checked for stability and the base's movement told from the
+// change's.
 type repo struct {
-	dir                        string
-	base, head, other, rebased string
+	dir                                 string
+	base, head, other, rebased, renamed string
+	// On a third branch, the base gains a file the change then edits at
+	// its end: long is the merge base the change (prior) was reviewed
+	// against, touched the merge base after the base edited the file's
+	// start, merged the change brought up to date with it as it was, and
+	// moved the change brought up to date and extended.
+	long, prior, touched, merged, moved string
 }
 
 func build(t *testing.T) repo {
@@ -27,10 +38,7 @@ func build(t *testing.T) repo {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A depth-one fetch of a bare SHA needs the server to allow it. Real git
-	// serves a local path and only advertises the capability when told to,
-	// which is also what GitHub, GitLab and Forgejo do server-side.
-	allowSHAFetch(t, r)
+	gittest.Unsigned(t, r)
 	wt, _ := r.Worktree()
 	commit := func(msg string, files map[string]string) string {
 		t.Helper()
@@ -53,12 +61,34 @@ func build(t *testing.T) repo {
 	out.head = commit("change", map[string]string{"main.go": "package main\n\nfunc a() {}\n\nfunc b() {}\n"})
 	// On a second branch from base, add an unrelated commit and re-apply the
 	// same change. A branch rather than a reset keeps the first head
-	// reachable, which a SHA fetch requires.
+	// reachable, which real git's upload-pack needs to serve it by SHA.
 	if err := wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("rebased"), Create: true, Hash: plumbing.NewHash(out.base)}); err != nil {
 		t.Fatal(err)
 	}
-	out.other = commit("unrelated", map[string]string{"README.md": "hi\nthere\n"})
+	out.other = commit("unrelated", map[string]string{"README.md": "hi\nthere\n", "NOTES.md": "new\n"})
 	out.rebased = commit("change again", map[string]string{"main.go": "package main\n\nfunc a() {}\n\nfunc b() {}\n"})
+	// On top of the rebase, the changed file moves: a rename the delta
+	// since rebased must keep under either of its names.
+	if _, err := wt.Move("main.go", "lib.go"); err != nil {
+		t.Fatal(err)
+	}
+	out.renamed = commit("rename", nil)
+	branch := func(name, from string) {
+		t.Helper()
+		if err := wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName(name), Create: true, Hash: plumbing.NewHash(from)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const svc = "package svc\n\nfunc one() {}\n\nfunc two() {}\n\nfunc three() {}\n\nfunc four() {}\n\nfunc five() {}\n"
+	const touchedSvc = "package svc\n\n// svc is the service.\n\nfunc one() {}\n\nfunc two() {}\n\nfunc three() {}\n\nfunc four() {}\n\nfunc five() {}\n"
+	branch("long", out.base)
+	out.long = commit("base adds svc.go", map[string]string{"svc.go": svc})
+	branch("prior", out.long)
+	out.prior = commit("change edits svc.go", map[string]string{"svc.go": svc + "\nfunc b() {}\n"})
+	branch("merged", out.long)
+	out.touched = commit("base edits svc.go", map[string]string{"svc.go": touchedSvc})
+	out.merged = commit("change brought up to date", map[string]string{"svc.go": touchedSvc + "\nfunc b() {}\n"})
+	out.moved = commit("change brought up to date and extended", map[string]string{"svc.go": touchedSvc + "\nfunc b() {}\n\nfunc c() {}\n"})
 	return out
 }
 
@@ -124,38 +154,54 @@ func TestPatchIDIgnoresPositions(t *testing.T) {
 	}
 }
 
-func allowSHAFetch(t *testing.T, r *git.Repository) {
-	t.Helper()
-	cfg, err := r.Config()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Raw.SetOption("uploadpack", "", "allowReachableSHA1InWant", "true")
-	if err := r.SetConfig(cfg); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestRunPriorDelta(t *testing.T) {
 	r := build(t)
 	cases := []struct {
-		name        string
-		prior       string
-		wantPrior   bool
-		wantChanged []string
-		wantInDelta string
+		name            string
+		head, base      string
+		prior           string
+		priorChanged    []string
+		priorBase       string
+		wantPrior       bool
+		wantChanged     []string
+		wantInDelta     string
+		wantNotInDelta  string
+		wantBaseErr     bool
+		wantHeadChanged string
 	}{
-		// head and rebased carry the same main.go; rebased also changes
-		// README.md, so that is all that changed since head.
-		{name: "reachable prior", prior: r.head, wantPrior: true, wantChanged: []string{"README.md"}, wantInDelta: "+there"},
+		// head and rebased carry the same main.go; README.md moved between
+		// them with the base, which is no change of the pull request's.
+		{name: "rebased, the change as it was", prior: r.head, priorChanged: []string{"main.go"}, wantPrior: true},
+		// The paths the change touched at the prior head count as its own,
+		// even where the head no longer touches them.
+		{name: "rebased, a path the change dropped", prior: r.head, priorChanged: []string{"main.go", "README.md"}, wantPrior: true, wantChanged: []string{"README.md"}, wantInDelta: "+there"},
 		{name: "prior already fetched as the base", prior: r.other, wantPrior: true, wantChanged: []string{"main.go"}, wantInDelta: "+func b() {}"},
+		{name: "the changed file renamed since", head: r.renamed, prior: r.rebased, priorChanged: []string{"main.go"}, wantPrior: true, wantChanged: []string{"lib.go"}, wantInDelta: "lib.go", wantHeadChanged: "lib.go"},
 		{name: "prior is the head", prior: r.rebased, wantPrior: true},
+		// The base edited the start of the file the change edits at its end,
+		// and the change was brought up to date: what the base gained in the
+		// file is no change of the pull request's.
+		{name: "brought up to date, the change as it was", head: r.merged, base: r.touched, prior: r.prior, priorBase: r.long,
+			priorChanged: []string{"svc.go"}, wantPrior: true, wantHeadChanged: "svc.go"},
+		{name: "brought up to date, the change extended", head: r.moved, base: r.touched, prior: r.prior, priorBase: r.long,
+			priorChanged: []string{"svc.go"}, wantPrior: true, wantChanged: []string{"svc.go"}, wantInDelta: "+func c() {}",
+			wantNotInDelta: "svc is the service", wantHeadChanged: "svc.go"},
+		// Without the merge base the last review saw, what the base gained
+		// cannot be told from the change's and stays in the delta.
+		{name: "brought up to date, the prior merge base unreachable", head: r.merged, base: r.touched, prior: r.prior,
+			priorBase: "0123456789abcdef0123456789abcdef01234567", priorChanged: []string{"svc.go"}, wantPrior: true,
+			wantChanged: []string{"svc.go"}, wantInDelta: "+// svc is the service.", wantBaseErr: true, wantHeadChanged: "svc.go"},
+		// With no delta there is no hunk of the base's to leave out, so the
+		// prior merge base is not fetched and cannot fail.
+		{name: "nothing moved, the prior merge base not fetched", prior: r.rebased,
+			priorBase: "0123456789abcdef0123456789abcdef01234567", wantPrior: true},
 		{name: "unknown prior", prior: "0123456789abcdef0123456789abcdef01234567"},
 		{name: "no prior"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := Run(t.Context(), Fetch{CloneURL: r.dir, Head: r.rebased, Base: r.other, Prior: tc.prior})
+			res, err := Run(t.Context(), Fetch{CloneURL: r.dir, Head: cmp.Or(tc.head, r.rebased), Base: cmp.Or(tc.base, r.other), Prior: tc.prior,
+				PriorChanged: tc.priorChanged, PriorBase: tc.priorBase})
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
@@ -172,11 +218,15 @@ func TestRunPriorDelta(t *testing.T) {
 			if strings.Join(res.DeltaChanged, ",") != strings.Join(tc.wantChanged, ",") {
 				t.Fatalf("delta changed = %v, want %v", res.DeltaChanged, tc.wantChanged)
 			}
-			if !strings.Contains(res.DeltaDiff, tc.wantInDelta) || (!tc.wantPrior && res.DeltaDiff != "") {
+			if !strings.Contains(res.DeltaDiff, tc.wantInDelta) || (!tc.wantPrior && res.DeltaDiff != "") ||
+				(tc.wantNotInDelta != "" && strings.Contains(res.DeltaDiff, tc.wantNotInDelta)) {
 				t.Fatalf("delta diff = %q", res.DeltaDiff)
 			}
-			if len(res.Changed) != 1 || res.Changed[0] != "main.go" {
-				t.Fatalf("the merge-base diff must not change: %v", res.Changed)
+			if (res.PriorBaseErr != nil) != tc.wantBaseErr {
+				t.Fatalf("prior base error = %v, want one %v", res.PriorBaseErr, tc.wantBaseErr)
+			}
+			if want := cmp.Or(tc.wantHeadChanged, "main.go"); len(res.Changed) != 1 || res.Changed[0] != want {
+				t.Fatalf("the merge-base diff must not change: %v, want %s", res.Changed, want)
 			}
 		})
 	}

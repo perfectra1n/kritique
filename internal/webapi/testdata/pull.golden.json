@@ -5,7 +5,9 @@
   "author": "ada",
   "state": "open",
   "draft": false,
+  "fork": false,
   "merged": false,
+  "paused": false,
   "headSha": "abc123",
   "headRef": "widgets",
   "baseRef": "main",
@@ -21,7 +23,6 @@
   "lastReview": {
     "id": "rev-1",
     "status": "completed",
-    "mode": "single",
     "scope": "full",
     "findings": {
       "blocking": 1,
@@ -29,5 +30,7 @@
       "nit": 3
     },
     "createdAt": "2026-09-01T12:00:00Z"
-  }
+  },
+  "reviewCount": 2,
+  "costUsd": 0.84
 }

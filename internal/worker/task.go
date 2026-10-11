@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
+	"github.com/perfectra1n/kritique/internal/adapter"
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/executor"
 	"github.com/perfectra1n/kritique/internal/forge"
@@ -34,30 +35,31 @@ const (
 	taskRelatedMax     = 10
 )
 
-// roleTask is the usage role and metric label of a task's model call.
-const roleTask = "task"
+// taskMaxOutputTokens bounds a single-mode task's answer.
+const taskMaxOutputTokens = 4096
 
 // Task works the task queue: one job runs one task on one event.
 type Task struct {
 	river.WorkerDefaults[jobs.TaskArgs]
 	Base
-	Completers CompleterSource
+	// Steppers reach a single-mode task's model.
+	Steppers *adapter.Steppers
+	// Embedders embed the search context source's queries; nil, or a
+	// configuration with no embedder, leaves the source out.
+	Embedders *adapter.Embedders
 	// Executor runs an agentic task's runner, which calls its model through
 	// the gateway at GatewayURL with a token that outlives the Job's
 	// deadline by GatewayTokenTTL. Agentic tasks fail without a gateway.
 	Executor        executor.Executor
 	GatewayURL      string
 	GatewayTokenTTL time.Duration
-	// Embedder and EmbedModel search the repository's index for the search
-	// context source; nil Embedder leaves it out.
-	Embedder   model.Embedder
-	EmbedModel string
-	configs    repoConfigs
+	configs         repoConfigs
 	// timeout, when set, replaces the job timeout, for tests.
 	timeout time.Duration
 
-	// superviseEvery overrides superviseInterval.
+	// superviseEvery overrides superviseInterval, and rowWait agentRowWait.
 	superviseEvery time.Duration
+	rowWait        time.Duration
 }
 
 // Work implements river.Worker. An error before the model has answered is
@@ -89,7 +91,7 @@ func (w *Task) Work(ctx context.Context, job *river.Job[jobs.TaskArgs]) error {
 	defer cancel()
 	w.Logger.Info("task "+string(res.Status), "task", job.Args.Task, "run", runID, "reason", res.Reason, "model", res.Model,
 		"error", res.Error)
-	if ferr := w.finish(dctx, job.Args.TenantID, runID, res); ferr != nil {
+	if ferr := w.finish(dctx, job.Args.AccountID, runID, res); ferr != nil {
 		return errors.Join(err, ferr)
 	}
 	return err
@@ -124,7 +126,7 @@ func (w *Task) attempt(ctx context.Context, job *river.Job[jobs.TaskArgs]) (stri
 	var run store.TaskRun
 	var ev store.TaskEvent
 	var repo taskRepo
-	err := w.Store.WithTenant(ctx, args.TenantID, func(tx pgx.Tx) error {
+	err := w.Store.WithAccount(ctx, args.AccountID, func(tx pgx.Tx) error {
 		var err error
 		if run, err = store.LoadTaskRun(ctx, tx, args.EventID, args.Task); err != nil {
 			return err
@@ -152,18 +154,18 @@ func (w *Task) attempt(ctx context.Context, job *river.Job[jobs.TaskArgs]) (stri
 		return run.ID, store.TaskRunResult{Status: store.TaskFailed, Error: agentInterrupted}, nil
 	}
 	file := w.Current.Get()
-	tenant, err := w.tenant(file, args.TenantID)
+	account, err := w.account(file, args.AccountID)
 	if err != nil {
 		return run.ID, store.TaskRunResult{}, err
 	}
-	logger := w.Logger.With("tenant", tenant.Slug, "repository", repo.name, "task", args.Task, "run", run.ID,
+	logger := w.Logger.With("account", account.Key(), "repository", repo.name, "task", args.Task, "run", run.ID,
 		"subject", ev.SubjectNumber)
-	client, err := w.client(ctx, file, repo.installation, repo.externalID, repo.name)
+	client, err := w.client(ctx, file, account, repo.name)
 	if err != nil {
 		return run.ID, store.TaskRunResult{}, err
 	}
 	r := &taskRunner{
-		w: w, file: file, tenant: tenant, client: client, args: args, run: run, ev: ev, repo: repo, jobID: job.ID, logger: logger,
+		w: w, file: file, account: account, client: client, args: args, run: run, ev: ev, repo: repo, jobID: job.ID, logger: logger,
 		snoozes: jobSnoozes(logger, job.Metadata),
 	}
 	res, err := r.do(ctx)
@@ -171,27 +173,27 @@ func (w *Task) attempt(ctx context.Context, job *river.Job[jobs.TaskArgs]) (stri
 	return run.ID, res, err
 }
 
-func (w *Task) finish(ctx context.Context, tenantID, runID string, res store.TaskRunResult) error {
+func (w *Task) finish(ctx context.Context, accountID, runID string, res store.TaskRunResult) error {
 	if runID == "" {
 		return nil
 	}
-	return w.Store.WithTenant(ctx, tenantID, func(tx pgx.Tx) error {
+	return w.Store.WithAccount(ctx, accountID, func(tx pgx.Tx) error {
 		return store.FinishTaskRun(ctx, tx, runID, res)
 	})
 }
 
 // taskRunner is one run of one task.
 type taskRunner struct {
-	w      *Task
-	file   *configfile.File
-	tenant *configfile.Tenant
-	client forge.Client
-	args   jobs.TaskArgs
-	run    store.TaskRun
-	ev     store.TaskEvent
-	repo   taskRepo
-	jobID  int64
-	logger *slog.Logger
+	w       *Task
+	file    *configfile.File
+	account *configfile.Account
+	client  forge.Client
+	args    jobs.TaskArgs
+	run     store.TaskRun
+	ev      store.TaskEvent
+	repo    taskRepo
+	jobID   int64
+	logger  *slog.Logger
 
 	owner, name string
 	settings    configfile.Settings
@@ -240,11 +242,11 @@ func failed(modelName string, err error) store.TaskRunResult {
 // before the model is asked is ever retried.
 func (r *taskRunner) do(ctx context.Context) (store.TaskRunResult, error) {
 	r.owner, r.name = r.repo.split()
-	doc, err := r.w.configs.read(ctx, r.client, r.repo.installation, r.owner, r.name, r.args.ConfigSHA)
+	doc, err := r.w.configs.read(ctx, r.client, r.account.ID(), r.owner, r.name, r.args.ConfigSHA)
 	if err != nil {
 		return store.TaskRunResult{}, err
 	}
-	eff, _ := effective(r.file.Settings(r.tenant, r.repo.installation, r.repo.name), doc)
+	eff, _ := effective(r.file.Settings(r.account, r.repo.name), doc)
 	r.settings = eff.Settings
 	for i := range eff.Tasks {
 		if eff.Tasks[i].Name == r.args.Task {
@@ -269,7 +271,7 @@ func (r *taskRunner) do(ctx context.Context) (store.TaskRunResult, error) {
 		}
 		defer release()
 	}
-	if err := r.w.Store.WithTenant(ctx, r.args.TenantID, func(tx pgx.Tx) error {
+	if err := r.w.Store.WithAccount(ctx, r.args.AccountID, func(tx pgx.Tx) error {
 		return store.StartTaskRun(ctx, tx, r.run.ID)
 	}); err != nil {
 		return store.TaskRunResult{}, err
@@ -296,14 +298,14 @@ func (r *taskRunner) do(ctx context.Context) (store.TaskRunResult, error) {
 }
 
 // rateLimited says why the run is skipped when the task has run on its
-// subject as often as the operator allows in the last hour, or "".
+// subject as often as the admin allows in the last hour, or "".
 func (r *taskRunner) rateLimited(ctx context.Context) (string, error) {
 	limit := r.settings.TaskBounds.MaxRunsPerSubjectPerHour
 	if r.ev.SubjectNumber == 0 || limit <= 0 {
 		return "", nil
 	}
 	var n int
-	err := r.w.Store.WithTenant(ctx, r.args.TenantID, func(tx pgx.Tx) error {
+	err := r.w.Store.WithAccount(ctx, r.args.AccountID, func(tx pgx.Tx) error {
 		var err error
 		n, err = store.CountTaskRuns(ctx, tx, r.args.RepositoryID, r.args.Task, r.ev.SubjectNumber, time.Hour, r.run.ID)
 		return err
@@ -352,7 +354,7 @@ func (r *taskRunner) promptData(ctx context.Context) (tasks.PromptData, error) {
 			return d, err
 		}
 		r.in.Subject = taskrun.Subject(issue, r.in.Raw)
-		if issue.IsPull {
+		if issue.PullRequest {
 			if err := r.pullHead(ctx); err != nil {
 				return d, err
 			}
@@ -375,9 +377,19 @@ func (r *taskRunner) promptData(ctx context.Context) (tasks.PromptData, error) {
 	if len(files) > 0 {
 		d.Context[tasks.ContextFiles] = files
 	}
+	if err := r.queries(ctx, budget, d.Context); err != nil {
+		return d, err
+	}
+	return d, nil
+}
+
+// queries gathers the task's search and related sources into sources, each
+// under its name; one that failed or found no index to search is left out,
+// which the prompt renders as empty.
+func (r *taskRunner) queries(ctx context.Context, budget *tasks.Budget, sources map[string]any) error {
 	queries, err := r.prepared.Queries(r.in)
 	if err != nil {
-		return d, err
+		return err
 	}
 	for _, q := range queries {
 		var v any
@@ -386,7 +398,7 @@ func (r *taskRunner) promptData(ctx context.Context) (tasks.PromptData, error) {
 			found, err := r.client.SearchIssues(ctx, r.owner, r.name, q.Query, min(max(q.K, 1), taskRelatedMax))
 			if err != nil {
 				if err := r.sourceFailed(ctx, q.Name, err); err != nil {
-					return d, err
+					return err
 				}
 				continue
 			}
@@ -395,7 +407,7 @@ func (r *taskRunner) promptData(ctx context.Context) (tasks.PromptData, error) {
 			found, ok, err := r.searchIndex(ctx, q)
 			if err != nil {
 				if err := r.sourceFailed(ctx, q.Name, err); err != nil {
-					return d, err
+					return err
 				}
 				continue
 			}
@@ -404,9 +416,9 @@ func (r *taskRunner) promptData(ctx context.Context) (tasks.PromptData, error) {
 			}
 			v = tasks.TakeList(budget, q.Name, found)
 		}
-		d.Context[q.Name] = v
+		sources[q.Name] = v
 	}
-	return d, nil
+	return nil
 }
 
 // sourceFailed notes that the context source name failed with err and
@@ -424,7 +436,7 @@ func (r *taskRunner) sourceFailed(ctx context.Context, name string, err error) e
 // pullHead reads the head and base a pull request subject was last
 // recorded with, which inline comments are pinned to.
 func (r *taskRunner) pullHead(ctx context.Context) error {
-	err := r.w.Store.WithTenant(ctx, r.args.TenantID, func(tx pgx.Tx) error {
+	err := r.w.Store.WithAccount(ctx, r.args.AccountID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT head_sha, base_ref FROM pull_requests WHERE repository_id = $1 AND number = $2`,
 			r.args.RepositoryID, r.ev.SubjectNumber).Scan(&r.headSHA, &r.baseRef)
 	})
@@ -452,7 +464,7 @@ func relatedIssues(found []forge.Issue, subject int) []relatedIssue {
 	out := []relatedIssue{}
 	for _, i := range found {
 		if i.Number != subject {
-			out = append(out, relatedIssue{Number: i.Number, Title: i.Title, State: i.State, Pull: i.IsPull, Labels: i.Labels, URL: i.URL})
+			out = append(out, relatedIssue{Number: i.Number, Title: i.Title, State: i.State, Pull: i.PullRequest, Labels: i.Labels, URL: i.URL})
 		}
 	}
 	return out
@@ -504,6 +516,11 @@ func (r *taskRunner) models() (ref, fallback configfile.ModelRef) {
 // noModel is why a task without a model is skipped.
 const noModel = "no review model is configured for this repository"
 
+// cappedError is the account's cap that stopped a model call.
+type cappedError string
+
+func (e cappedError) Error() string { return string(e) }
+
 // answer asks the model, plans its answer and applies the plan. The model's
 // tokens are spent once it answers, so from then on the run ends here
 // whatever the job's ctx does.
@@ -521,7 +538,8 @@ func (r *taskRunner) answer(ctx context.Context, data tasks.PromptData, labels [
 		return failed("", fmt.Errorf("worker: encode answer schema: %w", err)), nil
 	}
 	req := model.CompletionRequest{
-		System: system, User: user, Model: ref.Model(), Schema: schema, SchemaName: "task_answer", MaxTokens: maxOutputTokens,
+		System: system, User: user, Model: ref.Model(), Session: "task-" + r.run.ID, Effort: r.settings.Models.Effort,
+		Schema: schema, SchemaName: "task_answer", MaxTokens: taskMaxOutputTokens,
 	}
 	resp, err := r.complete(ctx, ref, fallback, req)
 	dctx, cancel := detach(ctx)
@@ -565,61 +583,82 @@ func (r *taskRunner) conclude(ctx context.Context, raw []byte, modelName string,
 	return r.apply(ctx, answer, pl, modelName)
 }
 
-// complete asks the model under a lease on it, once the tenant's monthly
-// token cap allows, falling back as a review does: a fallback on the same
-// provider is the provider's to try, one on another is a second call.
+// complete asks the model under a slot on it, once the account's monthly
+// token cap allows, falling back as a review's confidence call does: a
+// fallback on the same provider is the provider's to try, one on another
+// is tried once the model's attempts are spent.
 func (r *taskRunner) complete(
 	ctx context.Context, ref, fallback configfile.ModelRef, req model.CompletionRequest,
 ) (model.CompletionResponse, error) {
-	if fallback != "" && fallback.Provider() == ref.Provider() {
-		req.Fallbacks = []string{fallback.Model()}
+	completer, fallbacks, served, err := r.structured(ctx, ref, fallback)
+	if err != nil {
+		return model.CompletionResponse{}, err
 	}
+	req.Fallbacks = fallbacks
 	var resp model.CompletionResponse
-	err := r.w.withLease(ctx, r.tenant, string(ref), r.settings.Limits.Concurrency, r.jobID, func(ctx context.Context) error {
+	err = r.w.withLease(ctx, r.account, string(ref), r.settings.Limits.Concurrency, r.jobID, func(ctx context.Context) error {
 		limits := r.settings.Limits
 		limits.ReviewsPerDay = 0
-		capped, err := capReached(ctx, r.w.Store, r.tenant.ID(), limits)
+		capped, err := r.w.Store.CapReached(ctx, r.account.ID(), limits)
 		if err != nil {
 			return err
 		}
 		if capped != "" {
 			return cappedError(capped)
 		}
-		resp, err = r.call(ctx, ref, req, 0)
-		if err == nil || fallback == "" || fallback.Provider() == ref.Provider() || ctx.Err() != nil {
-			return err
-		}
-		r.logger.Warn("primary model failed, trying fallback", "model", ref, "fallback", fallback, "error", err)
-		req.Model, req.Fallbacks = fallback.Model(), nil
-		var ferr error
-		if resp, ferr = r.call(ctx, fallback, req, 1); ferr != nil {
-			return errors.Join(err, ferr)
-		}
-		return nil
+		resp, err = completer.Complete(ctx, req)
+		r.w.Metrics.ModelCall(r.account.Key(), adapter.ServedRef(served.Ref, resp.Model), store.RoleTask, adapter.Outcome(err),
+			resp.InputTokens, resp.CachedTokens, resp.OutputTokens, resp.CostUSD)
+		return err
 	})
 	return resp, err
 }
 
-// call makes one structured call on ref's provider, recorded as step.
-func (r *taskRunner) call(
-	ctx context.Context, ref configfile.ModelRef, req model.CompletionRequest, step int,
-) (model.CompletionResponse, error) {
-	stepper, err := r.w.Completers.Stepper(r.file, ref.Provider())
+// structured is the completer a single-mode task's call goes through, on
+// ref's route and fallback's, with the fallback models the request carries
+// and the route the last step went to: each step is recorded against the
+// task run and its spend noted for charge.
+func (r *taskRunner) structured(
+	ctx context.Context, ref, fallback configfile.ModelRef,
+) (model.Structured, []string, *adapter.Route, error) {
+	route, err := r.w.Steppers.Route(r.file, r.account, ref)
 	if err != nil {
-		return model.CompletionResponse{}, err
+		return model.Structured{}, nil, nil, err
 	}
-	c := store.ModelCall{TenantID: r.tenant.ID(), TaskRunID: r.run.ID, Kind: store.ModelCallTask, Step: step}
-	mask := transcriptMask(r.file, r.file.Providers[ref.Provider()])
-	record := r.w.onStep(ctx, r.logger, c, mask)
-	onStep := func(sreq model.StepRequest, sresp model.StepResponse, err error, d time.Duration) {
-		record(sreq, sresp, err, d)
-		r.spend(sreq, sresp)
+	routed := adapter.Call{Route: route, Halve: true, Failed: func(err error, on, next adapter.Route) {
+		msg := adapter.Mask(r.file, on.Provider)(err.Error())
+		if next.Ref != on.Ref {
+			r.logger.Warn("task call failed on the task's model; trying the fallback", "fallback", next.Ref, "error", msg)
+			return
+		}
+		r.logger.Warn("task call failed; trying again", "model", on.Ref, "error", msg)
+	}}
+	var fallbacks []string
+	switch {
+	case fallback == "":
+	case fallback.Provider() == ref.Provider():
+		fallbacks = []string{fallback.Model()}
+	default:
+		if fb, err := r.w.Steppers.Route(r.file, r.account, fallback); err != nil {
+			r.logger.Error("no adapter for the task's fallback", "fallback", fallback, "error", err)
+		} else {
+			routed.Fallback = &fb
+		}
 	}
-	completer := model.Structured{Stepper: stepper, OnStep: onStep}
-	resp, err := completer.Complete(ctx, req)
-	r.w.Metrics.ModelCall(r.tenant.Slug, string(ref), roleTask, callOutcome(err), resp.InputTokens, resp.CachedTokens, resp.OutputTokens,
-		resp.CostUSD)
-	return resp, err
+	served := new(adapter.Route)
+	stepper := model.StepperFunc(func(ctx context.Context, req model.StepRequest) (model.StepResponse, error) {
+		resp, _, on, err := routed.Do(ctx, req)
+		*served = on
+		return resp, err
+	})
+	completer := model.Structured{Stepper: stepper, OnStep: func(req model.StepRequest, resp model.StepResponse, err error, d time.Duration) {
+		req.Model = served.Ref.Model()
+		r.w.recorder().Record(ctx, r.logger, store.ModelCall{
+			AccountID: r.account.ID(), TaskRunID: r.run.ID, Kind: store.ModelCallTask, Duration: d,
+		}, req, resp, err, adapter.Mask(r.file, served.Provider))
+		r.spend(req, resp)
+	}}
+	return completer, fallbacks, served, nil
 }
 
 // spend notes what one model step cost, charged with the run's others by
@@ -643,8 +682,8 @@ func (r *taskRunner) charge(ctx context.Context, answered bool) error {
 	if len(r.spent) == 0 && !answered {
 		return nil
 	}
-	return r.w.Store.WithTenant(ctx, r.tenant.ID(), func(tx pgx.Tx) error {
-		return store.ChargeTaskRun(ctx, tx, r.tenant.ID(), r.args.RepositoryID, r.run.ID, r.spent, answered)
+	return r.w.Store.WithAccount(ctx, r.account.ID(), func(tx pgx.Tx) error {
+		return store.ChargeTaskRun(ctx, tx, r.account.ID(), r.args.RepositoryID, r.run.ID, r.spent, answered)
 	})
 }
 
@@ -670,12 +709,12 @@ func (r *taskRunner) anchor(ctx context.Context, pl *tasks.Plan) {
 		taskrun.DropInline(pl, "kritique has not recorded the pull request's head")
 		return
 	}
-	base, err := r.client.MergeBase(ctx, r.owner, r.name, r.ev.SubjectNumber, r.baseRef, r.headSHA)
+	base, err := r.client.MergeBase(ctx, r.owner, r.name, r.baseRef, r.headSHA)
 	if err != nil {
 		taskrun.DropInline(pl, "forge: "+err.Error())
 		return
 	}
-	diff, err := r.client.PullRequestDiff(ctx, r.owner, r.name, r.ev.SubjectNumber, base, r.headSHA)
+	diff, err := r.client.PullRequestDiff(ctx, r.owner, r.name, base, r.headSHA)
 	if err != nil {
 		taskrun.DropInline(pl, "forge: "+err.Error())
 		return

@@ -9,76 +9,43 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: renders only the webhook Ingress when enabled without a web role
+  - it: routes each host's paths to the public Service, which serves the webhooks and the dashboard
     set:
       ingress.enabled: true
+      ingress.className: nginx
     asserts:
       - hasDocuments:
           count: 1
       - equal:
-          path: metadata.name
-          value: RELEASE-NAME-kritique
-      - equal:
-          path: spec.rules[0].http.paths[0].backend.service.name
-          value: RELEASE-NAME-kritique
-      - equal:
-          path: spec.rules[0].http.paths[0].backend.service.port.name
-          value: http
-
-  - it: leaves the dashboard Ingress out until ingress.web.enabled is set, even with a web role
-    set:
-      roles.all.enabled: false
-      roles.web.enabled: true
-      web.url: https://dash.example.com
-    asserts:
-      - hasDocuments:
-          count: 0
-
-  - it: renders the dashboard Ingress when enabled with a web role
-    set:
-      roles.all.enabled: false
-      roles.web.enabled: true
-      web.url: https://dash.example.com
-      ingress.web.enabled: true
-    asserts:
-      - hasDocuments:
-          count: 1
-      - equal:
-          path: metadata.name
-          value: RELEASE-NAME-kritique-web
+          path: spec.ingressClassName
+          value: nginx
       - equal:
           path: spec.rules[0].host
-          value: dash.example.com
+          value: kritique.example.com
+      - equal:
+          path: spec.rules[0].http.paths
+          value:
+            - path: /
+              pathType: Prefix
+              backend: { service: { name: RELEASE-NAME-kritique, port: { name: http } } }
+
+  - it: resolves a templated host and defaults the path type
+    set:
+      ingress.enabled: true
+      ingress.hosts:
+        - host: "{{ .Release.Name }}.example.com"
+          paths: [{ path: /kritique }]
+      ingress.tls: [{ hosts: [kritique.example.com], secretName: kritique-tls }]
+    asserts:
+      - equal:
+          path: spec.rules[0].host
+          value: RELEASE-NAME.example.com
       - equal:
           path: spec.rules[0].http.paths[0].path
-          value: /
+          value: /kritique
       - equal:
-          path: spec.rules[0].http.paths[0].backend.service.name
-          value: RELEASE-NAME-kritique-web
+          path: spec.rules[0].http.paths[0].pathType
+          value: Prefix
       - equal:
-          path: spec.rules[0].http.paths[0].backend.service.port.name
-          value: web
-
-  - it: leaves the dashboard Ingress out when ingress.web.enabled is set but no role serves the web UI
-    set:
-      ingress.web.enabled: true
-    asserts:
-      - hasDocuments:
-          count: 0
-
-  - it: renders both Ingresses when the all role serves the dashboard
-    set:
-      web.url: https://dash.example.com
-      ingress.enabled: true
-      ingress.web.enabled: true
-    asserts:
-      - hasDocuments:
-          count: 2
-      - equal:
-          path: metadata.name
-          value: RELEASE-NAME-kritique
-        documentIndex: 0
-      - equal:
-          path: metadata.name
-          value: RELEASE-NAME-kritique-web
-        documentIndex: 1
+          path: spec.tls[0].secretName
+          value: kritique-tls

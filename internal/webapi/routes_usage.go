@@ -1,16 +1,27 @@
 package webapi
 
 import (
+	"cmp"
+	"maps"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/perfectra1n/kritique/internal/auth"
 	"github.com/perfectra1n/kritique/internal/store"
 )
 
-// defaultUsageWindow is the span a usage series covers without ?from=.
-const defaultUsageWindow = 30 * 24 * time.Hour
+// defaultUsageWindow is the span a usage series covers without ?from=, and
+// maxUsageWindow the most ?from= and ?to= may span: the series are read
+// from every row in the span, and the analytics page reads the span
+// before it too, so a span of years would scan the account's history
+// twice on one request.
+const (
+	defaultUsageWindow = 30 * 24 * time.Hour
+	maxUsageWindow     = 366 * 24 * time.Hour
+)
 
 // parseTime reads an RFC 3339 time or a YYYY-MM-DD date (midnight UTC).
 func parseTime(s string) (time.Time, bool) {
@@ -24,37 +35,15 @@ func parseTime(s string) (time.Time, bool) {
 // usageQuery reads ?group=, ?from= and ?to=: by day over the last 30 days
 // unless given.
 func (s *Server) usageQuery(r *http.Request) (store.UsageGroup, time.Time, time.Time, error) {
-	q := r.URL.Query()
-	group := store.UsageGroup(q.Get("group"))
-	if group == "" {
-		group = store.UsageByDay
-	}
+	group := cmp.Or(store.UsageGroup(r.URL.Query().Get("group")), store.UsageByDay)
 	if !group.Valid() {
 		return "", time.Time{}, time.Time{}, errBadRequest(CodeBadRequest, "group must be day, model, repo or role")
 	}
-	to := s.now().UTC()
-	if v := q.Get("to"); v != "" {
-		t, ok := parseTime(v)
-		if !ok {
-			return "", time.Time{}, time.Time{}, errBadRequest(CodeBadRequest, "to must be RFC 3339 or YYYY-MM-DD")
-		}
-		to = t
-	}
-	from := to.Add(-defaultUsageWindow)
-	if v := q.Get("from"); v != "" {
-		t, ok := parseTime(v)
-		if !ok {
-			return "", time.Time{}, time.Time{}, errBadRequest(CodeBadRequest, "from must be RFC 3339 or YYYY-MM-DD")
-		}
-		from = t
-	}
-	if !from.Before(to) {
-		return "", time.Time{}, time.Time{}, errBadRequest(CodeBadRequest, "from must be before to")
-	}
-	return group, from, to, nil
+	from, to, err := s.window(r)
+	return group, from, to, err
 }
 
-func (s *Server) getUsage(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) getUsage(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	group, from, to, err := s.usageQuery(r)
 	if err != nil {
 		return err
@@ -78,7 +67,7 @@ func (s *Server) getUsage(w http.ResponseWriter, r *http.Request, t *tenantScope
 	return nil
 }
 
-func (s *Server) listQueue(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) listQueue(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	ctx := r.Context()
 	var rows []store.JobRow
 	if err := s.read(ctx, t, func(tx pgx.Tx) error {
@@ -90,12 +79,68 @@ func (s *Server) listQueue(w http.ResponseWriter, r *http.Request, t *tenantScop
 	}
 	out := make([]Job, len(rows))
 	for i, j := range rows {
-		out[i] = Job{
-			ID: j.ID, Kind: j.Kind, State: j.State, Attempt: j.Attempt, MaxAttempts: j.MaxAttempts, CreatedAt: j.CreatedAt,
-			ScheduledAt: j.ScheduledAt, AttemptedAt: j.AttemptedAt, FinalizedAt: j.FinalizedAt, LastError: j.LastError,
-			Args: JobArgs{Repository: j.Repository, Number: j.Number, Head: j.Head, Trigger: j.Trigger, CommentID: j.CommentID},
-		}
+		out[i] = jobItem(j)
 	}
 	writeJSON(w, http.StatusOK, out)
 	return nil
+}
+
+// listInstanceQueue merges the queues of the accounts the viewer can read,
+// each read under its own account's row-level security.
+func (s *Server) listInstanceQueue(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	file := s.current.Get()
+	out := InstanceQueue{Jobs: []InstanceJob{}, Slots: []ModelSlots{}}
+	for _, t := range readable(file, auth.PrincipalFrom(ctx)) {
+		var rows []store.JobRow
+		var held map[string]int
+		if err := s.store.WithAccount(ctx, t.ID(), func(tx pgx.Tx) error {
+			var err error
+			if rows, err = store.ListQueue(ctx, tx); err != nil {
+				return err
+			}
+			held, err = store.ReadHeldSlots(ctx, tx)
+			return err
+		}); err != nil {
+			return err
+		}
+		for _, j := range rows {
+			out.Jobs = append(out.Jobs, InstanceJob{Job: jobItem(j), Account: t.Slug()})
+		}
+		// The account's own review model always shows, busy or not; another
+		// model, a repository's choice, only while it holds a slot.
+		settings := file.Settings(t, "")
+		own := string(settings.Models.Review)
+		if _, ok := held[own]; !ok && own != "" {
+			held[own] = 0
+		}
+		for _, model := range slices.Sorted(maps.Keys(held)) {
+			if held[model] > 0 || model == own {
+				out.Slots = append(out.Slots, ModelSlots{Account: t.Slug(), Model: model, Held: held[model], Slots: settings.Limits.Concurrency})
+			}
+		}
+	}
+	// Unfinished jobs lead, the longest scheduled first, then the finished,
+	// the latest first: each account's own order, kept across them.
+	slices.SortStableFunc(out.Jobs, func(a, b InstanceJob) int {
+		switch {
+		case a.FinalizedAt == nil && b.FinalizedAt == nil:
+			return cmp.Or(a.ScheduledAt.Compare(b.ScheduledAt), cmp.Compare(a.ID, b.ID))
+		case a.FinalizedAt == nil:
+			return -1
+		case b.FinalizedAt == nil:
+			return 1
+		}
+		return cmp.Or(b.FinalizedAt.Compare(*a.FinalizedAt), cmp.Compare(b.ID, a.ID))
+	})
+	writeJSON(w, http.StatusOK, out)
+	return nil
+}
+
+func jobItem(j store.JobRow) Job {
+	return Job{
+		ID: j.ID, Kind: j.Kind, State: j.State, Attempt: j.Attempt, MaxAttempts: j.MaxAttempts, CreatedAt: j.CreatedAt,
+		ScheduledAt: j.ScheduledAt, AttemptedAt: j.AttemptedAt, FinalizedAt: j.FinalizedAt, LastError: j.LastError, Cause: jobCause(j.LastError),
+		Args: JobArgs{Repository: j.Repository, Number: j.Number, Head: j.Head, Trigger: j.Trigger, CommentID: j.CommentID},
+	}
 }

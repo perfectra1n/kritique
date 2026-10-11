@@ -1,7 +1,4 @@
-{{- if not .Values.config.existingConfigMap }}
-{{- if not .Values.config.file }}
-{{- fail "config.file is required unless config.existingConfigMap names a ConfigMap with a config.yaml key" }}
-{{- end }}
+{{- if and .Values.configFile (not .Values.existingConfigMap) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,5 +10,5 @@ data:
   # NOT tpl'd: the file is kritique's own schema, validated at load with unknown
   # keys rejected; Helm passes it through as given.
   config.yaml: |
-    {{- toYaml .Values.config.file | nindent 4 }}
+    {{- toYaml .Values.configFile | nindent 4 }}
 {{- end }}

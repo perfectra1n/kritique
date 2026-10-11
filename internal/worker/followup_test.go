@@ -2,20 +2,29 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/perfectra1n/kritique/internal/forge"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
 // threadForge answers the comment listings from fixed comments and counts
-// the inline ones.
+// the inline ones, and answers every permission lookup the same way.
 type threadForge struct {
 	forge.Client
 	inline       []forge.Comment
 	conversation []forge.Comment
 	inlineLists  int
+	permission   forge.Permission
+	permErr      error
+}
+
+func (f *threadForge) Permission(context.Context, string, string, string) (forge.Permission, error) {
+	return f.permission, f.permErr
 }
 
 func (f *threadForge) ListInline(context.Context, string, string, int) ([]forge.Comment, error) {
@@ -62,5 +71,134 @@ func TestFollowUpThread(t *testing.T) {
 				t.Fatalf("thread = %q with %d inline listings, want %q with %d", got, client.inlineLists, tt.want, tt.wantListed)
 			}
 		})
+	}
+}
+
+func TestRequestsReview(t *testing.T) {
+	for _, tt := range []struct {
+		body string
+		want bool
+	}{
+		{"@kritique review", true},
+		{"Looks fine to me. @Kritique Review please", true},
+		{"@kritique review?", true},
+		{"@kritique  review\nthe auth change", true},
+		{"@kritique reviewed this already?", false},
+		{"@kritique why is b here? a review would help", false},
+		{"@kritiquebot review", false},
+		{"someone@kritique review", false},
+		{"review @kritique", false},
+	} {
+		if got := requestsReview(tt.body, "kritique"); got != tt.want {
+			t.Errorf("requestsReview(%q) = %v, want %v", tt.body, got, tt.want)
+		}
+	}
+}
+
+func TestMarkedReply(t *testing.T) {
+	const login = "kritique[bot]"
+	reply := func(id int64, author string, commentID int64) forge.Comment {
+		return forge.Comment{ID: id, Author: author, Body: "Here is why.\n\n" + review.FollowUpMarker(commentID)}
+	}
+	tests := []struct {
+		name     string
+		comments []forge.Comment
+		want     int64
+	}{
+		{name: "the bot's reply to the comment is found", comments: []forge.Comment{reply(20, login, 7)}, want: 20},
+		{name: "a reply to another comment is not", comments: []forge.Comment{reply(21, login, 8)}},
+		{name: "another author's marker is not", comments: []forge.Comment{reply(22, "mallory", 7)}},
+		{name: "no comments"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := markedReply(tt.comments, login, 7); got != tt.want {
+				t.Errorf("markedReply = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDisqualified(t *testing.T) {
+	tests := []struct {
+		name       string
+		comment    forge.Comment
+		permission forge.Permission
+		permErr    error
+		want       string
+	}{
+		{name: "a bot author", comment: forge.Comment{Author: "renovate[bot]", AuthorIsBot: true, Body: "@kritique explain"}, want: "author is a bot"},
+		{name: "the bot's own login, whatever its case", comment: forge.Comment{Author: "Kritique[Bot]", Body: "@kritique explain"}, want: "author is a bot"},
+		{name: "no mention of the bot", comment: forge.Comment{Author: "alice", Body: "looks good"}, want: "does not mention @kritique"},
+		{name: "a permission lookup that fails", comment: forge.Comment{Author: "alice", Body: "@kritique explain"},
+			permErr: errors.New("boom"), want: "permission unknown"},
+		{name: "read access", comment: forge.Comment{Author: "alice", Body: "@kritique explain"},
+			permission: forge.PermissionRead, want: "author has read access, write is required"},
+		{name: "write access", comment: forge.Comment{Author: "alice", Body: "@kritique explain"}, permission: forge.PermissionWrite},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &threadForge{permission: tt.permission, permErr: tt.permErr}
+			f := &followUp{client: client, owner: "o", repo: "r", comment: tt.comment, botLogin: "kritique[bot]", logger: slog.New(slog.DiscardHandler)}
+			if got := f.disqualified(t.Context()); got != tt.want {
+				t.Errorf("disqualified = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFollowUpDiffBase(t *testing.T) {
+	tests := []struct {
+		name                        string
+		head, mergeBase, reviewBase string
+		want                        string
+	}{
+		{name: "an open pull request diffs against its merge base", head: "h", mergeBase: "b", reviewBase: "r", want: "b"},
+		{name: "a merged one against what its last review did", head: "h", mergeBase: "h", reviewBase: "r", want: "r"},
+		{name: "a merged one never reviewed has nothing else", head: "h", mergeBase: "h", want: "h"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &followUp{pr: &pullRequest{headSHA: tt.head}, mergeBase: tt.mergeBase}
+			if got := f.diffBase(reviewRecord{mergeBase: tt.reviewBase}); got != tt.want {
+				t.Fatalf("diffBase = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// reactForge records the reactions the bot leaves on comments and takes
+// off.
+type reactForge struct {
+	forge.Client
+	reactErr error
+	reacted  []string
+	removed  []int64
+}
+
+func (f *reactForge) React(_ context.Context, _, _ string, to forge.Comment, content string) (int64, error) {
+	if f.reactErr != nil {
+		return 0, f.reactErr
+	}
+	f.reacted = append(f.reacted, content)
+	return to.ID + 1, nil
+}
+
+func (f *reactForge) Unreact(_ context.Context, _, _ string, _ forge.Comment, id int64) error {
+	f.removed = append(f.removed, id)
+	return nil
+}
+
+// TestFollowUpUnmark: a retried attempt that finds the reply up ends the
+// marks a killed one left, as answered.
+func TestFollowUpUnmark(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	for attempt, want := range map[int][]string{1: nil, 2: {forge.ReactionEyes, forge.ReactionDone}} {
+		client := &reactForge{}
+		f := &followUp{client: client, comment: forge.Comment{ID: 7}, logger: logger, attempt: attempt}
+		f.unmark(t.Context())
+		if !slices.Equal(client.reacted, want) || (attempt > 1) != slices.Equal(client.removed, []int64{8}) {
+			t.Fatalf("attempt %d: reacted %v, removed %v", attempt, client.reacted, client.removed)
+		}
 	}
 }

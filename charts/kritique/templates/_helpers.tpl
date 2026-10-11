@@ -41,22 +41,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
-Selector labels shared by every role's pods.
+Selector labels of the server pods. Runner pods lack the instance label, so
+these select the server alone.
 */}}
 {{- define "kritique.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "kritique.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
-{{- end }}
-
-{{/*
-Name of a role's Deployment: the release name for `all`, suffixed otherwise.
-*/}}
-{{- define "kritique.roleName" -}}
-{{- if eq .role "all" -}}
-{{- include "kritique.fullname" .root -}}
-{{- else -}}
-{{- printf "%s-%s" (include "kritique.fullname" .root) .role | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
 {{- end }}
 
 {{/*
@@ -96,91 +86,132 @@ otherwise it's repository:tag, with tag defaulting to the chart appVersion.
 {{- end }}
 
 {{/*
-Runner image: the runner block's override, else the chart image.
+The helm test pod's curl image.
+*/}}
+{{- define "kritique.testImage" -}}
+{{- $img := .Values.tests.image -}}
+{{- printf "%s:%s" $img.repository $img.tag -}}
+{{- end }}
+
+{{/*
+Runner image reference, as kritique.image but with the tag defaulting to the
+release's -tools image.
 */}}
 {{- define "kritique.runnerImage" -}}
-{{- .Values.runner.image | default (include "kritique.image" .) -}}
+{{- $img := .Values.runner.image -}}
+{{- if $img.digest -}}
+{{- printf "%s@%s" $img.repository $img.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $img.repository ($img.tag | default (printf "%s-tools" .Chart.AppVersion)) -}}
+{{- end -}}
 {{- end }}
 
 {{/*
 ConfigMap the file is read from.
 */}}
 {{- define "kritique.configMapName" -}}
-{{- if .Values.config.existingConfigMap -}}
-{{- tpl .Values.config.existingConfigMap $ -}}
+{{- if .Values.existingConfigMap -}}
+{{- tpl .Values.existingConfigMap $ -}}
 {{- else -}}
 {{- include "kritique.fullname" . -}}
 {{- end -}}
 {{- end }}
 
 {{/*
-Whether indexing is configured.
-*/}}
-{{- define "kritique.embeddingEnabled" -}}
-{{- if .Values.embedding.model -}}true{{- end -}}
-{{- end }}
-
-{{/*
-Secret holding the embedding API key: the existing one, or the chart's.
-*/}}
-{{- define "kritique.embeddingSecretName" -}}
-{{- if .Values.embedding.existingSecret -}}
-{{- tpl .Values.embedding.existingSecret $ -}}
-{{- else if .Values.embedding.apiKey -}}
-{{- printf "%s-embedding" (include "kritique.fullname" .) -}}
-{{- end -}}
-{{- end }}
-
-{{- define "kritique.embeddingSecretKey" -}}
-{{- if .Values.embedding.existingSecret -}}
-{{- .Values.embedding.existingSecretKey -}}
-{{- else -}}
-api-key
-{{- end -}}
-{{- end }}
-
-{{/*
-Roles that are enabled, in a fixed order, so templates that range over them
-render deterministically.
-*/}}
-{{- define "kritique.enabledRoles" -}}
-{{- $out := list -}}
-{{- range $r := list "all" "ingest" "worker" "web" -}}
-{{- if (index $.Values.roles $r).enabled -}}
-{{- $out = append $out $r -}}
-{{- end -}}
-{{- end -}}
-{{- join "," $out -}}
-{{- end }}
-
-{{/*
-Whether any enabled role works jobs (and so needs the worker RBAC, the
-runner account and the owner/runner database secrets).
-*/}}
-{{/*
-In-cluster URL runner Jobs are handed as HTTPS_PROXY, empty when the gateway
-is off.
+In-cluster URL runner Jobs are handed as HTTPS_PROXY and their model endpoint.
 */}}
 {{- define "kritique.gatewayURL" -}}
-{{- if .Values.gateway.enabled -}}
-{{- printf "http://%s-gateway.%s.svc.cluster.local:%d" (include "kritique.fullname" .) .Release.Namespace (int .Values.gateway.port) -}}
-{{- end -}}
-{{- end }}
-
-{{- define "kritique.hasWorker" -}}
-{{- if or .Values.roles.all.enabled .Values.roles.worker.enabled -}}true{{- end -}}
+{{- printf "http://%s-gateway.%s.svc.%s:%d" (include "kritique.fullname" .) .Release.Namespace (.Values.clusterDomain | default "cluster.local") (int .Values.service.gatewayPort) -}}
 {{- end }}
 
 {{/*
-Whether any enabled role serves webhooks.
+Whether a configuration file is mounted: the chart's, or an existing
+ConfigMap. Without one, kritique runs on its environment alone.
 */}}
-{{- define "kritique.hasIngest" -}}
-{{- if or .Values.roles.all.enabled .Values.roles.ingest.enabled -}}true{{- end -}}
+{{- define "kritique.hasConfigFile" -}}
+{{- if or .Values.existingConfigMap .Values.configFile -}}true{{- end -}}
 {{- end }}
 
 {{/*
-Whether any enabled role serves the dashboard.
+The kritique serve container's variables from `config`: each key is a
+KRITIQUE_* variable, its name without the prefix in camelCase. A key left
+empty sets nothing; a map is the variable's valueFrom. A key for a variable
+the chart derives from its other values is refused.
 */}}
-{{- define "kritique.hasWeb" -}}
-{{- if or .Values.roles.web.enabled (and .Values.roles.all.enabled .Values.web.url) -}}true{{- end -}}
+{{- define "kritique.configEnv" -}}
+{{- $derived := list }}
+{{- range (include "kritique.serveEnv" . | fromYamlArray) }}
+{{- $derived = append $derived .name }}
+{{- end }}
+{{- range $key, $value := .Values.config }}
+{{- $name := printf "KRITIQUE_%s" (snakecase $key | upper) }}
+{{- if has $name $derived }}
+{{- fail (printf "config.%s: the chart sets %s from its other values" $key $name) }}
+{{- end }}
+{{- if kindIs "map" $value }}
+{{- with $value }}
+- name: {{ $name }}
+  {{- tpl (toYaml .) $ | nindent 2 }}
+{{- end }}
+{{- else if ne (toString $value) "" }}
+- name: {{ $name }}
+  value: {{ tpl (toString $value) $ | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+The variables the chart derives from its values: the kritique serve container's
+environment before `env`. Rendered as a list so the deployment can also refuse
+an `env` key that would duplicate one of them.
+*/}}
+{{- define "kritique.serveEnv" -}}
+{{- if include "kritique.hasConfigFile" . }}
+- name: KRITIQUE_CONFIG_FILE
+  value: /etc/kritique/config.yaml
+{{- end }}
+- name: KRITIQUE_ADDR
+  value: {{ printf ":%d" (int .Values.service.port) | quote }}
+- name: KRITIQUE_METRICS_ADDR
+  value: {{ printf ":%d" (int .Values.service.metricsPort) | quote }}
+- name: KRITIQUE_GATEWAY_ADDR
+  value: {{ printf ":%d" (int .Values.service.gatewayPort) | quote }}
+- name: KRITIQUE_GATEWAY_URL
+  value: {{ include "kritique.gatewayURL" . | quote }}
+- name: KRITIQUE_DATABASE_APP_ROLE
+  value: {{ .Values.database.app.role | quote }}
+- name: KRITIQUE_DATABASE_RUNNER_ROLE
+  value: {{ .Values.database.runner.role | quote }}
+- name: KRITIQUE_DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ tpl .Values.database.app.existingSecret . | quote }}
+      key: {{ .Values.database.app.key | quote }}
+- name: KRITIQUE_DATABASE_OWNER_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ tpl .Values.database.owner.existingSecret . | quote }}
+      key: {{ .Values.database.owner.key | quote }}
+- name: KRITIQUE_EXECUTOR
+  value: kubernetes
+- name: KRITIQUE_RUNNER_IMAGE
+  value: {{ include "kritique.runnerImage" . | quote }}
+- name: KRITIQUE_RUNNER_IMAGE_PULL_POLICY
+  value: {{ .Values.runner.image.pullPolicy | quote }}
+- name: KRITIQUE_RUNNER_SERVICE_ACCOUNT
+  value: {{ include "kritique.runnerServiceAccountName" . | quote }}
+- name: KRITIQUE_RUNNER_DATABASE_SECRET
+  value: {{ tpl .Values.database.runner.existingSecret . | quote }}
+- name: KRITIQUE_RUNNER_DATABASE_SECRET_KEY
+  value: {{ .Values.database.runner.key | quote }}
+- name: KRITIQUE_RUNNER_TTL
+  value: {{ tpl (toString .Values.runner.ttl) . | quote }}
+{{- with .Values.runner.resources }}
+- name: KRITIQUE_RUNNER_RESOURCES
+  value: {{ toJson . | quote }}
+{{- end }}
+{{- with .Values.runner.tools }}
+- name: KRITIQUE_RUNNER_TOOLS
+  value: {{ toJson . | quote }}
+{{- end }}
 {{- end }}

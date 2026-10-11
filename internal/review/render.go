@@ -5,9 +5,13 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // MaxRenderBytes bounds a rendered comment, marker included. GitHub rejects
@@ -15,7 +19,7 @@ import (
 const MaxRenderBytes = 64 << 10
 
 // renderTimeout bounds one render, parse included.
-var renderTimeout = 2 * time.Second
+const renderTimeout = 2 * time.Second
 
 //go:embed templates/summary.md.tmpl
 var defaultSummary string
@@ -32,20 +36,115 @@ type Templates struct {
 // RenderData is what the summary template sees as its dot; the inline
 // template's dot is one Finding.
 type RenderData struct {
-	Number       int
-	HeadSHA      string
-	Model        string
+	Number  int
+	HeadSHA string
+	// HeadURL links the head commit on the forge, "" when unknown.
+	HeadURL string
+	// HeadSubject is the head commit's subject line as FooterSubject cuts
+	// and escapes it, "" when unknown.
+	HeadSubject string
+	// Reviews is how many reviews of the pull request this one makes.
+	Reviews int
+	Model   string
+	// Effort is how hard the model reasoned, "" for the provider's default.
+	Effort string
+	// Cost is what the pull request's reviews have cost together, as
+	// FormatUSD writes it, "" where the repository does not show it.
+	Cost string
+	// AuthorIsBot is whether a bot opened the pull request; the default
+	// template then leaves out the praise, which a mechanical change
+	// earns nothing by.
+	AuthorIsBot  bool
 	Result       Result
 	Counts       Counts
 	Notes        []string
 	Incremental  bool
 	PriorHeadSHA string
+	// PriorHeadURL links the last review's head on the forge, "" when
+	// unknown.
+	PriorHeadURL string
+	// Prior are the last review's findings this review did not report
+	// again, each resolved or dismissed, when this review builds on it.
+	Prior []PriorFinding
+	// Unanchored are findings on lines the diff does not show, which
+	// this review posts no inline comment for: listed in the summary only,
+	// each linked to the thread an earlier report of it opened, if any.
+	Unanchored []Finding
+	// HeldBack are the findings in the diff an incremental re-review held
+	// back (see HoldBack): listed only, neither posted, counted nor scored.
+	HeldBack []Finding
 	// Incomplete, when set, says why the head was not fully reviewed; the
 	// default template then states that instead of a verdict.
 	Incomplete string
-	// Sources are the URLs an agentic review's commands fetched, from the
-	// runner's record rather than the model's answer.
+	// Sources are links to what the review's commands fetched, from
+	// the runner's record rather than the model's answer, as SourceLinks
+	// gives them.
 	Sources []string
+	// Confidence is the score a second model gave the pull request, nil
+	// when the repository asks for none or the scorer did not answer.
+	Confidence *Confidence
+	// Approval is what became of kritique's approval of the head, nil
+	// where the repository does not have it approve.
+	Approval *Approval
+	// WebURL is the dashboard's origin, without a trailing slash, and
+	// PullURL the pull request's page on it, where an admin can re-run
+	// the review; both "" when the dashboard has no public URL. The
+	// default template then leaves the re-run badge out.
+	WebURL, PullURL string
+}
+
+// Approval is whether the reviewed head stands approved by kritique, and
+// the reason, "" where the summary states it already: an approval a
+// confidence score decided says nothing the score's own line does not.
+type Approval struct {
+	Approved bool
+	Reason   string
+}
+
+// FormatUSD writes an amount in dollars to the cent, and under a cent to
+// the hundredth of one so a small review does not read as free.
+func FormatUSD(amount float64) string {
+	switch {
+	case amount == 0:
+		return "$0"
+	case amount < 0.01:
+		return fmt.Sprintf("$%.4f", amount)
+	}
+	return fmt.Sprintf("$%.2f", amount)
+}
+
+// footerSubjectRunes is how much of a commit subject the footer shows.
+const footerSubjectRunes = 40
+
+// FooterSubject cuts a commit subject to one line of footerSubjectRunes,
+// marking the cut with an ellipsis, and escapes what Markdown would read
+// as markup, since a pull request's author writes the subject and it
+// lands inside the footer's link text.
+func FooterSubject(subject string) string {
+	subject, _, _ = strings.Cut(subject, "\n")
+	subject = strings.TrimSpace(subject)
+	if runes := []rune(subject); len(runes) > footerSubjectRunes {
+		subject = strings.TrimSpace(string(runes[:footerSubjectRunes])) + "..."
+	}
+	var b strings.Builder
+	for _, r := range subject {
+		if strings.ContainsRune("\\`*_[]<>", r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// PullPageURL is the dashboard page of pull request number of owner/repo
+// under the account name on forge, for a dashboard served at web: "" when
+// web is nil.
+func PullPageURL(web *url.URL, forge, name, owner, repo string, number int) string {
+	if web == nil {
+		return ""
+	}
+	return web.String() + "/#/a/" + url.PathEscape(forge) + "/" + url.PathEscape(name) +
+		"/pulls/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/" + strconv.Itoa(number)
 }
 
 var (
@@ -73,27 +172,47 @@ func RenderSummary(ctx context.Context, t Templates, d RenderData) (body string,
 	if err != nil {
 		// The default renders data kritique bounds itself; failing here is a
 		// bug, but the comment must still carry the marker and the take.
-		out = truncateUTF8(fmt.Sprintf("### kritique review\n\n%s\n", d.Result.Summary.Take), limit)
+		out = textcut.Prefix(fmt.Sprintf("## Kritique Review\n\n%s\n", d.Result.Summary.Take), limit)
 	}
 	return marker + out, notes
 }
 
-// RenderInline renders one finding as an inline review comment, falling
-// back to the default template as RenderSummary does.
+// RenderInline renders one finding as an inline review comment, led by its
+// FindingMarker, falling back to the default template as RenderSummary
+// does.
 func RenderInline(ctx context.Context, t Templates, f Finding) (string, []string) {
+	marker := FindingMarker(Fingerprint(f)) + "\n"
+	limit := MaxRenderBytes - len(marker)
 	var notes []string
 	if t.Inline != "" {
-		out, err := render(ctx, t.Inline, f, MaxRenderBytes)
+		out, err := render(ctx, t.Inline, f, limit)
 		if err == nil {
-			return out, nil
+			return marker + out, nil
 		}
 		notes = append(notes, fallbackNote("inline", err))
 	}
-	out, err := render(context.WithoutCancel(ctx), defaultInline, f, MaxRenderBytes)
+	out, err := render(context.WithoutCancel(ctx), defaultInline, f, limit)
 	if err != nil {
-		out = truncateUTF8(fmt.Sprintf("**[%s]** **%s**\n\n%s\n", f.Severity, f.Title, f.Explanation), MaxRenderBytes)
+		out = textcut.Prefix(fmt.Sprintf("**[%s]** **%s**\n\n%s\n", f.Severity, f.Title, f.Explanation), limit)
 	}
-	return out, notes
+	return marker + out, notes
+}
+
+// PlainSuggestions turns each suggestion fence in body into a plain code
+// fence, for a forge that offers no one-click suggestion: Forgejo and
+// Gitea show "```suggestion" as a code block labelled with a language
+// that does not exist, so the replacement reads as plain code instead.
+func PlainSuggestions(body string) string {
+	lines := strings.Split(body, "\n")
+	for i, l := range lines {
+		indent := len(l) - len(strings.TrimLeft(l, " "))
+		rest := l[indent:]
+		fence := len(rest) - len(strings.TrimLeft(rest, "`"))
+		if fence >= 3 && strings.TrimSpace(rest[fence:]) == "suggestion" {
+			lines[i] = l[:indent+fence]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func fallbackNote(which string, err error) string {
@@ -136,11 +255,4 @@ func render(ctx context.Context, src string, data any, limit int) (string, error
 	case <-ctx.Done():
 		return "", fmt.Errorf("review: render: %w", ctx.Err())
 	}
-}
-
-func truncateUTF8(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return strings.ToValidUTF8(s[:n], "")
 }

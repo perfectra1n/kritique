@@ -2,10 +2,14 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/riverqueue/river/rivertype"
+
+	"github.com/perfectra1n/kritique/internal/jobs"
 )
 
 // UsageGroup is what a usage series is keyed by.
@@ -27,13 +31,13 @@ func (g UsageGroup) Valid() bool {
 // usageKeys are the SQL key expressions of each grouping: over usage u
 // joined to its repository ur, and over model_calls m joined to the
 // repository mr through its review, or mtr through its task run. A model
-// call's kind maps to the usage role it is charged as: an agent step is a
-// task's when it has a task run.
+// call's kind maps to the usage role it is charged as, and a follow-up's or
+// a task's agent step to the follow-up's or the task's.
 var usageKeys = map[UsageGroup][2]string{
 	UsageByDay:   {`to_char(u.created_at, 'YYYY-MM-DD')`, `to_char(m.created_at, 'YYYY-MM-DD')`},
 	UsageByModel: {`u.model`, `m.model`},
 	UsageByRepo:  {`coalesce(ur.name, '')`, `coalesce(mr.name, mtr.name, '')`},
-	UsageByRole: {`u.role`, `CASE WHEN m.kind = 'agent_step' AND m.task_run_id IS NOT NULL THEN 'task'
+	UsageByRole: {`u.role`, `CASE WHEN m.followup_comment_id IS NOT NULL THEN 'followup' WHEN m.task_run_id IS NOT NULL THEN 'task'
 		WHEN m.kind = 'agent_step' THEN 'review' ELSE m.kind END`},
 }
 
@@ -51,7 +55,7 @@ type UsageSeriesRow struct {
 	Calls            int64
 }
 
-// UsageSeries sums the tenant's usage in [from, to) by group, ordered by
+// UsageSeries sums the account's usage in [from, to) by group, ordered by
 // key.
 func UsageSeries(ctx context.Context, tx pgx.Tx, group UsageGroup, from, to time.Time) ([]UsageSeriesRow, error) {
 	keys, ok := usageKeys[group]
@@ -86,27 +90,12 @@ func UsageSeries(ctx context.Context, tx pgx.Tx, group UsageGroup, from, to time
 	return out, nil
 }
 
-// JobState is a river_job.state value.
-type JobState string
-
-// River job states.
-const (
-	JobAvailable JobState = "available"
-	JobScheduled JobState = "scheduled"
-	JobRunning   JobState = "running"
-	JobRetryable JobState = "retryable"
-	JobPending   JobState = "pending"
-	JobCompleted JobState = "completed"
-	JobCancelled JobState = "cancelled"
-	JobDiscarded JobState = "discarded"
-)
-
-// JobRow is one River job of the tenant, with the parts of its arguments
+// JobRow is one River job of the account, with the parts of its arguments
 // the queue view shows.
 type JobRow struct {
 	ID           int64
 	Kind         string
-	State        JobState
+	State        rivertype.JobState
 	Attempt      int
 	MaxAttempts  int
 	CreatedAt    time.Time
@@ -130,36 +119,79 @@ const (
 	queueActive   = 500
 )
 
-// ListQueue returns the tenant's review, follow-up and index jobs that
+// jobColumns selects a JobRow from the account's review, follow-up and
+// index jobs. River's tables carry no row-level security, so the account
+// comes from the transaction's own setting rather than a parameter a caller
+// could get wrong.
+const jobColumns = `j.id, j.kind, j.state::text, j.attempt, j.max_attempts, j.created_at, j.scheduled_at, j.attempted_at, j.finalized_at,
+	coalesce(j.args->>'repository_id', ''), coalesce(r.name, ''), coalesce((j.args->>'number')::int, 0),
+	coalesce(j.args->>'head_sha', j.args->>'commit_sha', ''), coalesce(j.args->>'trigger', ''),
+	coalesce((j.args->>'comment_id')::bigint, 0), coalesce(j.errors[array_length(j.errors, 1)]->>'error', '')
+	FROM river_job j LEFT JOIN repositories r ON r.id::text = j.args->>'repository_id'
+	WHERE j.args->>'account_id' = current_setting('app.account_id', true) AND j.kind IN ('review', 'followup', 'index')`
+
+func scanJob(row pgx.CollectableRow) (JobRow, error) {
+	var j JobRow
+	var state string
+	err := row.Scan(&j.ID, &j.Kind, &state, &j.Attempt, &j.MaxAttempts, &j.CreatedAt, &j.ScheduledAt, &j.AttemptedAt, &j.FinalizedAt,
+		&j.RepositoryID, &j.Repository, &j.Number, &j.Head, &j.Trigger, &j.CommentID, &j.LastError)
+	j.State = rivertype.JobState(state)
+	return j, err
+}
+
+// ListQueue returns the account's review, follow-up and index jobs that
 // have not finished, oldest first, then the most recently finished ones.
-// River's tables carry no row-level security, so the tenant comes from
-// the transaction's own setting rather than a parameter a caller could get
-// wrong.
 func ListQueue(ctx context.Context, tx pgx.Tx) ([]JobRow, error) {
-	const cols = `j.id, j.kind, j.state::text, j.attempt, j.max_attempts, j.created_at, j.scheduled_at, j.attempted_at, j.finalized_at,
-		coalesce(j.args->>'repository_id', ''), coalesce(r.name, ''), coalesce((j.args->>'number')::int, 0),
-		coalesce(j.args->>'head_sha', j.args->>'commit_sha', ''), coalesce(j.args->>'trigger', ''),
-		coalesce((j.args->>'comment_id')::bigint, 0), coalesce(j.errors[array_length(j.errors, 1)]->>'error', '')
-		FROM river_job j LEFT JOIN repositories r ON r.id::text = j.args->>'repository_id'
-		WHERE j.args->>'tenant_id' = current_setting('app.tenant_id', true) AND j.kind IN ('review', 'followup', 'index')`
-	rows, err := tx.Query(ctx, `(SELECT `+cols+` AND j.state IN ('available', 'scheduled', 'running', 'retryable')
+	rows, err := tx.Query(ctx, `(SELECT `+jobColumns+` AND j.state IN (`+jobs.LiveStatesSQL()+`)
 			ORDER BY j.scheduled_at, j.id LIMIT $1)
 		UNION ALL
-		(SELECT `+cols+` AND j.state IN ('completed', 'cancelled', 'discarded')
+		(SELECT `+jobColumns+` AND j.state IN ('completed', 'cancelled', 'discarded')
 			ORDER BY j.finalized_at DESC NULLS LAST, j.id DESC LIMIT $2)`, queueActive, queueFinished)
 	if err != nil {
 		return nil, fmt.Errorf("store: list queue: %w", err)
 	}
-	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (JobRow, error) {
-		var j JobRow
-		var state string
-		err := row.Scan(&j.ID, &j.Kind, &state, &j.Attempt, &j.MaxAttempts, &j.CreatedAt, &j.ScheduledAt, &j.AttemptedAt, &j.FinalizedAt,
-			&j.RepositoryID, &j.Repository, &j.Number, &j.Head, &j.Trigger, &j.CommentID, &j.LastError)
-		j.State = JobState(state)
-		return j, err
-	})
+	out, err := pgx.CollectRows(rows, scanJob)
 	if err != nil {
 		return nil, fmt.Errorf("store: list queue: %w", err)
 	}
 	return out, nil
+}
+
+// ReadHeldSlots counts, for each model the account has ever leased a slot
+// of, the slots a live lease holds now.
+func ReadHeldSlots(ctx context.Context, tx pgx.Tx) (map[string]int, error) {
+	rows, err := tx.Query(ctx, `SELECT model_key, count(*) FILTER (WHERE job_id IS NOT NULL AND expires_at >= now())
+		FROM model_leases GROUP BY model_key`)
+	if err != nil {
+		return nil, fmt.Errorf("store: read held slots: %w", err)
+	}
+	out := map[string]int{}
+	var key string
+	var held int
+	if _, err := pgx.ForEachRow(rows, []any{&key, &held}, func() error {
+		out[key] = held
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("store: read held slots: %w", err)
+	}
+	return out, nil
+}
+
+// FindLiveReviewJob returns the review job of a pull request that has not
+// finished, the newest when there are several, or nil when there is none.
+func FindLiveReviewJob(ctx context.Context, tx pgx.Tx, repositoryID string, number int) (*JobRow, error) {
+	rows, err := tx.Query(ctx, `SELECT `+jobColumns+` AND j.kind = 'review' AND j.state IN (`+jobs.LiveStatesSQL()+`)
+			AND j.args->>'repository_id' = $1 AND (j.args->>'number')::int = $2
+		ORDER BY j.id DESC LIMIT 1`, repositoryID, number)
+	if err != nil {
+		return nil, fmt.Errorf("store: find live review job: %w", err)
+	}
+	j, err := pgx.CollectExactlyOneRow(rows, scanJob)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: find live review job: %w", err)
+	}
+	return &j, nil
 }

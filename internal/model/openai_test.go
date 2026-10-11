@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // capture is one request a fake provider received.
@@ -364,6 +365,79 @@ func TestOpenAIErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "model:") || !strings.Contains(err.Error(), "acme/large") {
 		t.Fatalf("err = %v", err)
 	}
+	if !strings.Contains(err.Error(), "429") || !strings.Contains(err.Error(), "rate limited") {
+		t.Fatalf("err = %v, want the status and the provider's reason", err)
+	}
+	if !Transient(err) {
+		t.Fatalf("err = %v, want it transient", err)
+	}
+}
+
+// TestOpenRouterInFlightBudgetIsTransient: OpenRouter's 402 for the
+// account's in-flight requests, which says when to come back, is waited out
+// and sent again; its 402 for an empty balance is a refusal.
+func TestOpenRouterInFlightBudgetIsTransient(t *testing.T) {
+	const inFlight = `{"error":{"message":"This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.","code":402,"metadata":{"reason":"in_flight_budget_exhausted","headers":{"Retry-After":"120"}}}}`
+	const empty = `{"error":{"message":"Insufficient credits. Add more using https://openrouter.ai/settings/credits","code":402}}`
+	tests := []struct {
+		name       string
+		body       string
+		retryAfter string
+		want       bool
+	}{
+		{"in-flight budget", inFlight, "120", true},
+		{"empty balance", empty, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if tt.retryAfter != "" {
+					w.Header().Set("Retry-After", tt.retryAfter)
+				}
+				w.WriteHeader(http.StatusPaymentRequired)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			t.Cleanup(srv.Close)
+			c := newTestOpenAI(t, srv, true, nil)
+			_, err := c.Step(t.Context(), StepRequest{Model: "acme/large", Messages: []Message{{Role: RoleUser, Text: "hi"}}})
+			if err == nil || !strings.Contains(err.Error(), "402") {
+				t.Fatalf("err = %v, want the 402", err)
+			}
+			if got := Transient(err); got != tt.want {
+				t.Fatalf("Transient = %v, want %v", got, tt.want)
+			}
+			var want time.Duration
+			if tt.want {
+				want = 120 * time.Second
+			}
+			if got := RetryAfter(err); got != want {
+				t.Fatalf("RetryAfter = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestStalledProviderTimesOut(t *testing.T) {
+	old := StepTimeout
+	StepTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { StepTimeout = old })
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	for _, pt := range []ProviderType{ProviderOpenAI, ProviderOpenRouter, ProviderOpenCode, ProviderAnthropic} {
+		t.Run(string(pt), func(t *testing.T) {
+			s, err := NewStepper(pt, srv.URL, "k", Pricing{}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = s.Step(t.Context(), StepRequest{Model: "m", Messages: []Message{{Role: RoleUser, Text: "hi"}}})
+			if err == nil || !Transient(err) {
+				t.Fatalf("err = %v, want a transient timeout", err)
+			}
+		})
+	}
 }
 
 func TestNewOpenAIRejects(t *testing.T) {
@@ -380,5 +454,180 @@ func TestNewOpenAIRejects(t *testing.T) {
 				t.Fatal("expected an error")
 			}
 		})
+	}
+}
+
+// TestOpenAIOpenRouterCaching: an OpenRouter request asks for automatic
+// prompt caching and usage accounting at the top level; a plain OpenAI
+// request, whose API rejects unknown fields, sends neither.
+func TestOpenAIOpenRouterCaching(t *testing.T) {
+	body := chatCompletion(`{"role":"assistant","content":"ok"}`, "stop", plainUsage, "")
+	for _, openRouter := range []bool{true, false} {
+		srv, got := fakeProvider(t, http.StatusOK, body)
+		c := newTestOpenAI(t, srv, openRouter, nil)
+		if _, err := c.Step(t.Context(), StepRequest{Model: "acme/large", Messages: []Message{{Role: RoleUser, Text: "hi"}}}); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+		_, hasCache := got.body["cache_control"]
+		_, hasUsage := got.body["usage"]
+		if hasCache != openRouter || hasUsage != openRouter {
+			t.Fatalf("openRouter %v: cache_control present %v, usage present %v", openRouter, hasCache, hasUsage)
+		}
+		if openRouter && field(got.body, "cache_control", "type") != "ephemeral" {
+			t.Fatalf("cache_control = %v", got.body["cache_control"])
+		}
+	}
+	// A step no other reads back asks for no caching, whose writes cost
+	// more than an uncached prompt.
+	srv, got := fakeProvider(t, http.StatusOK, body)
+	if _, err := newTestOpenAI(t, srv, true, nil).Step(t.Context(), StepRequest{
+		Model: "acme/large", Messages: []Message{{Role: RoleUser, Text: "hi"}}, Once: true,
+	}); err != nil {
+		t.Fatalf("Step: %v", err)
+	}
+	if _, hasCache := got.body["cache_control"]; hasCache || field(got.body, "usage", "include") != true {
+		t.Fatalf("a step once: cache_control = %v, usage = %v", got.body["cache_control"], got.body["usage"])
+	}
+}
+
+// TestOpenAIEffort: the effort goes out as OpenRouter's reasoning object or
+// as the chat completions parameter, and not at all when unset.
+func TestOpenAIEffort(t *testing.T) {
+	body := chatCompletion(`{"role":"assistant","content":"ok"}`, "stop", plainUsage, "")
+	for _, tt := range []struct {
+		name       string
+		openRouter bool
+		effort     Effort
+		wantObject any
+		wantParam  any
+	}{
+		{"openrouter", true, EffortHigh, "high", nil},
+		{"openai", false, EffortMinimal, nil, "minimal"},
+		{"openrouter unset", true, "", nil, nil},
+		{"openai unset", false, "", nil, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, got := fakeProvider(t, http.StatusOK, body)
+			c := newTestOpenAI(t, srv, tt.openRouter, nil)
+			if _, err := c.Step(t.Context(), StepRequest{Model: "acme/large", Messages: []Message{{Role: RoleUser, Text: "hi"}}, Effort: tt.effort}); err != nil {
+				t.Fatalf("Step: %v", err)
+			}
+			if object, param := field(got.body, "reasoning", "effort"), got.body["reasoning_effort"]; object != tt.wantObject || param != tt.wantParam {
+				t.Fatalf("reasoning.effort = %v, reasoning_effort = %v; want %v and %v", object, param, tt.wantObject, tt.wantParam)
+			}
+		})
+	}
+	t.Run("a level that is none is rejected", func(t *testing.T) {
+		srv, _ := fakeProvider(t, http.StatusOK, body)
+		c := newTestOpenAI(t, srv, false, nil)
+		_, err := c.Step(t.Context(), StepRequest{Model: "m", Messages: []Message{{Role: RoleUser, Text: "hi"}}, Effort: "turbo"})
+		if err == nil || !strings.Contains(err.Error(), `effort must be none, minimal, low, medium, high, xhigh or max, got "turbo"`) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestAdaptersIdentifyKritique(t *testing.T) {
+	Version = "1.2.3"
+	t.Cleanup(func() { Version = "dev" })
+	const want = "kritique/1.2.3"
+	t.Run("openai", func(t *testing.T) {
+		srv, got := fakeProvider(t, http.StatusOK, chatCompletion(`{"role":"assistant","content":"ok"}`, "stop", plainUsage, ""))
+		if _, err := newTestOpenAI(t, srv, false, nil).Step(t.Context(), StepRequest{Model: "m"}); err != nil {
+			t.Fatal(err)
+		}
+		if ua := got.header.Get("User-Agent"); ua != want {
+			t.Fatalf("User-Agent = %q, want %q", ua, want)
+		}
+	})
+	t.Run("anthropic", func(t *testing.T) {
+		srv, got := fakeProvider(t, http.StatusOK, anthropicMessage(`[{"type":"text","text":"ok"}]`, "end_turn", anthropicUsage))
+		if _, err := newTestAnthropic(t, srv, nil).Step(t.Context(), StepRequest{Model: "m"}); err != nil {
+			t.Fatal(err)
+		}
+		if ua := got.header.Get("User-Agent"); ua != want {
+			t.Fatalf("User-Agent = %q, want %q", ua, want)
+		}
+	})
+	t.Run("embedder", func(t *testing.T) {
+		srv, got := fakeProvider(t, http.StatusOK,
+			`{"object":"list","model":"emb","data":[{"object":"embedding","index":0,"embedding":[0.1]}],"usage":{"prompt_tokens":1,"total_tokens":1}}`)
+		if _, _, err := NewOpenAIEmbedder(srv.URL, "k", "emb", 1).Embed(t.Context(), []string{"x"}); err != nil {
+			t.Fatal(err)
+		}
+		if ua := got.header.Get("User-Agent"); ua != want {
+			t.Fatalf("User-Agent = %q, want %q", ua, want)
+		}
+	})
+}
+
+func TestOpenAISessionHeader(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		openCode bool
+		session  string
+		want     string
+	}{
+		{"opencode names the conversation", true, "run-1", "run-1"},
+		{"opencode without a session sends none", true, "", ""},
+		{"openai never sends one", false, "run-1", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, got := fakeProvider(t, http.StatusOK, chatCompletion(`{"role":"assistant","content":"ok"}`, "stop", plainUsage, ""))
+			c, err := NewOpenAI(OpenAIConfig{BaseURL: srv.URL + "/v1", APIKey: "k", OpenCode: tt.openCode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Step(t.Context(), StepRequest{Model: "m", Session: tt.session}); err != nil {
+				t.Fatal(err)
+			}
+			if h := got.header.Get(sessionHeader); h != tt.want {
+				t.Fatalf("%s = %q, want %q", sessionHeader, h, tt.want)
+			}
+		})
+	}
+}
+
+// TestRequestTimeoutOverrides: a client built with its own request timeout
+// gives up on a stalled server by it, not by StepTimeout; and the gateway's
+// budgets nest, so the runner always outlasts the gateway, which outlasts
+// one provider request.
+func TestRequestTimeoutOverrides(t *testing.T) {
+	if GatewayRequestTimeout <= GatewayStepBudget || GatewayStepBudget <= StepTimeout {
+		t.Fatalf("timeouts do not nest: request %s, budget %s, step %s", GatewayRequestTimeout, GatewayStepBudget, StepTimeout)
+	}
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	s, err := NewOpenAI(OpenAIConfig{BaseURL: srv.URL, APIKey: "k", RequestTimeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = s.Step(t.Context(), StepRequest{Model: "m", Messages: []Message{{Role: RoleUser, Text: "hi"}}})
+	if err == nil || !Transient(err) || time.Since(start) > StepTimeout/2 {
+		t.Fatalf("err = %v after %s, want a transient timeout well before StepTimeout", err, time.Since(start))
+	}
+}
+
+// TestOpenAIPartHeader: a client made for a part of a split review names it
+// on every request; one made for none sends no header.
+func TestOpenAIPartHeader(t *testing.T) {
+	for _, tt := range []struct {
+		part int
+		want string
+	}{{0, ""}, {3, "3"}} {
+		srv, got := fakeProvider(t, http.StatusOK, chatCompletion(`{"role":"assistant","content":"ok"}`, "stop", plainUsage, ""))
+		c, err := NewOpenAI(OpenAIConfig{BaseURL: srv.URL + "/v1", APIKey: "k", Part: tt.part})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Step(t.Context(), StepRequest{Model: "m", Messages: []Message{{Role: RoleUser, Text: "hi"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if h := got.header.Get(PartHeader); h != tt.want {
+			t.Fatalf("part %d: %s = %q, want %q", tt.part, PartHeader, h, tt.want)
+		}
 	}
 }

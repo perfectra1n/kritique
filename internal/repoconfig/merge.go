@@ -9,52 +9,49 @@ import (
 	"time"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
-	"github.com/perfectra1n/kritique/internal/prfilter"
+	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
-// Merged is the operator's settings with the merge-base FileName applied.
+// Merged is the admin's settings with the merge-base FileName applied.
 type Merged struct {
 	configfile.Settings
-	// InRepoFilter is the file's own filter, ANDed with the operator's,
-	// which ingest has already applied; nil when it sets none.
-	InRepoFilter *prfilter.Program
-	Skip         Skip
-	// Scoped maps each instruction file the repository scoped to the
-	// globs of the changed paths it applies to; see Active.
-	Scoped map[string][]string
-	// Dropped says which of the file's values fell outside the operator's
-	// bounds; the operator's value applies for each.
+	// InRepoFilters are the file's own conditions, passed beside the
+	// admin's, which ingest has already applied.
+	InRepoFilters configfile.Filters
+	// Dropped says which of the file's values fell outside the admin's
+	// bounds; the admin's value applies for each.
 	Dropped []string
-	// TaskNotes say what of the operator's and the file's tasks the task
+	// TaskNotes say what of the admin's and the file's tasks the task
 	// bounds left out. Settings.Tasks holds the tasks that run: the
-	// operator's, then the file's.
+	// admin's, then the file's.
 	TaskNotes []tasks.Note
 }
 
 // Merge applies doc, the merge-base FileName or nil when the repository has
-// none, over the operator's settings op (ADR-0010 §2.5). The file narrows
-// what the operator allows (enabled, filter, ignore, skip), appends its
-// instructions and context files to the operator's, and its tasks, clipped
-// to the operator's task bounds, to the operator's, may only turn
-// requireSuggestedFix on, and replaces the templates, the inline severity
-// floor and whether findings go inline, which grant nothing. It chooses
-// its mode, models, agent limits and commands and settle time within the
-// bounds op.Allow gives it; a bound the operator leaves unset allows only
-// the operator's own mode, models and commands, and limits and a settle
-// time at or below the operator's own. A value outside its bound is
-// dropped, not clamped, and Dropped says so. A file that does not parse is
-// ignored as a whole: op stands, and the error says why.
+// none, over the admin's settings op. The file narrows what an admin allows
+// (enabled, ignore, and include and exclude lists of its own, with no
+// condition under an admin's name),
+// appends its context files and rules to the
+// admin's, may only turn review.fixes on and lower confidence.risk, and replaces the models,
+// their effort, the confidence threshold, how the review comments,
+// whether it approves and whether its summary draws a diagram. It adds its
+// tasks after the admin's, clipped to the admin's task bounds (TaskNotes
+// says what was left out). A model must be one of a provider
+// op.Providers names, and an effort one of model.Efforts or empty, which
+// leaves it to the provider. A value it may not take is dropped, and
+// Dropped says so. A file that does not parse is ignored as a whole: op stands, and the
+// error says why.
 func Merge(doc []byte, op configfile.Settings) (Merged, error) {
 	op.Ignore = slices.Clone(op.Ignore)
-	op.Review.Instructions = slices.Clone(op.Review.Instructions)
 	op.Review.Context = slices.Clone(op.Review.Context)
+	op.Review.Rules = slices.Clone(op.Review.Rules)
 	m := Merged{Settings: op}
 	m.mergeTasks(&File{}, &op)
 	if doc == nil {
 		return m, nil
 	}
-	f, prg, err := Parse(doc)
+	f, err := Parse(doc)
 	if err != nil {
 		return m, err
 	}
@@ -62,138 +59,120 @@ func Merge(doc []byte, op configfile.Settings) (Merged, error) {
 	if f.Enabled != nil && !*f.Enabled {
 		m.Enabled = false
 	}
-	m.InRepoFilter = prg
+	m.InRepoFilters.Include = m.own("include", f.Trigger.Include, op.Filters)
+	m.InRepoFilters.Exclude = m.own("exclude", f.Trigger.Exclude, op.Filters)
 	for _, g := range f.Ignore {
 		if !slices.Contains(m.Ignore, g) {
 			m.Ignore = append(m.Ignore, g)
 		}
 	}
-	m.Skip = f.Skip
-	for _, in := range f.Review.Instructions {
-		if slices.Contains(m.Review.Instructions, in.Path) {
-			continue
-		}
-		m.Review.Instructions = append(m.Review.Instructions, in.Path)
-		if len(in.Paths) > 0 {
-			if m.Scoped == nil {
-				m.Scoped = map[string][]string{}
-			}
-			m.Scoped[in.Path] = in.Paths
-		}
-	}
-	if v := f.Review.RequireSuggestedFix; v != nil && *v {
+	if v := f.Review.Fixes; v != nil && *v {
 		m.Review.RequireSuggestedFix = true
 	} else if v != nil && op.Review.RequireSuggestedFix {
-		m.drop("review.requireSuggestedFix", "false", "true, since the operator requires a suggested fix")
+		m.drop("review.fixes", "false", "true, since an admin requires a suggested fix")
 	}
-	if f.Review.Templates.Summary != "" {
-		m.Review.Templates.Summary = f.Review.Templates.Summary
+	if f.Comments.Summary != nil {
+		m.Review.Templates.Summary = *f.Comments.Summary
 	}
-	if f.Review.Templates.Inline != "" {
-		m.Review.Templates.Inline = f.Review.Templates.Inline
+	if f.Comments.Finding != nil {
+		m.Review.Templates.Inline = *f.Comments.Finding
 	}
-	switch {
-	case f.Review.MinSeverity == "":
-	case configfile.ValidMinSeverity(f.Review.MinSeverity):
-		m.Review.MinSeverity = f.Review.MinSeverity
-	default:
-		m.drop("review.minSeverity", strconv.Quote(f.Review.MinSeverity), configfile.SeverityNit+", "+configfile.SeverityImportant)
+	if f.Comments.Inline != nil {
+		m.Review.InlineComments = *f.Comments.Inline
 	}
-	if f.Review.InlineComments != nil {
-		m.Review.InlineComments = *f.Review.InlineComments
+	if f.Review.Approve != nil {
+		m.Review.Approve = *f.Review.Approve
 	}
-	for _, c := range f.Review.Context {
+	if f.Review.Diagram != nil {
+		m.Review.Diagram = *f.Review.Diagram
+	}
+	for _, c := range f.Context {
 		if !slices.ContainsFunc(m.Review.Context, func(o configfile.ContextFile) bool { return o.Path == c.Path }) {
 			m.Review.Context = append(m.Review.Context, c)
 		}
 	}
-	m.choose(&f, &op)
+	for _, r := range f.Rules {
+		if slices.ContainsFunc(op.Review.Rules, func(o configfile.Rule) bool { return o.ID == r.ID }) {
+			m.Dropped = append(m.Dropped, fmt.Sprintf("%s: rules %s was dropped: an admin's rule has that id", FileName, r.ID))
+			continue
+		}
+		m.Review.Rules = append(m.Review.Rules, r)
+	}
+	switch th := f.Confidence.Threshold; {
+	case th == nil:
+	case configfile.ValidConfidence(*th):
+		m.Confidence.Threshold = *th
+	default:
+		m.drop("confidence.threshold", strconv.Itoa(*th), "0 to "+strconv.Itoa(configfile.MaxConfidence))
+	}
+	if f.Confidence.Gate != nil {
+		m.Confidence.Gate = *f.Confidence.Gate
+	}
+	switch risk := f.Confidence.Risk; {
+	case risk == "":
+	case risk.Within(op.Confidence.Risk):
+		m.Confidence.Risk = risk
+	default:
+		m.drop("confidence.risk", strconv.Quote(string(risk)), string(op.Confidence.Risk)+" or lower")
+	}
+	m.Skills = configfile.WithSkills(m.Skills, f.Skills)
+	m.choose(&f, op.Providers)
+	for _, e := range []struct {
+		field string
+		want  *model.Effort
+		dst   *model.Effort
+	}{{"review.effort", f.Review.Effort, &m.Models.Effort}, {"confidence.effort", f.Confidence.Effort, &m.Confidence.Effort}} {
+		switch {
+		case e.want == nil:
+		case *e.want == "" || e.want.Valid():
+			*e.dst = *e.want
+		default:
+			m.drop(e.field, strconv.Quote(string(*e.want)), model.EffortLevels)
+		}
+	}
 	return m, nil
 }
 
-// choose applies the mode, models, agent and settle time f chooses, each
-// only within the bound op gives it.
-func (m *Merged) choose(f *File, op *configfile.Settings) {
-	a := op.Allow
-	if f.Mode != "" {
-		modes := a.Modes
-		if modes == nil {
-			modes = []configfile.ReviewMode{op.Mode}
-		}
-		if slices.Contains(modes, f.Mode) {
-			m.Mode = f.Mode
-		} else {
-			m.drop("mode", strconv.Quote(string(f.Mode)), list(modes))
-		}
-	}
+// choose applies the models f chooses: a model of one of providers.
+func (m *Merged) choose(f *File, providers []string) {
 	for _, c := range []struct {
 		field string
 		want  configfile.ModelRef
-		own   configfile.ModelRef
 		dst   *configfile.ModelRef
 	}{
-		{"models.review", f.Models.Review, op.Models.Review, &m.Models.Review},
-		{"models.fallback", f.Models.Fallback, op.Models.Fallback, &m.Models.Fallback},
+		{"review.model", f.Review.Model, &m.Models.Review},
+		{"review.fallback", f.Review.Fallback, &m.Models.Fallback},
+		{"confidence.model", f.Confidence.Model, &m.Confidence.Model},
+		{"confidence.fallback", f.Confidence.Fallback, &m.Confidence.Fallback},
 	} {
 		if c.want == "" {
 			continue
 		}
-		models := a.Models
-		if models == nil && c.own != "" {
-			models = []configfile.ModelRef{c.own}
-		}
-		if slices.Contains(models, c.want) {
+		if c.want.Model() != "" && slices.Contains(providers, c.want.Provider()) {
 			*c.dst = c.want
 		} else {
-			m.drop(c.field, strconv.Quote(string(c.want)), list(models))
-		}
-	}
-	if f.Agent.Commands != nil {
-		commands := a.Commands
-		if commands == nil {
-			commands = op.Agent.Commands
-		}
-		if i := slices.IndexFunc(f.Agent.Commands, func(c string) bool { return !slices.Contains(commands, c) }); i >= 0 {
-			m.drop("agent.commands", strconv.Quote(f.Agent.Commands[i]), list(commands))
-		} else {
-			m.Agent.Commands = f.Agent.Commands
-		}
-	}
-	capped(m, "agent.maxSteps", f.Agent.MaxSteps, a.Agent.MaxSteps, &m.Agent.MaxSteps)
-	capped(m, "agent.maxToolOutputBytes", f.Agent.MaxToolOutputBytes, a.Agent.MaxToolOutputBytes, &m.Agent.MaxToolOutputBytes)
-	capped(m, "agent.maxTokens", f.Agent.MaxTokens, a.Agent.MaxTokens, &m.Agent.MaxTokens)
-	capped(m, "agent.timeout", f.Agent.Timeout, a.Agent.Timeout, &m.Agent.Timeout)
-	if f.Settle != nil {
-		bound := op.Settle
-		if a.Settle != nil {
-			bound = *a.Settle
-		}
-		if *f.Settle >= 0 && *f.Settle <= bound {
-			m.Settle = *f.Settle
-		} else {
-			m.drop("settle", f.Settle.String(), "0s to "+bound.String())
+			m.drop(c.field, strconv.Quote(string(c.want)), "a model of "+list(providers))
 		}
 	}
 }
 
-// capped sets *dst to the limit the file wants when it is positive and at
-// most bound, or when bound is nil at most the operator's own, *dst.
-func capped[T int | int64 | time.Duration](m *Merged, field string, want, bound, dst *T) {
-	if want == nil {
-		return
+// own is the file's conditions of one list it may keep: all but those
+// under a name one of the admin's conditions has, which are dropped with a
+// note, so a pull request cannot pass off its own condition as the
+// admin's.
+func (m *Merged) own(list string, conditions []configfile.Filter, admin configfile.Filters) []configfile.Filter {
+	var out []configfile.Filter
+	for _, c := range conditions {
+		if c.Name != "" && admin.Named(c.Name) {
+			m.Dropped = append(m.Dropped, fmt.Sprintf("%s: trigger.%s %s was dropped: an admin's condition has that name", FileName, list, c.Name))
+			continue
+		}
+		out = append(out, c)
 	}
-	limit := *dst
-	if bound != nil {
-		limit = *bound
-	}
-	if *want <= 0 || *want > limit {
-		m.drop(field, fmt.Sprint(*want), fmt.Sprintf("above 0, at most %v", limit))
-		return
-	}
-	*dst = *want
+	return out
 }
 
-// drop notes a value the file chose outside its bound.
+// drop notes a value the file may not take.
 func (m *Merged) drop(field, value, allowed string) {
 	m.Dropped = append(m.Dropped, fmt.Sprintf("%s: %s %s was dropped; allowed: %s", FileName, field, value, allowed))
 }
@@ -211,7 +190,7 @@ func list[T ~string](values []T) string {
 }
 
 // SkipReason says why the repository's own configuration skips a review.
-// The values match the reviews.skip_reason CHECK.
+// The reviews.skip_reason CHECK admits these values, and the runner's.
 type SkipReason string
 
 // Skip reasons.
@@ -226,42 +205,39 @@ func (r SkipReason) Valid() bool {
 	return r == SkipDisabled || r == SkipFiltered || r == SkipOnlyPaths
 }
 
-func (r SkipReason) String() string { return string(r) }
-
 // Description is the reason as the commit status states it.
 func (r SkipReason) Description() string {
 	switch r {
 	case SkipDisabled:
 		return "disabled in " + FileName
 	case SkipFiltered:
-		return "filtered by " + FileName
+		return "filtered"
 	case SkipOnlyPaths:
-		return "only skipped paths changed"
+		return "only ignored paths changed"
 	}
 	return string(r)
 }
 
 // Check returns why m skips a review of a pull request with the filter
-// variables vars that changes changed, or "" when it does not. A filter
-// that fails to evaluate skips, since the file may only narrow; the error
-// is returned for the log.
-func (m Merged) Check(vars map[string]any, changed []string) (SkipReason, error) {
+// variables vars that changes changed, or "" when it does not, and for a
+// filtered one the condition that decided: the exclusion that holds, or
+// nil when no inclusion does. Its conditions that need the diff are the
+// runner's to judge. A filter that fails to evaluate skips, since the file
+// may only narrow; the error is returned for the log.
+func (m *Merged) Check(vars map[string]any, changed []string) (reason SkipReason, by *configfile.Filter, err error) {
 	if !m.Enabled {
-		return SkipDisabled, nil
+		return SkipDisabled, nil, nil
 	}
-	if m.InRepoFilter != nil {
-		ok, err := m.InRepoFilter.Eval(vars)
-		if err != nil || !ok {
-			return SkipFiltered, err
-		}
+	if skip, by, err := m.InRepoFilters.Skips(vars, nil); skip {
+		return SkipFiltered, by, err
 	}
-	if m.Skip.All(changed) {
-		return SkipOnlyPaths, nil
+	if AllIgnored(m.Ignore, changed) {
+		return SkipOnlyPaths, nil, nil
 	}
-	return "", nil
+	return "", nil, nil
 }
 
-// PullRequest is what a filter sees of a pull request, and what an agentic
+// PullRequest is what a filter sees of a pull request, and what a review
 // run's job document carries of it.
 type PullRequest struct {
 	Number    int       `json:"number"`
@@ -280,9 +256,14 @@ type PullRequest struct {
 	// Labels is the stored labels JSON array.
 	Labels json.RawMessage `json:"labels,omitempty"`
 	// Event is the trigger of the review the filter judges: opened,
-	// reopened, ready_for_review, synchronize, poll or manual.
+	// reopened, ready_for_review, synchronize, poll, labeled, unlabeled or
+	// manual.
 	Event string `json:"event,omitempty"`
 }
+
+// Manual reports whether the review was asked for by hand: a re-run from
+// the dashboard or an @<bot> review comment.
+func (p PullRequest) Manual() bool { return p.Event == "manual" }
 
 // Vars is the filter's pr variable, with the keys webhook.PullRequest's
 // FilterVars gives ingest.

@@ -2,7 +2,6 @@ package runner
 
 import (
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/go-git/go-git/v6"
 
 	"github.com/perfectra1n/kritique/internal/agent"
 )
@@ -74,15 +75,18 @@ func TestCommandTool(t *testing.T) {
 	t.Setenv("PATH", bin)
 	t.Setenv("HTTPS_PROXY", "http://gateway:8082")
 	t.Setenv("TMPDIR", t.TempDir())
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	head := agent.NewTree(tree(t, map[string]string{"main.go": "package main\n", "vendor/x.go": "package x\n"}), []string{"vendor/**"})
 
 	t.Run("offers what is on PATH, over a checkout", func(t *testing.T) {
-		s := agenticSpec()
+		s := reviewSpec()
 		s.Agent.Commands, s.Agent.CommandTimeoutSeconds = []string{"curl", "rg"}, 5
-		run, cleanup := commandTool(t.Context(), s, head, 1024, logger)
+		run, fetch, cleanup := commandTool(t.Context(), s, head, "ghs_run", 1024, logger)
 		if run == nil {
 			t.Fatal("no run tool")
+		}
+		if fetch != nil {
+			t.Fatal("fetch_repo offered beside rg alone, which reaches no network")
 		}
 		if !slices.Equal(run.Names(), []string{"rg"}) {
 			t.Fatalf("names = %v", run.Names())
@@ -101,21 +105,86 @@ func TestCommandTool(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(scratch[0], "checkout", "vendor")); !os.IsNotExist(err) {
 			t.Fatalf("ignored path checked out: %v", err)
 		}
+		if _, err := os.Stat(filepath.Join(scratch[0], "home", ".curlrc")); !os.IsNotExist(err) {
+			t.Fatalf(".curlrc written for a curl that is not offered: %v", err)
+		}
+		k := run.Kept()
+		if k == nil || *k != (agent.Kept{Dir: filepath.Join(scratch[0], upstreamDir), Rel: upstreamRel, FileBytes: fetchDiffBytes, Budget: k.Budget}) {
+			t.Fatalf("a cut output is kept at %+v, want beside the checkout in %s", k, scratch[0])
+		}
+		repo, err := git.PlainOpen(filepath.Join(scratch[0], "checkout"))
+		if err != nil {
+			t.Fatalf("checkout is not a repository: %v", err)
+		}
+		if origin, err := repo.Remote("origin"); err != nil || !slices.Equal(origin.Config().URLs, []string{s.CloneURL}) {
+			t.Fatalf("origin = %v, %v; want %s", origin, err, s.CloneURL)
+		}
 		cleanup()
 		if _, err := os.Stat(scratch[0]); !os.IsNotExist(err) {
 			t.Fatalf("scratch left behind: %v", err)
 		}
 	})
 
+	t.Run("fetch_repo beside a command that reaches the network", func(t *testing.T) {
+		if err := os.Symlink(self, filepath.Join(bin, "gh")); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(filepath.Join(bin, "gh")) }()
+		s := reviewSpec()
+		s.Agent.Commands, s.Agent.CommandTimeoutSeconds = []string{"gh", "rg"}, 5
+		run, fetch, cleanup := commandTool(t.Context(), s, head, "ghs_run", 1024, logger)
+		defer cleanup()
+		if run == nil || fetch == nil {
+			t.Fatalf("run tool %v, fetch_repo %v", run != nil, fetch != nil)
+		}
+		scratch, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "kritique-run-*"))
+		if err != nil || len(scratch) != 1 {
+			t.Fatalf("scratch = %v, %v", scratch, err)
+		}
+		if info, err := os.Stat(fetch.dir); err != nil || !info.IsDir() || fetch.dir != filepath.Join(scratch[0], upstreamDir) {
+			t.Fatalf("fetch_repo writes to %s, not beside the checkout in %s: %v", fetch.dir, scratch[0], err)
+		}
+	})
+
 	t.Run("nothing to offer", func(t *testing.T) {
 		for _, commands := range [][]string{nil, {"curl"}} {
-			s := agenticSpec()
+			s := reviewSpec()
 			s.Agent.Commands, s.Agent.CommandTimeoutSeconds = commands, 5
-			run, cleanup := commandTool(t.Context(), s, head, 1024, logger)
+			run, fetch, cleanup := commandTool(t.Context(), s, head, "ghs_run", 1024, logger)
 			cleanup()
-			if run != nil {
-				t.Fatalf("%v: run tool offered with %v", commands, run.Names())
+			if run != nil || fetch != nil {
+				t.Fatalf("%v: run tool offered with %v, fetch_repo %v", commands, run.Names(), fetch != nil)
 			}
 		}
 	})
+}
+
+func TestCommandToolCurlrc(t *testing.T) {
+	t.Cleanup(func() { _, _, _ = syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_DUMPABLE, 1, 0) })
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.Symlink(self, filepath.Join(bin, "curl")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("HTTPS_PROXY", "http://gateway:8082")
+	t.Setenv("TMPDIR", t.TempDir())
+	head := agent.NewTree(tree(t, map[string]string{"main.go": "package main\n"}), nil)
+	s := reviewSpec()
+	s.Agent.Commands, s.Agent.CommandTimeoutSeconds = []string{"curl"}, 5
+	run, fetch, cleanup := commandTool(t.Context(), s, head, "ghs_run", 1024, slog.New(slog.DiscardHandler))
+	defer cleanup()
+	if run == nil || fetch == nil {
+		t.Fatalf("run tool %v, fetch_repo %v", run != nil, fetch != nil)
+	}
+	scratch, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "kritique-run-*"))
+	if err != nil || len(scratch) != 1 {
+		t.Fatalf("scratch = %v, %v", scratch, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(scratch[0], "home", ".curlrc")); err != nil || string(b) != "no-progress-meter\nlocation\n" {
+		t.Fatalf(".curlrc = %q, %v", b, err)
+	}
 }

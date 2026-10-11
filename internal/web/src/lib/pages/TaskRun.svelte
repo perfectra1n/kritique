@@ -1,19 +1,22 @@
 <script lang="ts">
+  // One task run: what it applied and what it left out, and why; the
+  // fields the model filled, the event it ran on, and its conversation.
   import { getJSON } from '../api.svelte';
   import { href } from '../router.svelte';
   import { Resource, live } from '../resource.svelte';
-  import { duration, pretty, shortSha, splitRepo, taskTone, tokens, usd } from '../format';
-  import { pullRoute, repoRoute } from '../links';
+  import { duration, pretty, shortSha, taskTone, tokens, usd } from '../format';
+  import { accountApi, pullRoute, repoRoute } from '../links';
   import type { TaskApplied, TaskInline, TaskRunDetail, Transcript } from '../types';
   import StateView from '../components/StateView.svelte';
   import Pill from '../components/Pill.svelte';
   import Time from '../components/Time.svelte';
   import Markdown from '../components/Markdown.svelte';
   import Collapsible from '../components/Collapsible.svelte';
+  import CodeBlock from '../components/CodeBlock.svelte';
   import Conversation from '../components/conversation/Conversation.svelte';
 
   let { slug, id }: { slug: string; id: string } = $props();
-  const base = $derived(`/api/v1/tenants/${encodeURIComponent(slug)}/task-runs/${encodeURIComponent(id)}`);
+  const base = $derived(`${accountApi(slug)}/task-runs/${encodeURIComponent(id)}`);
   const res = new Resource(() => getJSON<TaskRunDetail>(base));
   const transcript = new Resource(() => getJSON<Transcript>(`${base}/transcript`));
   let showTranscript = $state(false);
@@ -26,9 +29,9 @@
   });
   $effect(() =>
     live(
-      (e) => e.tenant === slug && e.id === id && e.kind === 'task_run',
-      () => {
-        void res.load();
+      (e) => e.account === slug && ((e.kind === 'task_run' && e.id === id) || e.kind === 'model_call'),
+      (dirty) => {
+        if (dirty.has('task_run') || dirty.has('resync')) void res.load();
         if (showTranscript) void transcript.load();
       },
     ),
@@ -73,19 +76,19 @@
   }
 </script>
 
+<svelte:head><title>{res.data ? `${res.data.run.task} · ` : ''}Task run · {slug} · kritique</title></svelte:head>
+
 <main class="page">
   <div class="page-inner">
     <StateView {res} retry={() => res.load()}>
       {#snippet children(d)}
         {@const r = d.run}
-        {@const n = splitRepo(r.repository)}
         {@const rows = actionRows(d)}
         {@const fields = Object.entries(d.fields)}
         <header class="page-head">
           <p class="crumbs">
-            <a href={href({ name: 'taskRuns', slug })}>Task runs</a> /
-            <a class="mono" href={href(repoRoute(slug, r.repository))}>{r.repository}</a> /
-            <a href={href({ name: 'taskRuns', slug, owner: n.owner, repo: n.repo })}>task runs</a>
+            <a href={href({ name: 'tasks', slug })}>Task runs</a> /
+            <a class="mono" href={href({ name: 'tasks', slug, filter: { repo: r.repository } })}>{r.repository}</a> /
           </p>
           <h1>
             <span class="mono">{r.task}</span>
@@ -108,7 +111,7 @@
                 {d.modelCalls} model {d.modelCalls === 1 ? 'call' : 'calls'} · {tokens(d.tokens.input + d.tokens.output)} tokens · {usd(d.costUsd)}
               </span>
             {/if}
-            {#if r.commentId !== null}<span>comment <span class="mono">{r.commentId}</span></span>{/if}
+            <a href={href(repoRoute(slug, r.repository))} title="The repository's settings and the tasks it runs">repository</a>
           </p>
         </header>
 
@@ -146,16 +149,9 @@
             {#if fields.length === 0}
               <p class="state-msg">No fields.</p>
             {:else}
-              <div class="table-wrap">
-                <table class="data">
-                  <thead><tr><th scope="col">Field</th><th scope="col">Value</th></tr></thead>
-                  <tbody>
-                    {#each fields as [k, v] (k)}
-                      <tr><td class="mono small">{k}</td><td class="mono small">{fieldValue(v)}</td></tr>
-                    {/each}
-                  </tbody>
-                </table>
-              </div>
+              <dl class="deflist">
+                {#each fields as [k, v] (k)}<dt class="mono">{k}</dt><dd class="mono">{fieldValue(v)}</dd>{/each}
+              </dl>
             {/if}
           </section>
           <section class="panel" aria-labelledby="task-event">
@@ -176,16 +172,27 @@
           </section>
         </div>
 
+        {#if d.notes.length}
+          <section class="panel" aria-labelledby="task-notes">
+            <header class="panel-head"><h2 id="task-notes">Left out of the context</h2></header>
+            <ul class="plain-list">
+              {#each d.notes as note, i (i)}<li class="small">{note}</li>{/each}
+            </ul>
+          </section>
+        {/if}
+
         {#if d.proposed}
           <section class="panel" aria-labelledby="task-answer">
             <header class="panel-head"><h2 id="task-answer">Model answer</h2></header>
-            {#if d.proposed.summary}<Markdown text={d.proposed.summary} />{/if}
-            {#if d.proposed.comment}
-              <h3 class="small muted">Comment</h3>
-              <Markdown text={d.proposed.comment} />
-            {/if}
+            {#if d.proposed.summary || d.proposed.comment}<div class="panel-body">
+              {#if d.proposed.summary}<Markdown text={d.proposed.summary} />{/if}
+              {#if d.proposed.comment}
+                <h3 class="small muted">Comment</h3>
+                <Markdown text={d.proposed.comment} />
+              {/if}
+            </div>{/if}
             <Collapsible title="Proposed, as the model answered">
-              <pre class="mono small">{pretty(d.proposed)}</pre>
+              <CodeBlock text={pretty(d.proposed)} label="proposed.json" />
             </Collapsible>
           </section>
         {/if}

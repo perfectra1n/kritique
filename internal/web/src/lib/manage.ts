@@ -2,50 +2,20 @@
 // The server's message is already human-readable; these add what to do
 // next where the code alone says more than the message does.
 import { ApiError } from './api.svelte';
-import type { ConfigSource, ErrorCode, FieldPolicy, ManagementErrorCode, PathDetails } from './types';
+import { toast } from './toast.svelte';
+import type { ErrorCode, ManagementErrorCode } from './types';
 
 const hints: Partial<Record<ManagementErrorCode | ErrorCode, string>> = {
-  revision_conflict: 'Someone else saved this tenant since you loaded it.',
-  operator_only: 'Only an instance operator can change this field.',
-  reenter_secret: "The installation's forge, host or account changed, so this secret must be entered again.",
-  slug_taken: 'That name is already in use.',
-  config_blocked: 'The running configuration is invalid elsewhere; an operator must fix it before this can be saved.',
-  file_managed: 'This tenant is declared in the configuration file and cannot be changed here.',
-  management_disabled: 'Dashboard management is disabled: no sealing key configured.',
-  actions_disabled: 'This server process cannot queue dashboard actions.',
+  forge_error: 'The forge refused or failed the request.',
+  installation_served: 'The App serves this account.',
   already_queued: 'That is already queued or running; it will show up here when it finishes.',
   unauthenticated: 'Your session has ended; sign in again.',
   csrf: 'The request was refused as not coming from this page; reload and try again.',
-  already_member: 'That account is already a member; change its role instead.',
-  invite_exists: 'A pending invite for this email already exists.',
-  last_admin: 'The tenant would be left with no admin.',
-  not_invite_member: "This member's access comes only from the forge.",
   not_cancelable: 'The review is no longer running.',
-  no_head: 'The pull request has no known head to review.',
   forbidden: 'You are not allowed to do this.',
 };
 
 // describe is one line for a failed management call.
-const inheritedFrom: Record<ConfigSource, string> = {
-  default: "kritique's default",
-  env: 'the environment',
-  file: 'the config file',
-  dashboard: 'this tenant',
-  repository: '.kritique.yaml',
-};
-
-// inheritsHint is what a field left empty takes, and from where.
-export function inheritsHint(value: string, source: ConfigSource | undefined): string {
-  return `inherits ${value} from ${inheritedFrom[source ?? 'default']}`;
-}
-
-// fieldEditable says whether the policy lets the caller change key: every
-// setting it covers, itself or nested under it, is editable.
-export function fieldEditable(policy: FieldPolicy[], key: string): boolean {
-  const rows = policy.filter((p) => p.key === key || p.key.startsWith(`${key}.`));
-  return rows.length > 0 && rows.every((p) => p.editable);
-}
-
 export function describe(err: unknown): string {
   if (!(err instanceof ApiError)) return err instanceof Error ? err.message : String(err);
   const hint = hints[err.code as ManagementErrorCode | ErrorCode];
@@ -53,13 +23,41 @@ export function describe(err: unknown): string {
   return err.message && err.message !== hint ? `${hint} ${err.message}` : hint;
 }
 
-// errorPath is the spec path an error points at, "" when none.
-export function errorPath(err: unknown): string {
-  if (!(err instanceof ApiError)) return '';
-  const d = err.details as Partial<PathDetails> | undefined;
-  return typeof d?.path === 'string' ? d.path : '';
-}
-
 export function isCode(err: unknown, code: ManagementErrorCode): boolean {
   return err instanceof ApiError && err.code === code;
+}
+
+// What became of a bulk action's requests: how many were done, how many
+// the server said were already under way, and each that failed, by name
+// with why.
+export interface Tally {
+  done: number;
+  already: number;
+  failed: string[];
+}
+
+// sendEach sends one request per target, one at a time, and tallies them.
+// The server's already_queued is not a failure: what was asked for is
+// under way.
+export async function sendEach<T>(targets: readonly T[], name: (t: T) => string, send: (t: T) => Promise<unknown>): Promise<Tally> {
+  const tally: Tally = { done: 0, already: 0, failed: [] };
+  for (const t of targets) {
+    try {
+      await send(t);
+      tally.done++;
+    } catch (err) {
+      if (isCode(err, 'already_queued')) tally.already++;
+      else tally.failed.push(`${name(t)}: ${describe(err)}`);
+    }
+  }
+  return tally;
+}
+
+// toastTally reports a bulk action: done says what was done, already what
+// the ones under way are called, and each failure follows.
+export function toastTally(t: Tally, done: string, already = 'already queued'): void {
+  const parts = [done];
+  if (t.already) parts.push(`${t.already} ${already}`);
+  if (t.failed.length) parts.push(`${t.failed.length} failed (${t.failed.join('; ')})`);
+  toast(parts.join(', '), t.failed.length ? 'danger' : 'ok');
 }

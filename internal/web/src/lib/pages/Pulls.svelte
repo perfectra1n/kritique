@@ -1,41 +1,55 @@
 <script lang="ts">
-  import { tick } from 'svelte';
-  import { getJSON } from '../api.svelte';
-  import { navigate } from '../router.svelte';
+  import { tick, untrack } from 'svelte';
+  import { getJSON, sendJSON } from '../api.svelte';
+  import { isAdmin } from '../session.svelte';
+  import { sendEach, toastTally } from '../manage';
+  import { navigate, replace } from '../router.svelte';
+  import { PULL_IS, PULL_OUTCOMES, pullFilter, type PullFilter } from '../routes';
   import { Paged, Resource, live } from '../resource.svelte';
-  import { pullRoute } from '../links';
+  import { pullKey, pullRoute, accountApi, rerunPath } from '../links';
   import { listKeys } from '../listkeys';
-  import type { Page, Pull, Repository, ReviewStatus } from '../types';
+  import { formatTokens, type Parsed, type TokenSpec } from '../tokensearch';
+  import type { Page, Pull, Repository } from '../types';
   import StateView from '../components/StateView.svelte';
-  import PullRows from '../components/PullRows.svelte';
+  import PullTable from '../components/PullTable.svelte';
   import LoadMore from '../components/LoadMore.svelte';
+  import SectionTabs from '../components/SectionTabs.svelte';
+  import Segmented from '../components/Segmented.svelte';
+  import TokenSearch from '../components/TokenSearch.svelte';
+  import Dialog from '../components/Dialog.svelte';
 
-  let { slug }: { slug: string } = $props();
+  let { slug, filter }: { slug: string; filter?: PullFilter } = $props();
 
-  const OUTCOMES: readonly ReviewStatus[] = ['running', 'prepared', 'completed', 'superseded', 'skipped', 'capped', 'failed', 'canceled'];
-
-  let prState = $state<'open' | 'closed' | 'all'>('open');
-  let outcome = $state<ReviewStatus | ''>('');
-  let repoName = $state('');
-  let qInput = $state('');
-  let q = $state('');
-  let selected = $state(-1);
+  const prState = $derived(filter?.state ?? 'open');
   let searchEl = $state<HTMLInputElement | undefined>(undefined);
 
-  const tenant = $derived(`/api/v1/tenants/${encodeURIComponent(slug)}`);
+  // setFilter replaces the history entry, so Back leaves the list instead of
+  // stepping through its filters.
+  function setFilter(f: Parameters<typeof pullFilter>[0]): void {
+    replace({ name: 'pulls', slug, filter: pullFilter(f) });
+  }
+
+  function clearFilters(): void {
+    replace({ name: 'pulls', slug });
+    searchEl?.focus();
+  }
+
+  const account = $derived(`${accountApi(slug)}`);
 
   function query(after?: string): string {
     const p = new URLSearchParams({ state: prState, limit: '50' });
-    if (outcome) p.set('outcome', outcome);
-    if (repoName) p.set('repo', repoName);
-    if (q) p.set('q', q);
+    for (const k of ['outcome', 'is', 'repo', 'author', 'q'] as const) {
+      const v = filter?.[k];
+      if (v) p.set(k, v);
+    }
     if (after) p.set('cursor', after);
-    return `${tenant}/pulls?${p}`;
+    return `${account}/pulls?${p}`;
   }
 
-  const paged = new Paged<Pull>(query, (p) => `${p.repository}#${p.number}`);
+  const paged = new Paged<Pull>(query, pullKey);
   const res = paged.first;
-  const repos = new Resource(() => getJSON<Page<Repository>>(`${tenant}/repos?limit=100`));
+  const repos = new Resource(() => getJSON<Page<Repository>>(`${account}/repos?limit=100`));
+  const repoNames = $derived((repos.data?.items ?? []).map((r) => r.fullName));
 
   $effect(() => {
     void paged.load();
@@ -43,18 +57,45 @@
   $effect(() => {
     void repos.load();
   });
-  $effect(() => live((e) => e.tenant === slug && (e.kind === 'review' || e.kind === 'followup'), () => void paged.load()));
-  // Debounce the search box so typing doesn't fire a request per keystroke.
+  $effect(() => live((e) => e.account === slug && (e.kind === 'review' || e.kind === 'followup'), () => void paged.load()));
+
+  // The box's tokens: status: is the last review's outcome.
+  const authors = $derived([...new Set(paged.items.map((p) => p.author))].sort());
+  const specs = $derived<TokenSpec[]>([
+    { key: 'repo', hint: 'a repository', values: repoNames },
+    { key: 'author', hint: "an author's login", values: authors, open: true },
+    { key: 'status', hint: "the last review's status", values: PULL_OUTCOMES },
+    { key: 'is', hint: 'paused, or blocking', values: PULL_IS },
+  ]);
+  const boxText = (f: PullFilter | undefined) => formatTokens(specs, { repo: f?.repo, author: f?.author, status: f?.outcome, is: f?.is }, f?.q);
+
+  // written is the box's text for the filter it last wrote to the URL: any
+  // other change to the filter, such as following a link to the unfiltered
+  // list, rewrites the box.
+  let text = $state(untrack(() => boxText(filter)));
+  let written = untrack(() => boxText(filter));
+  function onapply(p: Parsed): void {
+    const f = { state: filter?.state, repo: p.tokens.repo, author: p.tokens.author, outcome: p.tokens.status, is: p.tokens.is, q: p.q };
+    written = boxText(pullFilter(f));
+    setFilter(f);
+  }
   $effect(() => {
-    const v = qInput.trim();
-    const t = setTimeout(() => (q = v), 250);
-    return () => clearTimeout(t);
+    const t = boxText(filter);
+    if (t === written) return;
+    written = t;
+    text = t;
   });
 
   const items = $derived(paged.items);
+  // The cursor follows its pull rather than its position, which a live
+  // refetch shifts when it adds or reorders rows above it.
+  let selectedKey = $state('');
+  const selected = $derived(items.findIndex((p) => pullKey(p) === selectedKey));
 
   async function select(i: number): Promise<void> {
-    selected = i;
+    const p = items[i];
+    if (!p) return;
+    selectedKey = pullKey(p);
     await tick();
     document.querySelector(`.pull-rows [data-index="${i}"]`)?.scrollIntoView({ block: 'nearest' });
   }
@@ -69,51 +110,97 @@
         if (p) navigate(pullRoute(slug, p));
       },
       focusSearch: () => searchEl?.focus(),
+      toggle: (i) => {
+        const p = items[i];
+        if (p && p.state === 'open' && isAdmin()) pick([pullKey(p)], !picked.includes(pullKey(p)));
+      },
     }),
   );
+
+  // An admin picks pull requests to re-run together, by checkbox or Space.
+  // A pick holds under the filter it was made in: another filter shows
+  // other rows, so it starts with none picked.
+  const filterKey = $derived(JSON.stringify(filter ?? {}));
+  let pickedUnder = $state({ filter: '', keys: [] as string[] });
+  const picked = $derived(pickedUnder.filter === filterKey ? pickedUnder.keys : []);
+  let confirmRerun = $state(false);
+  let busy = $state(false);
+  function pick(keys: string[], on: boolean): void {
+    pickedUnder = { filter: filterKey, keys: on ? [...new Set([...picked, ...keys])] : picked.filter((k) => !keys.includes(k)) };
+  }
+
+  const plural = (n: number) => (n === 1 ? '1 pull request' : `${n} pull requests`);
+
+  // rerunPicked queues a fresh review of each picked pull request at its
+  // current head, one request at a time.
+  async function rerunPicked(): Promise<void> {
+    busy = true;
+    const targets = items.filter((p) => picked.includes(pullKey(p)));
+    const tally = await sendEach(targets, pullKey, (p) => sendJSON('POST', rerunPath(slug, p)));
+    busy = false;
+    confirmRerun = false;
+    pick(picked, false);
+    toastTally(tally, `Re-run queued for ${plural(tally.done)}`, 'already queued or running');
+    void paged.load();
+  }
+
+  const STATES = [
+    { value: 'open', label: 'Open' },
+    { value: 'closed', label: 'Closed' },
+    { value: 'all', label: 'All' },
+  ] as const;
 </script>
+
+<svelte:head><title>Pull requests · {slug} · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">
-    <header class="page-head">
-      <h1>Pull requests</h1>
-      <p class="muted small"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>⏎</kbd> open · <kbd>/</kbd> search</p>
-    </header>
+    <SectionTabs section="pulls" {slug} current="pulls" />
     <div class="toolbar" role="search">
-      <label class="search-box">
-        <span class="sr-only">Search pull requests</span>
-        <input type="search" placeholder="Search title, author, number" bind:value={qInput} bind:this={searchEl} />
-      </label>
-      <label class="select">
-        <span class="sr-only">Repository</span>
-        <select bind:value={repoName} aria-label="Repository">
-          <option value="">All repositories</option>
-          {#each repos.data?.items ?? [] as r (r.id)}
-            <option value={r.fullName}>{r.fullName}</option>
-          {/each}
-        </select>
-      </label>
-      <label class="select">
-        <span class="sr-only">State</span>
-        <select bind:value={prState} aria-label="State">
-          <option value="open">Open</option>
-          <option value="closed">Closed</option>
-          <option value="all">All</option>
-        </select>
-      </label>
-      <label class="select">
-        <span class="sr-only">Last review outcome</span>
-        <select bind:value={outcome} aria-label="Last review outcome">
-          <option value="">Any outcome</option>
-          {#each OUTCOMES as o (o)}<option value={o}>{o}</option>{/each}
-        </select>
-      </label>
+      <TokenSearch
+        id="pull-search"
+        label="Search pull requests"
+        placeholder="Search, or filter by repo:, author:, status: or is:"
+        {specs}
+        bind:text
+        bind:input={searchEl}
+        ready={!!repos.data}
+        {onapply}
+      />
+      <Segmented label="State" options={STATES} value={prState} onchange={(state) => setFilter({ ...filter, state })} />
+      {#if picked.length}
+        <div class="bulk-actions" role="group" aria-label="Selected pull requests">
+          <span class="small">{picked.length} selected</span>
+          <button class="btn btn-small" disabled={busy} onclick={() => (confirmRerun = true)}>Re-run…</button>
+          <button class="btn btn-small" disabled={busy} onclick={() => pick(picked, false)}>Clear</button>
+        </div>
+      {/if}
     </div>
-    <StateView {res} retry={() => res.load()} isEmpty={() => items.length === 0} empty="No pull requests match.">
+    <StateView {res} retry={() => res.load()}>
       {#snippet children()}
-        <PullRows {slug} {items} {selected} />
-        <LoadMore {paged} />
+        {#if items.length === 0 && filter}
+          <div class="state-msg">
+            <span>No pull requests match these filters.</span>
+            <button class="btn btn-small" onclick={clearFilters}>Clear filters</button>
+          </div>
+        {:else if items.length === 0}
+          <p class="state-msg">No open pull requests.</p>
+        {:else}
+          <PullTable {slug} {items} {selected} {picked} onpick={isAdmin() ? pick : undefined} />
+          <LoadMore {paged} />
+        {/if}
       {/snippet}
     </StateView>
+    <p class="muted small key-hints">
+      <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>⏎</kbd> open · <kbd>/</kbd> search{#if isAdmin()}{' '}· <kbd>space</kbd> select{/if}
+    </p>
   </div>
 </main>
+
+<Dialog bind:open={confirmRerun} title={`Re-run ${plural(picked.length)}?`}>
+  <p>Each is reviewed again at its current head, which spends model tokens. One already queued or running is left as it is.</p>
+  {#snippet footer()}
+    <button class="btn" onclick={() => (confirmRerun = false)}>Cancel</button>
+    <button class="btn btn-primary" disabled={busy} onclick={rerunPicked}>{busy ? 'Queuing…' : 'Re-run'}</button>
+  {/snippet}
+</Dialog>

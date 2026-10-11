@@ -6,58 +6,93 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Role is what a membership lets an account do on a tenant.
+// Role is what a session lets its user do: administer the instance, or
+// read the accounts its grant names.
 type Role string
 
-// Membership roles.
+// Session roles.
 const (
 	RoleAdmin  Role = "admin"
 	RoleMember Role = "member"
 )
 
-// Valid reports whether r is a membership role.
+// Valid reports whether r is a session role.
 func (r Role) Valid() bool { return r == RoleAdmin || r == RoleMember }
 
-func (r Role) String() string { return string(r) }
-
-// Grant is a role on one tenant.
-type Grant struct {
-	TenantID string
-	Role     Role
+// SessionGrant is what a sign-in allowed, fixed for the session's life: the
+// role, and for a member the forge accounts they read, or every account.
+type SessionGrant struct {
+	Role        Role
+	AllAccounts bool
+	// Accounts are lowercased "<forge>/<name>" keys.
+	Accounts []string
+	// Key fingerprints the sign-in configuration that decided the grant; a
+	// caller honours the session only while it still matches.
+	Key string
 }
 
-// Account is a human who has signed in to the dashboard.
-type Account struct {
+// User is a human who has signed in to the dashboard.
+type User struct {
 	ID            string
 	DisplayName   string
 	Email         string
 	EmailVerified bool
 	AvatarURL     string
+	Settings      UserSettings
+}
+
+// UserSettings is what a user chose for their own dashboard. An empty
+// field leaves the choice to the browser.
+type UserSettings struct {
+	// TimeZone is an IANA zone name, as "Europe/Amsterdam".
+	TimeZone string `json:"timeZone,omitempty"`
+	// Clock is "12" or "24".
+	Clock string `json:"clock,omitempty"`
+	// Theme is "light" or "dark".
+	Theme string `json:"theme,omitempty"`
+}
+
+// SetUserSettings replaces the user's settings.
+func (s *Store) SetUserSettings(ctx context.Context, userID string, v UserSettings) error {
+	doc, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("store: encode user settings: %w", err)
+	}
+	tag, err := s.app.Exec(ctx, `UPDATE users SET settings = $2 WHERE id = $1`, userID, doc)
+	if err != nil {
+		return fmt.Errorf("store: set user settings: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SignInIdentity is who a sign-in provider says a human is. Provider is the
-// sign-in's configured name and Origin where it pointed (forge type and base
-// URL, or OIDC issuer) when the human signed in; Subject is the provider's
-// stable id for them, unique only within that origin.
+// sign-in's configured name and Origin where it pointed when the human
+// signed in (GitHub, the OIDC issuer, or "local" for the local admin);
+// Subject is the provider's stable id for them, unique only within that
+// origin.
 type SignInIdentity struct {
 	Provider, Origin, Subject, Login, Email string
 	EmailVerified                           bool
 	DisplayName, AvatarURL                  string
 }
 
-// Session is a live dashboard session and whom it belongs to.
+// Session is a live dashboard session, whom it belongs to and what its
+// sign-in allowed.
 type Session struct {
-	Account   Account
-	Identity  SignInIdentity
-	ExpiresAt time.Time
+	User     User
+	Identity SignInIdentity
+	Grant    SessionGrant
 }
 
 // LoginState is one in-flight OAuth authorization request.
@@ -78,10 +113,6 @@ const LoginStateTTL = 10 * time.Minute
 // in ten minutes.
 const MaxLoginStates = 10_000
 
-// sessionTouchInterval bounds how often a session's last_seen_at is written,
-// so an active dashboard does not write on every request.
-const sessionTouchInterval = time.Minute
-
 var (
 	// ErrSession is a session cookie that is unknown or expired.
 	ErrSession = errors.New("store: session is not valid")
@@ -97,212 +128,124 @@ func tokenHash(token string) []byte {
 	return h[:]
 }
 
-func randomToken() (string, error) {
+// RandomToken is 32 random bytes, URL-safe base64 encoded without padding:
+// a session or state token, a nonce.
+func RandomToken() string {
 	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(raw), nil
+	_, _ = rand.Read(raw) // never fails
+	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
-// UpsertIdentity finds or creates the account behind id and refreshes its
+// UpsertIdentity finds or creates the user behind id and refreshes its
 // profile. Identities are keyed by provider, origin and subject only: an
-// email seen on two providers never links their accounts, since either
+// email seen on two providers never links their users, since either
 // provider may let anyone claim any address.
-func (s *Store) UpsertIdentity(ctx context.Context, id SignInIdentity, now time.Time) (Account, error) {
+func (s *Store) UpsertIdentity(ctx context.Context, id SignInIdentity) (User, error) {
 	tx, err := s.app.Begin(ctx)
 	if err != nil {
-		return Account{}, fmt.Errorf("store: upsert identity: %w", err)
+		return User{}, fmt.Errorf("store: upsert identity: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful commit
-	accountID, err := identityAccount(ctx, tx, id)
+	userID, err := identityUser(ctx, tx, id)
 	if err != nil {
-		return Account{}, fmt.Errorf("store: upsert identity: %w", err)
+		return User{}, fmt.Errorf("store: upsert identity: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE identities SET login = $4, email = $5 WHERE provider = $1 AND origin = $2 AND subject = $3`,
-		id.Provider, id.Origin, id.Subject, id.Login, id.Email); err != nil {
-		return Account{}, fmt.Errorf("store: upsert identity: %w", err)
+	if _, err := tx.Exec(ctx, `UPDATE identities SET login = $4 WHERE provider = $1 AND origin = $2 AND subject = $3`,
+		id.Provider, id.Origin, id.Subject, id.Login); err != nil {
+		return User{}, fmt.Errorf("store: upsert identity: %w", err)
 	}
-	a := Account{ID: accountID}
-	if err := tx.QueryRow(ctx, `UPDATE accounts SET display_name = $2, email = $3, email_verified = $4, avatar_url = $5, last_seen_at = $6
+	u := User{ID: userID}
+	if err := tx.QueryRow(ctx, `UPDATE users SET display_name = $2, email = $3, email_verified = $4, avatar_url = $5
 		WHERE id = $1 RETURNING display_name, email, email_verified, avatar_url`,
-		accountID, id.DisplayName, id.Email, id.EmailVerified, id.AvatarURL, now).
-		Scan(&a.DisplayName, &a.Email, &a.EmailVerified, &a.AvatarURL); err != nil {
-		return Account{}, fmt.Errorf("store: upsert identity: %w", err)
+		userID, id.DisplayName, id.Email, id.EmailVerified, id.AvatarURL).
+		Scan(&u.DisplayName, &u.Email, &u.EmailVerified, &u.AvatarURL); err != nil {
+		return User{}, fmt.Errorf("store: upsert identity: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Account{}, fmt.Errorf("store: upsert identity: %w", err)
+		return User{}, fmt.Errorf("store: upsert identity: %w", err)
 	}
-	return a, nil
+	return u, nil
 }
 
-// identityAccount returns the account id of an existing identity, or
+// identityUser returns the user id of an existing identity, or
 // creates both. A concurrent first sign-in of the same identity makes the
-// identity insert a no-op; the account this call created is then dropped
+// identity insert a no-op; the user this call created is then dropped
 // and the winner's returned.
-func identityAccount(ctx context.Context, tx pgx.Tx, id SignInIdentity) (string, error) {
-	var accountID string
-	err := tx.QueryRow(ctx, `SELECT account_id FROM identities WHERE provider = $1 AND origin = $2 AND subject = $3`,
-		id.Provider, id.Origin, id.Subject).Scan(&accountID)
+func identityUser(ctx context.Context, tx pgx.Tx, id SignInIdentity) (string, error) {
+	var userID string
+	err := tx.QueryRow(ctx, `SELECT user_id FROM identities WHERE provider = $1 AND origin = $2 AND subject = $3`,
+		id.Provider, id.Origin, id.Subject).Scan(&userID)
 	if err == nil {
-		return accountID, nil
+		return userID, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return "", err
 	}
-	if err := tx.QueryRow(ctx, `INSERT INTO accounts DEFAULT VALUES RETURNING id`).Scan(&accountID); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO users DEFAULT VALUES RETURNING id`).Scan(&userID); err != nil {
 		return "", err
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO identities (provider, origin, subject, account_id) VALUES ($1, $2, $3, $4)
-		ON CONFLICT (provider, origin, subject) DO NOTHING`, id.Provider, id.Origin, id.Subject, accountID)
+	tag, err := tx.Exec(ctx, `INSERT INTO identities (provider, origin, subject, user_id) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (provider, origin, subject) DO NOTHING`, id.Provider, id.Origin, id.Subject, userID)
 	if err != nil {
 		return "", err
 	}
 	if tag.RowsAffected() == 1 {
-		return accountID, nil
+		return userID, nil
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM accounts WHERE id = $1`, accountID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID); err != nil {
 		return "", err
 	}
-	err = tx.QueryRow(ctx, `SELECT account_id FROM identities WHERE provider = $1 AND origin = $2 AND subject = $3`,
-		id.Provider, id.Origin, id.Subject).Scan(&accountID)
-	return accountID, err
+	err = tx.QueryRow(ctx, `SELECT user_id FROM identities WHERE provider = $1 AND origin = $2 AND subject = $3`,
+		id.Provider, id.Origin, id.Subject).Scan(&userID)
+	return userID, err
 }
 
-// ReplaceForgeMemberships makes grants the account's forge-sourced
-// memberships, dropping any it no longer holds; invite-sourced memberships
-// are untouched. A grant on a tenant the leader has not yet created is
-// skipped rather than failing the sign-in; the next sign-in picks it up.
-func (s *Store) ReplaceForgeMemberships(ctx context.Context, accountID string, grants []Grant, now time.Time) error {
-	for _, g := range grants {
-		if !g.Role.Valid() {
-			return fmt.Errorf("store: replace forge memberships: invalid role %q", g.Role)
-		}
+// CreateSession stores a new session for the user, signed in through
+// the provider at origin with grant g, valid until expires, and returns its
+// cookie value. Only the value's SHA-256 is kept. Expired sessions are
+// swept on the way.
+func (s *Store) CreateSession(
+	ctx context.Context, userID, provider, origin string, g SessionGrant, now, expires time.Time,
+) (string, error) {
+	if !g.Role.Valid() {
+		return "", fmt.Errorf("store: create session: invalid role %q", g.Role)
 	}
-	tx, err := s.app.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("store: replace forge memberships: %w", err)
+	if g.Accounts == nil {
+		g.Accounts = []string{}
 	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful commit
-	if _, err := tx.Exec(ctx, `DELETE FROM memberships WHERE account_id = $1 AND source = 'forge'`, accountID); err != nil {
-		return fmt.Errorf("store: replace forge memberships: %w", err)
-	}
-	for _, g := range grants {
-		if err := insertForgeMembership(ctx, tx, accountID, g, now); err != nil {
-			return fmt.Errorf("store: replace forge memberships: %w", err)
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("store: replace forge memberships: %w", err)
-	}
-	return nil
-}
-
-// insertForgeMembership inserts under a savepoint, since a foreign-key
-// failure would otherwise abort the whole transaction.
-func insertForgeMembership(ctx context.Context, tx pgx.Tx, accountID string, g Grant, now time.Time) error {
-	sp, err := tx.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = sp.Rollback(ctx) }() // no-op after a successful commit
-	_, err = sp.Exec(ctx, `INSERT INTO memberships (tenant_id, account_id, role, source, refreshed_at)
-		VALUES ($1, $2, $3, 'forge', $4) ON CONFLICT (tenant_id, account_id, source) DO NOTHING`, g.TenantID, accountID, g.Role, now)
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "23503" {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return sp.Commit(ctx)
-}
-
-// AcceptInvites turns every pending, unexpired invite for email into an
-// invite-sourced membership of the account, with the invite's role, and
-// marks it accepted, returning how many it accepted. email must be one the
-// provider verified. Forge-sourced memberships are untouched.
-//
-// It does not take LockTenantAdmins, so an accepted member invite can
-// replace an earlier invite's admin role without the last-admin check. The
-// dashboard refuses to invite an email that is already a member, which
-// leaves only an invite issued before its account joined by another source.
-func (s *Store) AcceptInvites(ctx context.Context, accountID, email string, now time.Time) (int, error) {
-	if email == "" {
-		return 0, nil
-	}
-	tag, err := s.app.Exec(ctx, `WITH accepted AS (
-			UPDATE invites SET accepted_at = $3, accepted_by = $1
-			WHERE accepted_at IS NULL AND expires_at > $3 AND lower(email) = lower($2)
-			RETURNING tenant_id, role
-		)
-		INSERT INTO memberships (tenant_id, account_id, role, source, refreshed_at)
-		SELECT tenant_id, $1, role, 'invite', $3 FROM accepted
-		-- The latest accepted invite wins: its role replaces an earlier invite's.
-		ON CONFLICT (tenant_id, account_id, source) DO UPDATE SET
-			role = EXCLUDED.role, refreshed_at = EXCLUDED.refreshed_at`, accountID, email, now)
-	if err != nil {
-		return 0, fmt.Errorf("store: accept invites: %w", err)
-	}
-	return int(tag.RowsAffected()), nil
-}
-
-// Memberships returns the account's effective role on each tenant it
-// belongs to: the highest its forge and invite memberships give.
-func (s *Store) Memberships(ctx context.Context, accountID string) (map[string]Role, error) {
-	rows, err := s.app.Query(ctx, `SELECT tenant_id, CASE WHEN bool_or(role = 'admin') THEN 'admin' ELSE 'member' END
-		FROM memberships WHERE account_id = $1 GROUP BY tenant_id`, accountID)
-	if err != nil {
-		return nil, fmt.Errorf("store: memberships: %w", err)
-	}
-	out := map[string]Role{}
-	var tenantID string
-	var role Role
-	if _, err := pgx.ForEachRow(rows, []any{&tenantID, &role}, func() error {
-		out[tenantID] = role
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("store: memberships: %w", err)
-	}
-	return out, nil
-}
-
-// CreateSession stores a new session for the account, signed in through
-// the provider at origin, valid until expires, and returns its cookie value.
-// Only the value's SHA-256 is kept. Expired sessions are swept on the way.
-func (s *Store) CreateSession(ctx context.Context, accountID, provider, origin string, now, expires time.Time) (string, error) {
-	token, err := randomToken()
-	if err != nil {
-		return "", fmt.Errorf("store: create session: %w", err)
-	}
+	token := RandomToken()
 	if _, err := s.app.Exec(ctx, `DELETE FROM sessions WHERE expires_at <= $1`, now); err != nil {
 		return "", fmt.Errorf("store: create session: %w", err)
 	}
 	if _, err := s.app.Exec(ctx, `INSERT INTO sessions
-		(token_hash, account_id, provider, provider_origin, created_at, expires_at, last_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $5)`, tokenHash(token), accountID, provider, origin, now, expires); err != nil {
+		(token_hash, user_id, provider, provider_origin, role, all_accounts, accounts, grant_key, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		tokenHash(token), userID, provider, origin, g.Role, g.AllAccounts, g.Accounts, g.Key, now, expires); err != nil {
 		return "", fmt.Errorf("store: create session: %w", err)
 	}
 	return token, nil
 }
 
 // LookupSession returns the unexpired session a cookie value names, or
-// ErrSession, and records that it was seen at most once a minute.
+// ErrSession.
 func (s *Store) LookupSession(ctx context.Context, token string, now time.Time) (Session, error) {
 	if token == "" {
 		return Session{}, ErrSession
 	}
 	hash := tokenHash(token)
 	var sess Session
-	var lastSeen *time.Time
-	err := s.app.QueryRow(ctx, `SELECT s.account_id, s.provider, s.provider_origin, s.expires_at, s.last_seen_at,
-			a.display_name, a.email, a.email_verified, a.avatar_url, i.subject, i.login
+	var settings []byte
+	err := s.app.QueryRow(ctx, `SELECT s.user_id, s.provider, s.provider_origin,
+			s.role, s.all_accounts, s.accounts, s.grant_key,
+			u.display_name, u.email, u.email_verified, u.avatar_url, u.settings, i.subject, i.login
 		FROM sessions s
-		JOIN accounts a ON a.id = s.account_id
-		JOIN identities i ON i.account_id = s.account_id AND i.provider = s.provider AND i.origin = s.provider_origin
+		JOIN users u ON u.id = s.user_id
+		JOIN identities i ON i.user_id = s.user_id AND i.provider = s.provider AND i.origin = s.provider_origin
 		WHERE s.token_hash = $1 AND s.expires_at > $2
 		ORDER BY i.created_at LIMIT 1`, hash, now).
-		Scan(&sess.Account.ID, &sess.Identity.Provider, &sess.Identity.Origin, &sess.ExpiresAt, &lastSeen,
-			&sess.Account.DisplayName, &sess.Account.Email, &sess.Account.EmailVerified, &sess.Account.AvatarURL,
+		Scan(&sess.User.ID, &sess.Identity.Provider, &sess.Identity.Origin,
+			&sess.Grant.Role, &sess.Grant.AllAccounts, &sess.Grant.Accounts, &sess.Grant.Key,
+			&sess.User.DisplayName, &sess.User.Email, &sess.User.EmailVerified, &sess.User.AvatarURL, &settings,
 			&sess.Identity.Subject, &sess.Identity.Login)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Session{}, ErrSession
@@ -310,19 +253,30 @@ func (s *Store) LookupSession(ctx context.Context, token string, now time.Time) 
 	if err != nil {
 		return Session{}, fmt.Errorf("store: look up session: %w", err)
 	}
-	sess.Identity.Email = sess.Account.Email
-	sess.Identity.EmailVerified = sess.Account.EmailVerified
-	sess.Identity.DisplayName = sess.Account.DisplayName
-	sess.Identity.AvatarURL = sess.Account.AvatarURL
-	if lastSeen == nil || now.Sub(*lastSeen) >= sessionTouchInterval {
-		if _, err := s.app.Exec(ctx, `WITH touched AS (
-				UPDATE sessions SET last_seen_at = $2 WHERE token_hash = $1 RETURNING account_id
-			)
-			UPDATE accounts SET last_seen_at = $2 WHERE id IN (SELECT account_id FROM touched)`, hash, now); err != nil {
-			return Session{}, fmt.Errorf("store: touch session: %w", err)
-		}
+	if err := json.Unmarshal(settings, &sess.User.Settings); err != nil {
+		return Session{}, fmt.Errorf("store: decode user settings: %w", err)
 	}
 	return sess, nil
+}
+
+// SweepSessions deletes the dashboard sessions and in-flight logins that
+// expired by now and returns how many it deleted.
+func (s *Store) SweepSessions(ctx context.Context, now time.Time) (int64, error) {
+	var n int64
+	err := pgx.BeginFunc(ctx, s.app, func(tx pgx.Tx) error {
+		for _, table := range []string{"sessions", "login_states"} {
+			tag, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE expires_at <= $1`, now)
+			if err != nil {
+				return err
+			}
+			n += tag.RowsAffected()
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("store: sweep sessions: %w", err)
+	}
+	return n, nil
 }
 
 // DeleteSession ends the session a cookie value names, if any.
@@ -339,12 +293,9 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 // state and browser values are kept. Expired states are swept on the way.
 func (s *Store) CreateLoginState(ctx context.Context, ls LoginState, browser string, now time.Time) (string, error) {
 	if browser == "" {
-		return "", fmt.Errorf("store: create login state: no browser binding")
+		return "", errors.New("store: create login state: no browser binding")
 	}
-	state, err := randomToken()
-	if err != nil {
-		return "", fmt.Errorf("store: create login state: %w", err)
-	}
+	state := RandomToken()
 	if _, err := s.app.Exec(ctx, `DELETE FROM login_states WHERE expires_at <= $1`, now); err != nil {
 		return "", fmt.Errorf("store: create login state: %w", err)
 	}

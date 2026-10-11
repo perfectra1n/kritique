@@ -1,9 +1,9 @@
 // Package repoconfig parses .kritique.yaml, the optional per-repository file
 // that lets a repository narrow how kritique reviews it (a filter ANDed with
-// the operator's own filter, path globs to ignore, a skip-review rule),
-// add review instructions and templates read from the repository itself,
-// and choose its mode, models, agent limits and settle time within the
-// bounds the operator allows.
+// the admin's own filter, path globs to ignore, which also skip a pull
+// request that changes nothing else),
+// add rules, context files and templates read from the repository itself,
+// and choose its models among what its account may use.
 //
 // Everything here is read from the merge-base commit (the base branch history
 // a PR cannot rewrite), never the PR's own tree, so a PR cannot use its own
@@ -19,18 +19,18 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"path"
 	"slices"
 	"strings"
-	"time"
-	"unicode/utf8"
 
-	"github.com/bmatcuk/doublestar/v4"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 
+	"github.com/perfectra1n/kritique/internal/chunk"
 	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/prfilter"
+	"github.com/perfectra1n/kritique/internal/review"
 	"github.com/perfectra1n/kritique/internal/tasks"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // FileName is the repository-relative path of the per-repository config file.
@@ -45,192 +45,160 @@ const (
 	MaxTotalBytes = 1 << 20
 )
 
-// MaxInstructionBytes caps the repository instructions, joined, so they
-// cannot crowd the diff out of the prompt budget.
+// MaxInstructionBytes caps the repository instructions, its agent files
+// joined, so they cannot crowd the diff out of the prompt budget.
 const MaxInstructionBytes = 32 << 10
 
-// Templates names in-repo files whose contents replace kritique's built-in
-// summary/inline comment templates.
-type Templates struct {
-	Summary string `yaml:"summary,omitempty"`
-	Inline  string `yaml:"inline,omitempty"`
+// MaxRulesBytes caps the rules a prompt lists by their ids and text, and
+// MaxRuleFileBytes the content of its file rules, for the same reason.
+const (
+	MaxRulesBytes    = 16 << 10
+	MaxRuleFileBytes = 32 << 10
+)
+
+// Comments is how the repository's reviews comment: whether findings go
+// inline, and the in-repo files whose contents replace kritique's built-in
+// summary and finding comment templates.
+type Comments struct {
+	Inline *bool `yaml:"inline,omitempty"`
+	// Summary and Finding replace the admin's; an empty path restores the
+	// built-in template.
+	Summary *string `yaml:"summary,omitempty"`
+	Finding *string `yaml:"finding,omitempty"`
 }
 
-// Instruction is a file of review instructions in the repository: always
-// included, or with Paths only when a changed path matches one of them.
-type Instruction struct {
-	Path  string
-	Paths []string
-}
-
-// UnmarshalYAML takes a bare path, or a mapping of path and paths.
-func (in *Instruction) UnmarshalYAML(n *yaml.Node) error {
-	if n.Kind == yaml.ScalarNode {
-		return n.Decode(&in.Path)
-	}
-	// Node.Decode drops the strictness Parse asked for, so unknown keys are
-	// refused here.
-	for i := 0; n.Kind == yaml.MappingNode && i < len(n.Content); i += 2 {
-		if k := n.Content[i]; k.Value != "path" && k.Value != "paths" {
-			return fmt.Errorf("line %d: field %s not found in type repoconfig.Instruction", k.Line, k.Value)
-		}
-	}
-	var v struct {
-		Path  string   `yaml:"path"`
-		Paths []string `yaml:"paths"`
-	}
-	if err := n.Decode(&v); err != nil {
-		return err
-	}
-	in.Path, in.Paths = v.Path, v.Paths
-	return nil
-}
-
-// Review holds the repository's review customizations.
+// Review is how the repository's reviews are done: the review and fallback
+// models, each a "<provider>/<model>" of a provider its account may use,
+// how hard they reason, whether a finding must carry a suggested fix,
+// whether a review that finds nothing blocking or important approves the
+// pull request, and whether the summary draws the change's flow. Effort,
+// Approve and Diagram replace the admin's; an Effort written empty leaves
+// it to the provider.
 type Review struct {
-	Instructions        []Instruction `yaml:"instructions,omitempty"`
-	RequireSuggestedFix *bool         `yaml:"requireSuggestedFix,omitempty"`
-	Templates           Templates     `yaml:"templates,omitempty"`
-	MinSeverity         string        `yaml:"minSeverity,omitempty"`
-	InlineComments      *bool         `yaml:"inlineComments,omitempty"`
-	// Context names files that explain the code, added after the
-	// operator's.
-	Context []configfile.ContextFile `yaml:"context,omitempty"`
-}
-
-// Skip decides whether a PR should be skipped outright based on the paths it
-// changes.
-type Skip struct {
-	OnlyPaths []string `yaml:"onlyPaths,omitempty"`
-}
-
-// Models are the review and fallback models a repository chooses, each a
-// "<provider>/<model>" the operator's bounds list.
-type Models struct {
-	Review   configfile.ModelRef `yaml:"review,omitempty"`
+	Model    configfile.ModelRef `yaml:"model,omitempty"`
 	Fallback configfile.ModelRef `yaml:"fallback,omitempty"`
+	Effort   *model.Effort       `yaml:"effort,omitempty"`
+	Fixes    *bool               `yaml:"fixes,omitempty"`
+	Approve  *bool               `yaml:"approve,omitempty"`
+	Diagram  *bool               `yaml:"diagram,omitempty"`
 }
 
-// Agent is the agent limits and commands a repository chooses.
-type Agent struct {
-	MaxSteps           *int           `yaml:"maxSteps,omitempty"`
-	MaxToolOutputBytes *int           `yaml:"maxToolOutputBytes,omitempty"`
-	MaxTokens          *int64         `yaml:"maxTokens,omitempty"`
-	Timeout            *time.Duration `yaml:"timeout,omitempty"`
-	Commands           []string       `yaml:"commands,omitempty"`
+// Confidence is how the repository's reviews are judged: the model that
+// scores a reviewed pull request and the one that takes its call when it
+// fails, each a "<provider>/<model>" of a provider its account may use,
+// how hard they reason, as Review.Effort, the score it must reach and
+// whether the commit status fails under it, which all replace the
+// admin's, and the highest risk a change may carry and still be approved,
+// which may only lower the admin's.
+type Confidence struct {
+	Model     configfile.ModelRef `yaml:"model,omitempty"`
+	Fallback  configfile.ModelRef `yaml:"fallback,omitempty"`
+	Effort    *model.Effort       `yaml:"effort,omitempty"`
+	Threshold *int                `yaml:"threshold,omitempty"`
+	Gate      *bool               `yaml:"gate,omitempty"`
+	Risk      review.Risk         `yaml:"risk,omitempty"`
 }
 
-// File is the decoded content of .kritique.yaml. Nothing in it is a secret or
-// a reference to one: it can only name what the operator configured.
+// Trigger narrows which pull requests get a review: include and exclude
+// lists of its own, which a pull request must pass beside the admin's.
+type Trigger struct {
+	configfile.Filters `yaml:",inline"`
+}
+
+// File is the decoded content of .kritique.yaml: the keys the
+// configuration's own settings and repository entries take, without the
+// admin's own. Nothing in it is a secret or a reference to one.
 type File struct {
-	Enabled *bool                 `yaml:"enabled,omitempty"`
-	Mode    configfile.ReviewMode `yaml:"mode,omitempty"`
-	Models  Models                `yaml:"models,omitempty"`
-	Agent   Agent                 `yaml:"agent,omitempty"`
-	Settle  *time.Duration        `yaml:"settle,omitempty"`
-	Filter  string                `yaml:"filter,omitempty"`
-	Ignore  []string              `yaml:"ignore,omitempty"`
-	Skip    Skip                  `yaml:"skip,omitempty"`
-	Review  Review                `yaml:"review,omitempty"`
-	// Tasks are the repository's own tasks, run after the operator's.
+	Enabled    *bool      `yaml:"enabled,omitempty"`
+	Review     Review     `yaml:"review,omitempty"`
+	Confidence Confidence `yaml:"confidence,omitempty"`
+	Trigger    Trigger    `yaml:"trigger,omitempty"`
+	Comments   Comments   `yaml:"comments,omitempty"`
+	// Rules are checks added after the admin's; one may not replace an
+	// admin's rule.
+	Rules []configfile.Rule `yaml:"rules,omitempty"`
+	// Context names files that explain the code, added after the admin's.
+	Context []configfile.ContextFile `yaml:"context,omitempty"`
+	// Ignore are path globs added to the admin's.
+	Ignore []string `yaml:"ignore,omitempty"`
+	// Skills replace the directories the admin has skills looked for in,
+	// and add to the admin's scopes.
+	Skills configfile.SkillsSpec `yaml:"skills,omitempty"`
+	// Tasks are the repository's own event tasks, run after the admin's
+	// within the admin's task bounds.
 	Tasks []tasks.Task `yaml:"tasks,omitempty"`
 }
 
 // Parse decodes data as .kritique.yaml. Unknown fields, invalid glob patterns
 // and a filter that fails to compile or that fails a smoke test against
-// configfile.SamplePR are rejected, as is any referenced path (an
-// instruction or template) that is absolute or escapes the repository via
-// "..". An empty document is valid (the file is optional) and yields a zero
-// File with no filter.
-func Parse(data []byte) (File, *prfilter.Program, error) {
+// configfile.SamplePR are rejected, as is any referenced path (a rule's
+// file, a template or a context file) that is absolute or escapes the
+// repository via "..". An empty document is valid (the file is optional) and yields a zero
+// File. The file's filters come back compiled.
+func Parse(data []byte) (File, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var f File
 	if err := dec.Decode(&f); err != nil {
 		if errors.Is(err, io.EOF) {
-			return File{}, nil, nil
+			return File{}, nil
 		}
-		return File{}, nil, fmt.Errorf("repoconfig: parse: %w", err)
+		return File{}, fmt.Errorf("repoconfig: parse: %w", err)
 	}
 
 	for i, g := range f.Ignore {
-		if !validGlob(g) {
-			return File{}, nil, fmt.Errorf("repoconfig: ignore[%d] %q is not a valid glob", i, g)
+		if !configfile.ValidGlob(g) {
+			return File{}, fmt.Errorf("repoconfig: ignore[%d] %q is not a valid glob", i, g)
 		}
 	}
-	for i, g := range f.Skip.OnlyPaths {
-		if !validGlob(g) {
-			return File{}, nil, fmt.Errorf("repoconfig: skip.onlyPaths[%d] %q is not a valid glob", i, g)
-		}
-	}
-	for i, c := range f.Review.Context {
+	for i, c := range f.Context {
 		if err := c.Check(); err != nil {
-			return File{}, nil, fmt.Errorf("repoconfig: review.context[%d]: %w", i, err)
+			return File{}, fmt.Errorf("repoconfig: context[%d]: %w", i, err)
 		}
 	}
-	for i, in := range f.Review.Instructions {
-		if in.Path == "" {
-			return File{}, nil, fmt.Errorf("repoconfig: review.instructions[%d] needs a path", i)
-		}
-		for j, g := range in.Paths {
-			if !validGlob(g) {
-				return File{}, nil, fmt.Errorf("repoconfig: review.instructions[%d].paths[%d] %q is not a valid glob", i, j, g)
-			}
-		}
+	if err := configfile.CheckRules(f.Rules); err != nil {
+		return File{}, fmt.Errorf("repoconfig: %w", err)
 	}
-	for i := range f.Tasks {
-		if err := f.Tasks[i].Check(); err != nil {
-			return File{}, nil, fmt.Errorf("repoconfig: tasks[%d]: %w", i, err)
-		}
-		if slices.ContainsFunc(f.Tasks[:i], func(o tasks.Task) bool { return o.Name == f.Tasks[i].Name }) {
-			return File{}, nil, fmt.Errorf("repoconfig: tasks[%d]: name %q is used twice", i, f.Tasks[i].Name)
-		}
+	var skillPaths []string
+	if f.Skills.Paths != nil {
+		skillPaths = *f.Skills.Paths
+	}
+	if err := configfile.CheckSkills(skillPaths, f.Skills.Scope); err != nil {
+		return File{}, fmt.Errorf("repoconfig: %w", err)
+	}
+	if err := checkTasks(f.Tasks); err != nil {
+		return File{}, err
 	}
 	for _, p := range f.Referenced() {
 		if err := validateRefPath(p); err != nil {
-			return File{}, nil, err
+			return File{}, err
 		}
 	}
 
-	var prg *prfilter.Program
-	if strings.TrimSpace(f.Filter) != "" {
-		var err error
-		prg, err = prfilter.Compile(f.Filter)
-		if err != nil {
-			return File{}, nil, fmt.Errorf("repoconfig: filter: %w", err)
-		}
-		if _, err := prg.Eval(configfile.SamplePR()); err != nil {
-			return File{}, nil, fmt.Errorf("repoconfig: filter: smoke test against a sample pull request: %w", err)
-		}
+	if err := f.Trigger.Compile(); err != nil {
+		return File{}, fmt.Errorf("repoconfig: trigger.%w", err)
 	}
 
-	return f, prg, nil
+	return f, nil
 }
 
-func validGlob(g string) bool {
-	return strings.TrimSpace(g) != "" && doublestar.ValidatePattern(g)
-}
-
-// validateRefPath rejects a referenced path that is absolute or that, once
-// cleaned, escapes the repository root - both are read through Collect's
-// caller-supplied read function, so an unbounded path would let a
-// repository's own config read arbitrary files on the runner's checkout.
+// validateRefPath rejects a referenced path that is absolute or escapes
+// the repository root: every path is read through Collect's caller-supplied
+// read function, so an unbounded one would let a repository's own config
+// read arbitrary files on the runner's checkout.
 func validateRefPath(p string) error {
-	if path.IsAbs(p) {
-		return fmt.Errorf("repoconfig: referenced path %q must be relative", p)
-	}
-	clean := path.Clean(p)
-	if clean == ".." || strings.HasPrefix(clean, "../") {
-		return fmt.Errorf("repoconfig: referenced path %q escapes the repository", p)
+	if err := configfile.CheckRepoPath(p); err != nil {
+		return fmt.Errorf("repoconfig: referenced %w", err)
 	}
 	return nil
 }
 
-// Referenced lists the in-repo paths the file names: review instructions
-// first, then the summary and inline templates, the context files and the
-// tasks' templates, deduplicated in the order first seen.
+// Referenced lists the in-repo paths the file names whose contents a
+// review reads: its rules' files first, then the summary and finding
+// templates, deduplicated in the order first seen. Context files are
+// pointers the agent follows with its tools.
 func (f File) Referenced() []string {
-	seen := make(map[string]bool, len(f.Review.Instructions)+2)
+	seen := make(map[string]bool, len(f.Rules)+2)
 	var out []string
 	add := func(p string) {
 		if p == "" || seen[p] {
@@ -239,17 +207,12 @@ func (f File) Referenced() []string {
 		seen[p] = true
 		out = append(out, p)
 	}
-	for _, in := range f.Review.Instructions {
-		add(in.Path)
+	for _, r := range f.Rules {
+		add(r.File)
 	}
-	add(f.Review.Templates.Summary)
-	add(f.Review.Templates.Inline)
-	for _, c := range f.Review.Context {
-		add(c.Path)
-	}
-	for _, t := range f.Tasks {
-		for _, p := range t.Files() {
-			add(p)
+	for _, t := range []*string{f.Comments.Summary, f.Comments.Finding} {
+		if t != nil {
+			add(*t)
 		}
 	}
 	return out
@@ -287,7 +250,7 @@ func Collect(read func(name string) ([]byte, error), paths ...string) (Files, []
 		case len(b) > MaxFileBytes:
 			notes = append(notes, TooLarge(p))
 		case total+len(b) > MaxTotalBytes:
-			notes = append(notes, fmt.Sprintf("%s: skipped, would exceed the %d byte total limit", p, MaxTotalBytes))
+			notes = append(notes, overTotal(p))
 		default:
 			files[p] = string(b)
 			total += len(b)
@@ -296,48 +259,30 @@ func Collect(read func(name string) ([]byte, error), paths ...string) (Files, []
 	return files, notes, nil
 }
 
+// overTotal is the note for a file that would push the total over
+// MaxTotalBytes.
+func overTotal(name string) string {
+	return fmt.Sprintf("%s: skipped, would exceed the %d byte total limit", name, MaxTotalBytes)
+}
+
 // TooLarge is the note for a file over MaxFileBytes.
 func TooLarge(name string) string {
 	return fmt.Sprintf("%s: skipped, it exceeds the %d byte per-file limit", name, MaxFileBytes)
 }
 
-// All reports whether every path in changed matches at least one of s's
-// OnlyPaths glob patterns. It is false when there are no patterns or no
-// changed paths - an empty rule skips nothing, and there is nothing to
-// judge a skip against.
-func (s Skip) All(changed []string) bool {
-	if len(s.OnlyPaths) == 0 || len(changed) == 0 {
+// AllIgnored reports whether every path in changed matches one of the
+// ignore globs, so the pull request is skipped. It is false when nothing
+// changed: there is nothing to judge a skip against.
+func AllIgnored(ignore, changed []string) bool {
+	if len(ignore) == 0 || len(changed) == 0 {
 		return false
 	}
 	for _, c := range changed {
-		if !matchesAny(s.OnlyPaths, c) {
+		if !chunk.Matches(ignore, c) {
 			return false
 		}
 	}
 	return true
-}
-
-func matchesAny(patterns []string, p string) bool {
-	for _, pat := range patterns {
-		if ok, _ := doublestar.Match(pat, p); ok {
-			return true
-		}
-	}
-	return false
-}
-
-// Active is the instruction paths that apply to a change of the changed
-// paths, in order: every path scoped does not name, and each one it does
-// when a changed path matches one of its globs.
-func Active(paths []string, scoped map[string][]string, changed []string) []string {
-	out := make([]string, 0, len(paths))
-	for _, p := range paths {
-		if globs, ok := scoped[p]; ok && !slices.ContainsFunc(changed, func(c string) bool { return matchesAny(globs, c) }) {
-			continue
-		}
-		out = append(out, p)
-	}
-	return out
 }
 
 // ActiveContext is the context files that apply to a change of the changed
@@ -346,8 +291,58 @@ func Active(paths []string, scoped map[string][]string, changed []string) []stri
 func ActiveContext(files []configfile.ContextFile, changed []string) []configfile.ContextFile {
 	var out []configfile.ContextFile
 	for _, f := range files {
-		if len(f.Paths) == 0 || slices.ContainsFunc(changed, func(c string) bool { return matchesAny(f.Paths, c) }) {
+		if len(f.Paths) == 0 || slices.ContainsFunc(changed, func(c string) bool { return chunk.Matches(f.Paths, c) }) {
 			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// ActiveRules is the rules that apply to a change of the changed paths, in
+// order: each without paths, and each with them when a changed path
+// matches one. A rule's text counts against MaxRulesBytes and a file
+// rule's content, read from files, against MaxRuleFileBytes; left is how
+// many applied but did not fit. A file rule whose file files lacks or
+// holds nothing is left out, since reading it was already noted.
+func ActiveRules(rules []configfile.Rule, files Files, changed []string) (out []review.Rule, left int) {
+	room, fileRoom := MaxRulesBytes, MaxRuleFileBytes
+	for _, r := range rules {
+		if len(r.Paths) > 0 && !slices.ContainsFunc(changed, func(c string) bool { return chunk.Matches(r.Paths, c) }) {
+			continue
+		}
+		text, budget := r.Rule, &room
+		if r.File != "" {
+			if text, budget = strings.TrimSpace(files[r.File]), &fileRoom; text == "" {
+				continue
+			}
+		}
+		if size := len(r.ID) + len(text); size <= *budget {
+			*budget -= size
+			out = append(out, review.Rule{ID: r.ID, Text: text, File: r.File})
+		} else {
+			left++
+		}
+	}
+	return out, left
+}
+
+// RulesFor is the rules that apply to the pull request with the filter
+// variables vars, in order: each without when conditions, and each one of
+// whose conditions holds. A condition that does not compile or evaluate
+// does not hold, as it could not say the rule applies.
+func RulesFor(rules []configfile.Rule, vars map[string]any) []configfile.Rule {
+	holds := func(w configfile.When) bool {
+		prg, err := prfilter.Compile(w.Expr)
+		if err != nil {
+			return false
+		}
+		ok, err := prg.Eval(vars)
+		return err == nil && ok
+	}
+	var out []configfile.Rule
+	for _, r := range rules {
+		if len(r.When) == 0 || slices.ContainsFunc(r.When, holds) {
+			out = append(out, r)
 		}
 	}
 	return out
@@ -368,7 +363,7 @@ func Instructions(files Files, paths []string) (out []string, truncated bool) {
 			room -= len("\n\n")
 		}
 		if len(s) > room {
-			s = cutUTF8(s, max(room, 0))
+			s = textcut.Prefix(s, max(room, 0))
 			room, truncated = 0, true
 			if s == "" {
 				continue
@@ -378,15 +373,4 @@ func Instructions(files Files, paths []string) (out []string, truncated bool) {
 		out = append(out, s)
 	}
 	return out, truncated
-}
-
-// cutUTF8 shortens s to at most n bytes without splitting a rune.
-func cutUTF8(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
 }

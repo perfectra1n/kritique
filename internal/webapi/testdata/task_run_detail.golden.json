@@ -64,6 +64,7 @@
       "reason": "it is not a label the task lets the model add"
     }
   ],
+  "notes": ["context.related: the index is not built yet"],
   "modelCalls": 1,
   "costUsd": 0.02,
   "tokens": {

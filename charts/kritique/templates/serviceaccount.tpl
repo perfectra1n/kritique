@@ -12,9 +12,12 @@ metadata:
   {{- end }}
 automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
 {{- end }}
-{{- if and (include "kritique.hasWorker" .) .Values.runner.serviceAccount.create }}
+{{- if .Values.runner.serviceAccount.create }}
 ---
 # Runner pods run as this account; it grants nothing and mounts no token.
+# The executor builds runner Jobs without pull secrets, so the account
+# carries the chart's: the kubelet adds a ServiceAccount's to every pod
+# that runs as it, whether or not a token is mounted.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -28,4 +31,8 @@ metadata:
     {{- tpl (toYaml .) $ | nindent 4 }}
   {{- end }}
 automountServiceAccountToken: false
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- tpl (toYaml .) $ | nindent 2 }}
+{{- end }}
 {{- end }}

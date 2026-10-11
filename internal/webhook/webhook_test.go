@@ -49,14 +49,13 @@ func TestVerify(t *testing.T) {
 		{"github missing header", configfile.ForgeGitHub, secret, http.Header{}, body, ErrMissingSignature},
 		{"github tampered body", configfile.ForgeGitHub, secret, http.Header{"X-Hub-Signature-256": {"sha256=" + sig}}, []byte("Goodbye"), ErrSignatureMismatch},
 		{"github bad hex", configfile.ForgeGitHub, secret, http.Header{"X-Hub-Signature-256": {"sha256=zz"}}, body, ErrSignatureMismatch},
+		{"no secret configured", configfile.ForgeGitHub, "", http.Header{"X-Hub-Signature-256": {"sha256=" + sig}}, body, ErrNoSecret},
 		{"forgejo valid", configfile.ForgeForgejo, secret, http.Header{"X-Gitea-Signature": {sig}}, body, nil},
 		{"forgejo with prefix rejected", configfile.ForgeForgejo, secret, http.Header{"X-Gitea-Signature": {"sha256=" + sig}}, body, ErrSignatureMismatch},
+		{"forgejo wrong secret", configfile.ForgeForgejo, secret, http.Header{"X-Gitea-Signature": {hmacSHA256Hex("x")}}, body, ErrSignatureMismatch},
+		{"forgejo github header alone", configfile.ForgeForgejo, secret, http.Header{"X-Hub-Signature-256": {"sha256=" + sig}}, body, ErrMissingSignature},
 		{"gitea valid", configfile.ForgeGitea, secret, http.Header{"X-Gitea-Signature": {sig}}, body, nil},
-		{"gitea with prefix rejected", configfile.ForgeGitea, secret, http.Header{"X-Gitea-Signature": {"sha256=" + sig}}, body, ErrSignatureMismatch},
-		{"gitlab valid", configfile.ForgeGitLab, secret, http.Header{"X-Gitlab-Token": {secret}}, body, nil},
-		{"gitlab wrong token", configfile.ForgeGitLab, secret, http.Header{"X-Gitlab-Token": {"nope"}}, body, ErrSignatureMismatch},
-		{"gitlab missing", configfile.ForgeGitLab, secret, http.Header{}, body, ErrMissingSignature},
-		{"no secret configured", configfile.ForgeGitHub, "", http.Header{"X-Hub-Signature-256": {"sha256=" + sig}}, body, ErrNoSecret},
+		{"gitea tampered body", configfile.ForgeGitea, secret, http.Header{"X-Gitea-Signature": {sig}}, []byte("Goodbye"), ErrSignatureMismatch},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -68,5 +67,34 @@ func TestVerify(t *testing.T) {
 	}
 	if err := Verify("bitbucket", secret, http.Header{}, body); err == nil {
 		t.Fatal("unsupported forge must error")
+	}
+}
+
+func TestDelivered(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		header http.Header
+		want   bool
+	}{
+		{"github delivery", http.Header{"X-Github-Delivery": {"d-1"}, "X-Github-Event": {"ping"}}, true},
+		{"delivery id alone", http.Header{"X-Github-Delivery": {"d-1"}}, false},
+		{"no headers", http.Header{}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Delivered(configfile.ForgeGitHub, tt.header); got != tt.want {
+				t.Fatalf("Delivered = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	if Delivered("bitbucket", http.Header{"X-Github-Delivery": {"d-1"}, "X-Github-Event": {"ping"}}) {
+		t.Fatal("an unsupported forge delivers nothing")
+	}
+	for _, forge := range []configfile.Forge{configfile.ForgeForgejo, configfile.ForgeGitea} {
+		if !Delivered(forge, http.Header{"X-Gitea-Delivery": {"d-1"}, "X-Gitea-Event": {"push"}}) {
+			t.Fatalf("%s delivery not recognized", forge)
+		}
+		if Delivered(forge, http.Header{"X-Github-Delivery": {"d-1"}, "X-Github-Event": {"ping"}}) {
+			t.Fatalf("%s takes a GitHub delivery as its own", forge)
+		}
 	}
 }

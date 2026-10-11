@@ -237,12 +237,12 @@ func (p *Prepared) parseInline() error {
 	a := t.Actions
 	g := &p.guards
 	if a.Comment != nil {
-		if g.comment, err = compileGuard(a.Comment.If, true); err != nil {
+		if g.comment, err = compileGuard(a.Comment.When, true); err != nil {
 			return err
 		}
 	}
 	if l := a.Labels; l != nil {
-		if g.labels, err = compileGuard(l.If, true); err != nil {
+		if g.labels, err = compileGuard(l.When, true); err != nil {
 			return err
 		}
 		for i, r := range l.Rules {
@@ -253,7 +253,7 @@ func (p *Prepared) parseInline() error {
 			if rt.remove, err = parseValues(fmt.Sprintf("labels.rules[%d].remove", i), r.Remove); err != nil {
 				return err
 			}
-			rg, err := compileGuard(r.If, true)
+			rg, err := compileGuard(r.When, true)
 			if err != nil {
 				return err
 			}
@@ -261,11 +261,11 @@ func (p *Prepared) parseInline() error {
 		}
 	}
 	if s := a.State; s != nil {
-		if g.state, err = compileGuard(s.If, true); err != nil {
+		if g.state, err = compileGuard(s.When, true); err != nil {
 			return err
 		}
 		for _, r := range s.Rules {
-			rg, err := compileGuard(r.If, true)
+			rg, err := compileGuard(r.When, true)
 			if err != nil {
 				return err
 			}
@@ -279,7 +279,7 @@ func (p *Prepared) parseInline() error {
 		return err
 	}
 	if a.InlineComments != nil {
-		if g.inline, err = compileGuard(a.InlineComments.If, true); err != nil {
+		if g.inline, err = compileGuard(a.InlineComments.When, true); err != nil {
 			return err
 		}
 	}
@@ -312,7 +312,7 @@ func parseUsers(name string, u *UsersSpec) (*guard, []ruleTemplates, []*guard, e
 	if u == nil {
 		return nil, nil, nil, nil
 	}
-	g, err := compileGuard(u.If, true)
+	g, err := compileGuard(u.When, true)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -323,7 +323,7 @@ func parseUsers(name string, u *UsersSpec) (*guard, []ruleTemplates, []*guard, e
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		rg, err := compileGuard(r.If, true)
+		rg, err := compileGuard(r.When, true)
 		if err != nil {
 			return nil, nil, nil, err
 		}

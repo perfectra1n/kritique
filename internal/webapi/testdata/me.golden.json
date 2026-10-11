@@ -1,16 +1,15 @@
 {
-  "account": {
+  "user": {
     "id": "acct-1",
     "displayName": "Ada",
     "email": "ada@example.com",
     "avatarUrl": "https://img.example/a.png"
   },
-  "operator": true,
-  "tenants": [
-    {
-      "slug": "alpha",
-      "role": "member",
-      "managedBy": "file"
-    }
-  ]
+  "admin": true,
+  "accounts": ["github/alpha"],
+  "settings": {
+    "timeZone": "Europe/Amsterdam",
+    "clock": "24",
+    "theme": "dark"
+  }
 }

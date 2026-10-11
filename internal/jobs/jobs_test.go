@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+
+	"github.com/riverqueue/river"
 )
 
 // uniqueFields returns the river:"unique" struct tag value for every field of
@@ -22,90 +24,113 @@ func uniqueFields(v any) map[string]bool {
 
 func TestReviewArgsUniqueTags(t *testing.T) {
 	got := uniqueFields(ReviewArgs{})
-	want := map[string]bool{"TenantID": true, "RepositoryID": true, "Number": true, "HeadSHA": true, "Request": true}
+	want := map[string]bool{"AccountID": true, "RepositoryID": true, "Number": true, "HeadSHA": true, "Request": true}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("river:\"unique\" fields = %v, want %v", got, want)
 	}
 }
 
-// TestReviewArgsRequestOmittedFromJSONWhenEmpty pins the actual dedup
-// mechanism: River hashes the JSON encoding of the river:"unique" fields, so
-// a non-manual trigger (Request left empty) must serialize with no "request"
-// key at all, not merely an empty string, or it would still perturb the hash
-// relative to jobs enqueued before this field existed.
-func TestReviewArgsRequestOmittedFromJSONWhenEmpty(t *testing.T) {
-	data, err := json.Marshal(ReviewArgs{TenantID: "t", RepositoryID: "r", Number: 1, HeadSHA: "abc", Trigger: "push"})
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
+func TestThreadArgsUniqueTags(t *testing.T) {
+	got := uniqueFields(ThreadArgs{})
+	want := map[string]bool{"CommentID": true, "Resolved": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("river:\"unique\" fields = %v, want %v", got, want)
 	}
-	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-	if _, ok := m["request"]; ok {
-		t.Fatalf("json = %s, want no %q key when Request is empty", data, "request")
+	if opts := (ThreadArgs{}).InsertOpts(); !reflect.DeepEqual(opts.UniqueOpts.ByState, LiveStates) {
+		t.Fatalf("ByState = %v, want the live states", opts.UniqueOpts.ByState)
 	}
 }
 
-// TestReviewArgsRequestPresentInJSONWhenSet is the manual-trigger
-// counterpart: once Request is set, "request" must appear in the hashed
-// JSON, or two manual re-runs of the same head would collide.
-func TestReviewArgsRequestPresentInJSONWhenSet(t *testing.T) {
-	data, err := json.Marshal(ReviewArgs{
-		TenantID: "t", RepositoryID: "r", Number: 1, HeadSHA: "abc", Trigger: TriggerManual,
-		Request: "11111111-1111-1111-1111-111111111111",
-	})
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
+// TestJobArgs pins each job's kind, queue and ByArgs uniqueness, and
+// whether "request" is in the JSON River hashes: a non-manual review
+// (Request left empty) must serialize with no "request" key at all, not an
+// empty string, or it would perturb the hash relative to jobs enqueued
+// before the field existed; a manual re-run must carry it, or two re-runs
+// of the same head would collide.
+func TestJobArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        river.JobArgs
+		wantKind    string
+		wantQueue   string
+		wantRequest bool
+	}{
+		{name: "review", args: ReviewArgs{AccountID: "t", RepositoryID: "r", Number: 1, HeadSHA: "abc", Trigger: "push"},
+			wantKind: "review", wantQueue: QueueReview},
+		{name: "manual review", args: ReviewArgs{AccountID: "t", RepositoryID: "r", Number: 1, HeadSHA: "abc", Trigger: TriggerManual,
+			Request: "11111111-1111-1111-1111-111111111111"}, wantKind: "review", wantQueue: QueueReview, wantRequest: true},
+		{name: "follow-up", args: FollowUpArgs{AccountID: "t", RepositoryID: "r", Number: 1, CommentID: 7},
+			wantKind: "followup", wantQueue: QueueFollowUp},
+		{name: "thread", args: ThreadArgs{AccountID: "t", RepositoryID: "r", Number: 1, CommentID: 7, Resolved: true, Sender: "devin"},
+			wantKind: "thread", wantQueue: QueueFollowUp},
+		{name: "index", args: IndexArgs{AccountID: "t", RepositoryID: "r", Trigger: TriggerPush},
+			wantKind: "index", wantQueue: QueueIndex},
 	}
-	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-	if _, ok := m["request"]; !ok {
-		t.Fatalf("json = %s, want a %q key when Request is set", data, "request")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.args.Kind(); got != tt.wantKind {
+				t.Fatalf("Kind() = %q, want %q", got, tt.wantKind)
+			}
+			opts := tt.args.(river.JobArgsWithInsertOpts).InsertOpts()
+			if opts.Queue != tt.wantQueue || !opts.UniqueOpts.ByArgs {
+				t.Fatalf("InsertOpts() = %+v, want queue %q unique by args", opts, tt.wantQueue)
+			}
+			data, err := json.Marshal(tt.args)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(data, &m); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if _, ok := m["request"]; ok != tt.wantRequest {
+				t.Fatalf("json = %s, want a %q key: %v", data, "request", tt.wantRequest)
+			}
+		})
 	}
 }
 
-// TestReviewArgsSameHeadDedupeUnaffected pins the dedup contract for every
-// existing trigger: two jobs for the same tenant/repo/number/head, neither
-// carrying a manual Request, present identical values on every
-// river:"unique" field, so River hashes them the same and the second insert
-// is deduped exactly as before this field was added.
-func TestReviewArgsSameHeadDedupeUnaffected(t *testing.T) {
-	a := ReviewArgs{TenantID: "t", RepositoryID: "r", Number: 1, HeadSHA: "abc", Trigger: "synchronize"}
-	b := ReviewArgs{TenantID: "t", RepositoryID: "r", Number: 1, HeadSHA: "abc", Trigger: "poll"}
-	if a.TenantID != b.TenantID || a.RepositoryID != b.RepositoryID || a.Number != b.Number ||
-		a.HeadSHA != b.HeadSHA || a.Request != b.Request {
-		t.Fatalf("unique fields differ between %+v and %+v", a, b)
+func TestSettles(t *testing.T) {
+	tests := []struct {
+		trigger string
+		want    bool
+	}{
+		{trigger: "synchronize", want: true},
+		{trigger: "poll", want: true},
+		{trigger: "opened"},
+		{trigger: "reopened"},
+		{trigger: "ready_for_review"},
+		{trigger: TriggerManual},
+		{trigger: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.trigger, func(t *testing.T) {
+			if got := Settles(tt.trigger); got != tt.want {
+				t.Fatalf("Settles(%q) = %v, want %v", tt.trigger, got, tt.want)
+			}
+		})
 	}
 }
 
-// TestReviewArgsManualRerunsDiffer pins that two manual re-runs of the same
-// head do not collide: each caller of EnqueueRerun sets a fresh Request, so
-// the jobs differ on a river:"unique" field and River inserts both.
-func TestReviewArgsManualRerunsDiffer(t *testing.T) {
-	first := ReviewArgs{TenantID: "t", RepositoryID: "r", Number: 1, HeadSHA: "abc", Trigger: TriggerManual, Request: "11111111-1111-1111-1111-111111111111"}
-	second := ReviewArgs{TenantID: "t", RepositoryID: "r", Number: 1, HeadSHA: "abc", Trigger: TriggerManual, Request: "22222222-2222-2222-2222-222222222222"}
-	if first.Request == second.Request {
-		t.Fatalf("two manual re-runs must set distinct Request values")
+func TestLabelChange(t *testing.T) {
+	tests := []struct {
+		trigger string
+		want    bool
+	}{
+		{trigger: "labeled", want: true},
+		{trigger: "unlabeled", want: true},
+		{trigger: "opened"},
+		{trigger: "synchronize"},
+		{trigger: "poll"},
+		{trigger: TriggerManual},
+		{trigger: ""},
 	}
-	if first == second {
-		t.Fatalf("two manual re-runs must not be identical args")
-	}
-}
-
-func TestReviewArgsKindAndInsertOpts(t *testing.T) {
-	args := ReviewArgs{}
-	if got := args.Kind(); got != "review" {
-		t.Fatalf("Kind() = %q, want %q", got, "review")
-	}
-	opts := args.InsertOpts()
-	if opts.Queue != QueueReview {
-		t.Fatalf("InsertOpts().Queue = %q, want %q", opts.Queue, QueueReview)
-	}
-	if !opts.UniqueOpts.ByArgs {
-		t.Fatal("InsertOpts().UniqueOpts.ByArgs = false, want true")
+	for _, tt := range tests {
+		t.Run(tt.trigger, func(t *testing.T) {
+			if got := LabelChange(tt.trigger); got != tt.want {
+				t.Fatalf("LabelChange(%q) = %v, want %v", tt.trigger, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -117,6 +142,18 @@ func TestIndexArgsUniqueTags(t *testing.T) {
 	want := map[string]bool{"RepositoryID": true, "Full": true}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("river:\"unique\" fields = %v, want %v", got, want)
+	}
+}
+
+// TestReviewAttempts pins that the review, follow-up and thread jobs bound
+// their tries rather than taking River's default.
+func TestReviewAttempts(t *testing.T) {
+	for kind, opts := range map[string]river.InsertOpts{
+		"review": ReviewArgs{}.InsertOpts(), "followup": FollowUpArgs{}.InsertOpts(), "thread": ThreadArgs{}.InsertOpts(),
+	} {
+		if opts.MaxAttempts != reviewAttempts {
+			t.Fatalf("%s: MaxAttempts = %d, want %d", kind, opts.MaxAttempts, reviewAttempts)
+		}
 	}
 }
 
@@ -133,26 +170,6 @@ func TestIndexArgsPriorities(t *testing.T) {
 	}
 	if priority[TriggerPush] >= priority[TriggerReindex] || priority[TriggerReindex] >= priority[TriggerOnboard] {
 		t.Fatalf("priorities = %v, want push before reindex before onboard (lower runs first)", priority)
-	}
-}
-
-func TestIndexArgsKindAndInsertOpts(t *testing.T) {
-	args := IndexArgs{}
-	if got := args.Kind(); got != "index" {
-		t.Fatalf("Kind() = %q, want %q", got, "index")
-	}
-	opts := args.InsertOpts()
-	if opts.Queue != QueueIndex {
-		t.Fatalf("InsertOpts().Queue = %q, want %q", opts.Queue, QueueIndex)
-	}
-	if !opts.UniqueOpts.ByArgs {
-		t.Fatal("InsertOpts().UniqueOpts.ByArgs = false, want true")
-	}
-}
-
-func TestTriggerManual(t *testing.T) {
-	if TriggerManual != "manual" {
-		t.Fatalf("TriggerManual = %q, want %q", TriggerManual, "manual")
 	}
 }
 

@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"slices"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/contextpack"
 	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/store"
@@ -28,11 +28,7 @@ type reviewRecord struct {
 // run and that run's agent run.
 func loadReview(ctx context.Context, tx pgx.Tx, r *http.Request, withRun bool) (reviewRecord, error) {
 	var rec reviewRecord
-	id := r.PathValue("id")
-	if uuid.Validate(id) != nil {
-		return rec, errNotFound("review")
-	}
-	v, err := store.FindReview(ctx, tx, id)
+	v, err := store.FindReview(ctx, tx, r.PathValue("id"))
 	if errors.Is(err, store.ErrNotFound) {
 		return rec, errNotFound("review")
 	}
@@ -66,7 +62,7 @@ func missing(err error) (bool, error) {
 	return false, err
 }
 
-func (s *Server) getReview(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) getReview(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	ctx := r.Context()
 	var d ReviewDetail
 	if err := s.read(ctx, t, func(tx pgx.Tx) error {
@@ -82,7 +78,7 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request, t *tenantScop
 		if err != nil {
 			return err
 		}
-		d = reviewDetail(rec, findings, usage)
+		d = reviewDetail(rec, t.account.Forge, findings, usage)
 		if rec.run == nil {
 			return nil
 		}
@@ -99,25 +95,39 @@ func (s *Server) getReview(w http.ResponseWriter, r *http.Request, t *tenantScop
 	return nil
 }
 
-func reviewDetail(rec reviewRecord, findings []store.FindingRow, usage []store.UsageRow) ReviewDetail {
+// finding is f as the API shows it, of a pull request at pullURL on forge.
+func finding(f store.FindingRow, forge configfile.Forge, pullURL string) Finding {
+	out := Finding{
+		ID: f.ID, Path: f.Path, Line: f.Line, EndLine: f.EndLine, Severity: f.Severity, Category: f.Category, Title: f.Title,
+		Explanation:  f.Explanation,
+		SuggestedFix: f.SuggestedFix, Replacement: f.Replacement, AgentPrompt: f.AgentPrompt, Fingerprint: f.Fingerprint,
+		PostedInline: f.PostedInline, ForgeCommentID: f.ForgeCommentID, CreatedAt: f.CreatedAt,
+		ReactionsUp: f.ReactionsUp, ReactionsDown: f.ReactionsDown, Rules: f.Rules,
+		Status: f.Status, DismissReason: f.DismissReason,
+	}
+	if f.ForgeCommentID != nil {
+		out.ThreadURL = commentURL(forge, pullURL, *f.ForgeCommentID, true)
+	}
+	return out
+}
+
+func reviewDetail(rec reviewRecord, forge configfile.Forge, findings []store.FindingRow, usage []store.UsageRow) ReviewDetail {
 	v := rec.review
 	d := ReviewDetail{
 		Review: ReviewInfo{
-			Review: reviewItem(v), Pull: PullRef{Repository: v.Repository, Number: v.Number, Title: v.Title},
+			Review: reviewItem(v), Pull: PullRef{Repository: v.Repository, Number: v.Number, Title: v.Title, URL: v.URL},
+			PullState: v.PullState, PullMerged: v.PullMerged,
 			ScopeReason: v.ScopeReason, MergeBaseSHA: v.MergeBaseSHA, PatchID: v.PatchID, PriorReviewID: v.PriorReviewID,
+			NewestReviewID:    v.NewestReviewID,
 			CancelRequestedAt: v.CancelRequestedAt,
 		},
 		Findings: make([]Finding, len(findings)), Usage: make([]UsageRow, len(usage)),
 	}
 	if v.Summary != nil {
-		d.Summary = &Summary{Take: v.Summary.Take, Praise: nonNil(v.Summary.Praise)}
+		d.Summary = &Summary{Headline: v.Summary.Headline, Take: v.Summary.Take, Praise: v.Summary.Praise, Diagram: v.Summary.Diagram}
 	}
 	for i, f := range findings {
-		d.Findings[i] = Finding{
-			ID: f.ID, Path: f.Path, Line: f.Line, EndLine: f.EndLine, Severity: f.Severity, Title: f.Title, Explanation: f.Explanation,
-			SuggestedFix: f.SuggestedFix, Replacement: f.Replacement, AgentPrompt: f.AgentPrompt, Fingerprint: f.Fingerprint,
-			PostedInline: f.PostedInline, ForgeCommentID: f.ForgeCommentID, CreatedAt: f.CreatedAt,
-		}
+		d.Findings[i] = finding(f, forge, v.URL)
 	}
 	for i, u := range usage {
 		d.Usage[i] = UsageRow{
@@ -142,22 +152,27 @@ func reviewDetail(rec reviewRecord, findings []store.FindingRow, usage []store.U
 func agentRun(a *store.AgentRunRow) *AgentRun {
 	out := &AgentRun{
 		StopReason: a.StopReason, Steps: a.Steps, ToolCalls: a.ToolCalls, Timeline: make([]TimelineStep, len(a.Timeline)),
-		Sources: a.Sources, Usage: usageOf(a.Usage), CostUSD: a.CostUSD, Model: a.Model, Error: a.Error, CreatedAt: a.CreatedAt,
-		Result: a.Result,
+		Sources: a.Sources, SkillsOffered: a.SkillsOffered, SkillsOpened: a.SkillsOpened,
+		CommandsOffered: a.CommandsOffered, CommandsRun: a.CommandsRun, Usage: usageOf(a.Usage),
+		CostUSD: a.CostUSD, Model: a.Model, Error: a.Error, CreatedAt: a.CreatedAt, Result: a.Result, CarriedReviewID: a.CarriedReviewID,
+		Parts: make([]AgentPart, len(a.Parts)),
 	}
 	for i, st := range a.Timeline {
 		out.Timeline[i] = TimelineStep{
-			Index: st.Index, Tools: nonNil(st.Tools), DurationMs: st.DurationMS, OutputBytes: st.OutputBytes,
+			Index: st.Index, Part: st.Part, Tools: st.Tools, DurationMs: st.DurationMS, OutputBytes: st.OutputBytes,
 			InputTokens: st.InputTokens, OutputTokens: st.OutputTokens,
 		}
+	}
+	for i, p := range a.Parts {
+		out.Parts[i] = AgentPart{Paths: p.Paths, Stop: p.Stop, Error: p.Error, Steps: p.Steps}
 	}
 	return out
 }
 
 func contextPack(m *store.ContextPackMeta) *ContextPack {
 	out := &ContextPack{
-		HeadSHA: m.HeadSHA, BaseSHA: m.BaseSHA, PatchID: m.PatchID, ChangedPaths: nonNil(m.ChangedPaths),
-		DeltaPaths: nonNil(m.DeltaPaths), PriorHeadSHA: m.PriorHeadSHA, RepoNotes: nonNil(m.RepoNotes),
+		HeadSHA: m.HeadSHA, BaseSHA: m.BaseSHA, PatchID: m.PatchID, ChangedPaths: m.ChangedPaths,
+		DeltaPaths: m.DeltaPaths, PriorHeadSHA: m.PriorHeadSHA, RepoNotes: m.RepoNotes, RuleIDs: m.RuleIDs,
 		Stages: make([]Stage, len(m.Stages)), RepoFiles: make([]RepoFile, 0, len(m.RepoFiles)), CreatedAt: m.CreatedAt,
 	}
 	for i, c := range m.Stages {
@@ -173,7 +188,7 @@ func contextPack(m *store.ContextPackMeta) *ContextPack {
 	return out
 }
 
-func (s *Server) getReviewDiff(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) getReviewDiff(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	ctx := r.Context()
 	d := ReviewDiff{}
 	if err := s.read(ctx, t, func(tx pgx.Tx) error {
@@ -181,11 +196,11 @@ func (s *Server) getReviewDiff(w http.ResponseWriter, r *http.Request, t *tenant
 		if err != nil || rec.run == nil {
 			return err
 		}
-		diff, delta, err := store.ContextPackDiffs(ctx, tx, rec.run.ID)
+		diff, delta, swept, err := store.ContextPackDiffs(ctx, tx, rec.run.ID)
 		if none, err := missing(err); none || err != nil {
 			return err
 		}
-		d = ReviewDiff{Diff: diff, DeltaDiff: delta}
+		d = ReviewDiff{Diff: diff, DeltaDiff: delta, Swept: swept}
 		return nil
 	}); err != nil {
 		return err
@@ -194,7 +209,7 @@ func (s *Server) getReviewDiff(w http.ResponseWriter, r *http.Request, t *tenant
 	return nil
 }
 
-func (s *Server) getReviewRaw(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) getReviewRaw(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	ctx := r.Context()
 	raw := ReviewRaw{RepoFiles: map[string]string{}, Stages: []ContextChunk{}}
 	if err := s.read(ctx, t, func(tx pgx.Tx) error {
@@ -233,7 +248,7 @@ func contextChunks(in []contextpack.Chunk) []ContextChunk {
 	return out
 }
 
-func (s *Server) getReviewTranscript(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) getReviewTranscript(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	ctx := r.Context()
 	var rows []transcript.StoredRow
 	if err := s.read(ctx, t, func(tx pgx.Tx) error {
@@ -254,14 +269,17 @@ func transcriptOf(c transcript.Conversation) Transcript {
 	out := Transcript{System: c.System, Tools: toolDefs(c.Tools), Turns: make([]Turn, len(c.Turns))}
 	for i, t := range c.Turns {
 		turn := Turn{
-			Index: i, ID: t.ID, Kind: t.Kind, Step: t.Step, Model: t.Model, Upstream: t.Upstream, System: t.System,
+			Index: i, ID: t.ID, Kind: t.Kind, Step: t.Step, Part: t.Part, Model: t.Model, Upstream: t.Upstream, System: t.System,
 			Reset: t.Reset, MessagesFrom: t.MessagesFrom, Messages: make([]Message, len(t.Messages)),
 			Response: Response{Text: t.Response.Text, ToolCalls: toolCalls(t.Response.ToolCalls), Stop: t.Response.Stop},
 			Usage:    usageOf(t.Usage), CostUSD: t.CostUSD, DurationMs: t.Duration.Milliseconds(), Error: t.Error,
 			Truncated: t.Truncated, CreatedAt: t.CreatedAt, RunnerRunID: t.RunnerRunID,
 		}
 		if t.Tools != nil {
-			turn.Tools = toolDefs(*t.Tools)
+			turn.Tools = new(toolDefs(*t.Tools))
+		}
+		if t.CarriedReviewID != "" {
+			turn.CarriedReviewID = &t.CarriedReviewID
 		}
 		for j, m := range t.Messages {
 			msg := Message{Role: m.Role, Text: m.Text, ToolCalls: toolCalls(m.ToolCalls), ToolResults: make([]ToolResult, len(m.ToolResults))}
@@ -293,11 +311,4 @@ func toolCalls(in []transcript.ToolCall) []ToolCall {
 
 func usageOf(u model.Usage) Usage {
 	return Usage{Input: u.Input, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Output: u.Output}
-}
-
-func nonNil[T any](s []T) []T {
-	if s == nil {
-		return []T{}
-	}
-	return s
 }

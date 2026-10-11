@@ -2,7 +2,7 @@
 
 # kritique
 
-**Repository-aware AI pull request review for GitHub, Forgejo and Gitea.**
+**Repository-aware AI pull request review for GitHub.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/perfectra1n/kritique/ci.yaml?branch=main&label=ci)](https://github.com/perfectra1n/kritique/actions/workflows/ci.yaml)
 [![Release](https://img.shields.io/github/actions/workflow/status/perfectra1n/kritique/release.yaml?branch=main&label=release)](https://github.com/perfectra1n/kritique/actions/workflows/release.yaml)
@@ -11,112 +11,132 @@
 </div>
 
 > [!WARNING]
-> kritique is not production ready. It is under active development and has no
-> release yet: configuration, the database schema and the APIs change without
-> notice, and there is no upgrade path from one commit to the next.
-
-> [!NOTE]
-> kritique is a fork of [home-operations/kritik](https://github.com/home-operations/kritik),
-> continued from the head of
-> [home-operations/kritik#84](https://github.com/home-operations/kritik/pull/84)
-> (event tasks, commit `45824e5`), after upstream took a different direction.
-> The full upstream history is kept. Everything named `kritik` was renamed to
-> `kritique`: the Go module, binary, Helm chart, `.kritique.yaml`, `KRITIQUE_*`
-> environment variables and database roles. kritique cannot be dropped in as a
-> replacement for a kritik deployment.
+> kritique is early and under active development: configuration and the APIs
+> can still change from one release to the next, so read the
+> [changelog](CHANGELOG.md) before upgrading. Schema changes arrive as
+> migrations the leader applies.
 
 kritique indexes a repository, reviews each pull request against that context,
 posts one sticky summary comment plus inline findings and a commit status, and
-answers follow-ups when the bot is @-mentioned. One deployment serves any
-number of forge accounts, and every index and review job runs in its own
-Kubernetes Job pod that holds no secrets.
+answers follow-ups when the bot is @-mentioned. A pull request from a fork is
+reviewed like any other unless the configuration excludes it. One deployment serves any
+number of forge accounts, and every index, review and follow-up job runs in
+its own Kubernetes Job pod that holds no provider key or App key.
+
+📖 **Docs: [docs/](docs/)**, plus an [upgrade guide](docs/upgrading.md) for installs of the earlier kritique layout.
 
 ## Features
 
 - **Context beyond the diff.** Whole declarations the diff touches,
   definitions of identifiers on changed lines and callers of changed
   declarations, cut by tree-sitter, plus the most similar chunks from a
-  VectorChord index of the default branch.
-- **Single pass or agentic.** A repository can ask for a bounded, read-only
-  tool loop instead of one model call, optionally with allowlisted commands
-  (`curl`, `fd`, `rg`) so it can read a dependency bump's release notes.
+  VectorChord index of the default branch, and the issues the description
+  says the pull request closes, which the review judges the change against.
+- **An agent, not one prompt.** Each review is a bounded, read-only tool loop
+  over the head commit, optionally with allowlisted commands (`gh`, `curl`,
+  `fd`, `jq`, `rg`, `yq`) so it can read a dependency bump's release notes;
+  `agent.steps: 1` makes it one call.
 - **Fixes you can apply.** A finding offers its fix as a one-click suggestion,
   with a prompt a coding agent can apply it from.
 - **Incremental reviews.** A later push is reviewed against what changed since
-  the last review, and `settle` folds a burst of force-pushes into one.
+  the last review, an earlier finding it no longer finds has its thread
+  resolved, `trigger.settle` folds a burst of force-pushes into one, and
+  `trigger.limit` pauses a long-lived pull request's automatic reviews,
+  as `@<bot> pause` does on request.
 - **Follow-ups.** Someone with write access can @-mention the bot and get an
-  answer in the thread.
-- **Event tasks.** A repository, or the operator, declares tasks that run a
-  prompt when a forge event fires, such as triaging a new issue, labelling a
-  pull request by area or summarizing a release. The model answers with the
-  fields and actions the task declares; the worker checks each label,
-  comment, assignee or state change against the task and the operator's
-  bounds before applying it. See the [recipes](docs/repository-config.md#task-recipes).
-- **Providers and limits.** OpenRouter, OpenAI and Anthropic adapters, with
-  per-tenant concurrency, daily review and monthly token caps. The provider
-  key never enters a runner pod: the agent reaches its model through the
-  worker's gateway.
+  answer in the thread, from an agent with a review's tools that reads the
+  code and looks things up before it answers. Or reply `@<bot> dismiss <reason>` in a finding's
+  thread to have it resolved and never raised again on that pull request;
+  resolving the thread on the forge does the same, unless a push has
+  changed the lines it was made on, which counts as fixed instead.
+- **Reactions.** The pull request carries the bot's 👀 while a review
+  runs and its 👍 once one is posted, and a mention the bot answers the
+  same, so a list of pull requests shows which have been reviewed.
+- **A confidence score, opt-in.** A second model scores each reviewed pull
+  request from 0 to 5; a repository that gates on it has the commit status
+  fail under its threshold, so it can be a required check.
+- **Approvals, opt-in.** A repository or the instance can have a review that
+  finds nothing blocking or important approve the pull request, and a later
+  review that does withdraw it. With a confidence score, a pull request is
+  approved when its score and the risk of its change allow it.
+- **Flow diagrams, opt-in.** The summary can draw the flow a change adds or
+  alters as a Mermaid diagram, so a reviewer sees the path before reading
+  the code.
+- **Providers and limits.** OpenRouter, OpenAI, Anthropic and OpenCode adapters, with
+  per-account concurrency, daily review and monthly token caps. The provider
+  key never enters a runner pod: the agent reaches its model through
+  kritique's gateway.
 - **Repository overrides.** A `.kritique.yaml`, read from the merge-base, can
-  narrow the operator's settings and bring its own instructions and comment
-  templates.
-- **Dashboard.** Sign-in, dashboard-managed tenants, live review state, full
-  model transcripts and an audit log.
-
-GitLab is planned: its webhooks parse, but there is no GitLab client yet,
-so the configuration refuses a `gitlab` installation until there is.
+  narrow the admin's settings and bring its own rules, context files and
+  comment templates.
+- **Skills.** A review is offered the [Agent Skills](https://agentskills.io)
+  a repository keeps under `.agents/skills` and `.claude/skills`, by name and
+  description, and reads one when it fits the pull request; they are read
+  from the merge-base and grant no tool or command.
+- **Event tasks, opt-in.** An admin, or a repository, declares tasks that
+  run a prompt when a forge event fires, such as triaging a new issue,
+  labelling a pull request by area or summarizing a release. The model
+  answers with the fields and actions the task declares, and kritique checks
+  each label, comment, assignee or state change before applying it. See
+  [event tasks](docs/tasks.md).
+- **Configuration in git.** One YAML file holds the whole configuration,
+  read at startup, and a change rolls the pods; secrets stay in Secrets,
+  which reach kritique as environment variables.
+- **Dashboard.** Sign-in, live review state, full model transcripts, the
+  running configuration, repository on/off and an audit log.
 
 ## Installing
 
 kritique ships as an OCI Helm chart, `oci://ghcr.io/perfectra1n/charts/kritique`.
-The chart's [README](charts/kritique/README.md) lists every value and shows the
-CloudNativePG setup for the three database roles. In short: a Postgres with
-[VectorChord](https://github.com/tensorchord/VectorChord) (and the pgvector it
-builds on) loaded, with an owner, an application and a runner role, the
-configuration file under `config.file`, the secrets it references under
-`secretMounts`, and optionally an embedder under `embedding` for the index.
-`roles.all` runs the single-process topology; `roles.ingest` and
-`roles.worker` split it.
+The chart's [README](charts/kritique/README.md) lists every value, and
+[Postgres with CloudNativePG](docs/database.md)
+sets up the database and its three roles. In short, it needs:
 
-Security notes:
+- a Postgres with [VectorChord](https://github.com/tensorchord/VectorChord)
+  (and the pgvector it builds on) loaded, with an owner, an application
+  and a runner role;
+- the one public URL under `config.webUrl`, which the dashboard and
+  GitHub's webhooks share;
+- a way to sign in under `auth`;
+- the configuration file under `configFile`.
 
-- Install kritique into a namespace of its own: runner Jobs run in the release
-  namespace, and the worker's Role can create, patch and delete every Secret
-  there, though it can never get or list one.
-- Keep the egress gateway on (the chart's default) with a NetworkPolicy:
-  runner pods then reach the outside only through the worker's forward proxy,
-  which allows destinations by hostname (the forges and the file's
-  `egress.allowHosts`), and never hold the credentials `egress.credentials`
-  lets the gateway add. Agentic reviews need it, since their model calls go
-  through it too.
-- Run runner Jobs under a sandboxed RuntimeClass such as gVisor
-  (`runner.runtimeClassName`) where the cluster has one, since the pod parses
-  untrusted content.
-- Give a Forgejo or Gitea installation a read-only `gitToken` beside its
-  `token`: runners fetch with `gitToken` when it is set, and otherwise with
-  `token`, which can write to the forge. Agentic tasks never fall back to
-  `token`: without a `gitToken` they are skipped. On GitHub, an agentic
-  task's runner gets an installation token minted for its repository with
-  `contents: read` alone.
+It runs as one Deployment of `kritique serve`, one replica by default,
+which creates a runner Job for each review, follow-up and index run; the
+chart README's Topology section covers when to run two.
 
-Tasks are off until `allow.tasks.enabled` turns them on. They write to
-issues as well as pull requests, so a GitHub App needs the **Issues** and
-**Pull requests** permissions at read and write, and subscriptions to the
-**Issues** and **Issue comment** events (plus **Pull request** and any other
-event a task triggers on, including a `raw` trigger's). A Forgejo or Gitea
-`token` needs write access to issues and pull requests, and its webhook the
-same events.
+The [setup guide](docs/setup.md) takes a
+fresh instance through its GitHub App, model key and embedder to its first
+review; the dashboard's setup checklist shows what is still missing.
+
+### Security notes
+
+- **Install kritique into a namespace of its own:** kritique's Role can
+  create, patch and delete every Secret in the release namespace.
+- **Turn on the chart's NetworkPolicy:** runner pods then reach the
+  outside only through kritique's egress gateway.
+- **Run runner Jobs under a sandboxed RuntimeClass** such as gVisor, since
+  the pod parses untrusted content.
+
+[Security](docs/security.md) covers what a
+runner holds, the gateway and the sandbox.
 
 ## Documentation
 
-- [Chart values](charts/kritique/README.md)
-- [`.kritique.yaml` reference](docs/repository-config.md)
-- [Dashboard](docs/dashboard.md): sign-in, roles, the sealing key and
-  transcript retention
-- [Metrics](docs/metrics.md)
-- [Development](docs/development.md): building, testing, evaluation and the
-  cluster loop
-- [Architecture decision records](docs/adr/), starting with
-  [ADR-0002](docs/adr/0002-kritique-pr-review-service.md)
+| Page                                                    | What it covers                                                                              |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [Setup](docs/setup.md)                                  | from install to the first review: the GitHub App, its permissions and its webhook           |
+| [Configuration](docs/configuration.md)                  | the configuration file: sign-in, GitHub Apps, repository settings, accounts and egress      |
+| [Models](docs/models.md)                                | providers and their keys, retries, fallback, the embedder, local models and OpenCode        |
+| [`.kritique.yaml` reference](docs/repository-config.md) | what a repository's own file can change                                                     |
+| [Event tasks](docs/tasks.md)                            | tasks that run a prompt when a forge event fires, their bounds and tested recipes           |
+| [Security](docs/security.md)                            | hardening an install, what a runner holds, the egress gateway, runner tools and the sandbox |
+| [Chart values](charts/kritique/README.md)               | every value of the Helm chart                                                               |
+| [Reviews](docs/reviews.md)                              | when a review runs, what it posts, and the commands that steer it                           |
+| [Confidence and approvals](docs/confidence.md)          | the confidence score, the commit status it can gate, risk, and when kritique approves       |
+| [Dashboard](docs/dashboard.md)                          | the setup checklist, the Configuration page, repository on/off and actions                  |
+| [Metrics](docs/metrics.md)                              | what kritique exports to Prometheus, and the chart's alerts and Grafana dashboard           |
+| [Development](docs/development.md)                      | building, testing, evaluation and the cluster loop                                          |
+| [Upgrading](docs/upgrading.md)                          | moving an install of the earlier kritique layout to this one                                |
 
 ## License
 

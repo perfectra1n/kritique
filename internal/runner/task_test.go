@@ -17,7 +17,6 @@ import (
 func taskSpec() Spec {
 	return Spec{
 		Version: SpecVersion, Kind: KindTask, RunID: "run-1", CloneURL: "https://forge.example.com/acme/widgets.git", Head: shaA,
-		Mode:  ModeAgentic,
 		Agent: &AgentLimits{MaxSteps: 5, MaxToolOutputBytes: 16 << 10, MaxTokens: 100000},
 		Model: &ModelEndpoint{GatewayURL: "http://kritique-gateway:8082", Model: "review"},
 		Task: &TaskPrompt{
@@ -39,10 +38,10 @@ func TestTaskAgent(t *testing.T) {
 	}}
 	p := taskSpec()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	res, timeline, sources, notes := taskAgent(t.Context(), st, p, head, logger)
-	if res.Stop != agent.StopSubmitted || string(res.Submitted) != answer || len(timeline) != 2 || len(sources) != 0 ||
+	res, timeline, notes, run := taskAgent(t.Context(), st, p, head, agent.NewTree(head, nil), nil, logger)
+	if res.Stop != agent.StopSubmitted || string(res.Submitted) != answer || len(timeline) != 2 || run != nil ||
 		!slices.Equal(notes, []string{"context files docs/*.md kept 1 of 2 matches"}) {
-		t.Fatalf("result = %+v, timeline %d, sources %q, notes %q", res, len(timeline), sources, notes)
+		t.Fatalf("result = %+v, timeline %d, run %v, notes %q", res, len(timeline), run, notes)
 	}
 	req := st.reqs[0]
 	names := make([]string, 0, len(req.Tools))
@@ -143,8 +142,11 @@ func TestTaskSpecValidate(t *testing.T) {
 			s.Task.Run = []string{"rg"}
 			s.Task.Commands = []TaskCommand{{Name: "owners", Argv: []string{"cat", "CODEOWNERS"}}}
 		}},
-		{name: "no task", edit: func(s *Spec) { s.Task = nil }, wantErr: "needs agentic mode and a task"},
-		{name: "single mode", edit: func(s *Spec) { s.Mode = ModeSingle }, wantErr: "needs agentic mode and a task"},
+		{name: "no task", edit: func(s *Spec) { s.Task = nil }, wantErr: "needs agent limits and a task prompt"},
+		{name: "no gateway", edit: func(s *Spec) { s.Model = nil }, wantErr: "gateway"},
+		{name: "commands without a timeout", edit: func(s *Spec) {
+			s.Agent.Commands = []string{"rg"}
+		}, wantErr: "command timeout"},
 		{name: "no schema", edit: func(s *Spec) { s.Task.Schema = nil }, wantErr: "answer schema"},
 		{name: "a tool outside the read-only ones", edit: func(s *Spec) { s.Task.Tools = []string{"run"} }, wantErr: "task tool"},
 		{name: "a run command the agent may not run", edit: func(s *Spec) { s.Task.Run = []string{"curl"} }, wantErr: "run command"},

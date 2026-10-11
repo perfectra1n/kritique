@@ -5,105 +5,110 @@ import (
 	"strings"
 )
 
-// Scope is where the operator writes a repository setting.
+// Scope is where an admin writes a repository setting.
 type Scope string
 
-// Operator scopes, broadest first.
+// Admin scopes, broadest first.
 const (
 	ScopeDefaults   Scope = "defaults"
-	ScopeTenant     Scope = "tenant"
+	ScopeAccount    Scope = "account"
 	ScopeRepository Scope = "repository"
 )
 
-// RepoRule is what a repository's own .kritique.yaml may do with a setting.
-type RepoRule string
-
-// Repository rules. The empty rule is none: the file cannot name the
-// setting at all.
-const (
-	// RepoOwn is a setting only the file has.
-	RepoOwn RepoRule = "own"
-	// RepoTurnOff may only turn the setting off.
-	RepoTurnOff RepoRule = "turnOff"
-	// RepoTurnOn may only turn the setting on.
-	RepoTurnOn RepoRule = "turnOn"
-	// RepoAnd is ANDed with the operator's.
-	RepoAnd RepoRule = "and"
-	// RepoUnion is added to the operator's.
-	RepoUnion RepoRule = "union"
-	// RepoAppend follows the operator's.
-	RepoAppend RepoRule = "append"
-	// RepoChoose picks one value the operator's allow bound lists.
-	RepoChoose RepoRule = "choose"
-	// RepoSubset picks some of the values the operator's allow bound lists.
-	RepoSubset RepoRule = "subset"
-	// RepoAtMost is at most the operator's allow bound.
-	RepoAtMost RepoRule = "atMost"
-	// RepoReplace replaces the operator's; it grants nothing.
-	RepoReplace RepoRule = "replace"
-)
-
-// Policy is one row of the table that says who may write a repository
-// setting (ADR-0010 §2.4, §2.7): the scopes the operator writes it at,
-// whether a tenant admin may write it too on a dashboard tenant, and what
-// the repository's .kritique.yaml may do with it. The dashboard's write API
-// enforces it and serves it for the UI to render from, and the keys the
-// repository file takes follow it. Instance settings are the file's alone
-// and not in it.
+// Policy names one repository setting and the scopes an admin writes it at.
+// Sources reports where each setting it lists comes from. What the
+// repository's own .kritique.yaml may do with a setting is repoconfig.Merge's
+// to say. Instance-wide settings are not in it.
 type Policy struct {
 	// Key is the setting as the configuration spells it; a dotted key is
 	// nested.
-	Key         string   `json:"key"`
-	Scopes      []Scope  `json:"scopes"`
-	TenantAdmin bool     `json:"tenantAdmin"`
-	Repository  RepoRule `json:"repository,omitempty"`
+	Key    string
+	Scopes []Scope
 }
 
 var (
-	everyScope   = []Scope{ScopeDefaults, ScopeTenant, ScopeRepository}
-	tenantScopes = []Scope{ScopeDefaults, ScopeTenant}
+	everyScope    = []Scope{ScopeDefaults, ScopeAccount, ScopeRepository}
+	accountScopes = []Scope{ScopeDefaults, ScopeAccount}
 )
 
-// The agent limits' keys.
+// The keys validation names in its errors.
 const (
-	keyMaxSteps           = "agent.maxSteps"
-	keyMaxToolOutputBytes = "agent.maxToolOutputBytes"
-	keyMaxTokens          = "agent.maxTokens"
-	keyTimeout            = "agent.timeout"
+	keySteps  = "agent.steps"
+	keyOutput = "agent.output"
+	keyParts  = "agent.parts"
 )
 
-// Policies is the table. What a review costs, and how much of an untrusted
-// pull request it exposes the instance to, is the operator's alone.
+// The keys the environment sets as well (instance.go).
+const (
+	keyModel          = "review.model"
+	keyFallback       = "review.fallback"
+	keyEffort         = "review.effort"
+	keyApprove        = "review.approve"
+	keyFixes          = "review.fixes"
+	keyIncremental    = "review.incremental"
+	keyDiagram        = "review.diagram"
+	keyCost           = "review.cost"
+	keyScorer         = "confidence.model"
+	keyScorerFallback = "confidence.fallback"
+	keyScorerEffort   = "confidence.effort"
+	keyThreshold      = "confidence.threshold"
+	keyGate           = "confidence.gate"
+	keyRisk           = "confidence.risk"
+	keySettle         = "trigger.settle"
+	keyLimit          = "trigger.limit"
+)
+
+// Policies is the table.
 var Policies = []Policy{
-	{Key: "enabled", Scopes: []Scope{ScopeRepository}, TenantAdmin: true, Repository: RepoTurnOff},
-	{Key: "filter", Scopes: everyScope, TenantAdmin: true, Repository: RepoAnd},
-	{Key: "ignore", Scopes: everyScope, TenantAdmin: true, Repository: RepoUnion},
-	{Key: "skip.onlyPaths", Scopes: []Scope{}, Repository: RepoOwn},
-	{Key: "forks", Scopes: everyScope},
-	{Key: "models.review", Scopes: everyScope, Repository: RepoChoose},
-	{Key: "models.fallback", Scopes: everyScope, Repository: RepoChoose},
-	{Key: "mode", Scopes: everyScope, Repository: RepoChoose},
-	{Key: keyMaxSteps, Scopes: everyScope, Repository: RepoAtMost},
-	{Key: keyMaxToolOutputBytes, Scopes: everyScope, Repository: RepoAtMost},
-	{Key: keyMaxTokens, Scopes: everyScope, Repository: RepoAtMost},
-	{Key: keyTimeout, Scopes: everyScope, Repository: RepoAtMost},
-	{Key: "agent.commands", Scopes: everyScope, Repository: RepoSubset},
+	{Key: "enabled", Scopes: everyScope},
+	{Key: keyModel, Scopes: everyScope},
+	{Key: keyFallback, Scopes: everyScope},
+	{Key: keyEffort, Scopes: everyScope},
+	{Key: keyFixes, Scopes: everyScope},
+	{Key: keyApprove, Scopes: everyScope},
+	{Key: keyIncremental, Scopes: everyScope},
+	{Key: keyDiagram, Scopes: everyScope},
+	{Key: keyCost, Scopes: everyScope},
+	{Key: keyScorer, Scopes: everyScope},
+	{Key: keyScorerFallback, Scopes: everyScope},
+	{Key: keyScorerEffort, Scopes: everyScope},
+	{Key: keyThreshold, Scopes: everyScope},
+	{Key: keyGate, Scopes: everyScope},
+	{Key: keyRisk, Scopes: everyScope},
+	{Key: "confidence.instructions", Scopes: everyScope},
+	{Key: "trigger.include", Scopes: everyScope},
+	{Key: "trigger.exclude", Scopes: everyScope},
+	{Key: keySettle, Scopes: everyScope},
+	{Key: keyLimit, Scopes: everyScope},
+	{Key: "comments", Scopes: everyScope},
+	{Key: "rules", Scopes: everyScope},
+	{Key: "context", Scopes: everyScope},
+	{Key: "ignore", Scopes: everyScope},
+	{Key: "skills.paths", Scopes: everyScope},
+	{Key: "skills.scope", Scopes: everyScope},
+	{Key: keySteps, Scopes: everyScope},
+	{Key: keyOutput, Scopes: everyScope},
+	{Key: "agent.tokens", Scopes: everyScope},
+	{Key: "agent.prompt", Scopes: everyScope},
+	{Key: keyParts, Scopes: everyScope},
+	{Key: "agent.timeout", Scopes: everyScope},
+	{Key: "agent.commands", Scopes: everyScope},
 	{Key: "agent.commandTimeout", Scopes: everyScope},
-	{Key: "settle", Scopes: everyScope, TenantAdmin: true, Repository: RepoAtMost},
-	{Key: "incremental.maxDeltaFiles", Scopes: everyScope},
-	{Key: "review.instructions", Scopes: everyScope, TenantAdmin: true, Repository: RepoAppend},
-	{Key: "review.requireSuggestedFix", Scopes: everyScope, TenantAdmin: true, Repository: RepoTurnOn},
-	{Key: "review.templates", Scopes: everyScope, TenantAdmin: true, Repository: RepoReplace},
-	{Key: "review.context", Scopes: everyScope, TenantAdmin: true, Repository: RepoAppend},
-	{Key: "review.minSeverity", Scopes: everyScope, TenantAdmin: true, Repository: RepoReplace},
-	{Key: "review.inlineComments", Scopes: everyScope, TenantAdmin: true, Repository: RepoReplace},
-	{Key: "tasks", Scopes: everyScope, TenantAdmin: true, Repository: RepoAppend},
-	{Key: "allow", Scopes: everyScope},
-	{Key: "limits", Scopes: tenantScopes},
-	{Key: "runner", Scopes: tenantScopes},
+	{Key: "tasks", Scopes: everyScope},
+	{Key: "taskBounds.enabled", Scopes: everyScope},
+	{Key: "taskBounds.events", Scopes: everyScope},
+	{Key: "taskBounds.actions", Scopes: everyScope},
+	{Key: "taskBounds.context", Scopes: everyScope},
+	{Key: "taskBounds.tools", Scopes: everyScope},
+	{Key: "taskBounds.systemPrompt", Scopes: everyScope},
+	{Key: "taskBounds.repository", Scopes: everyScope},
+	{Key: "taskBounds.maxTasks", Scopes: everyScope},
+	{Key: "taskBounds.maxRunsPerSubjectPerHour", Scopes: everyScope},
+	{Key: "taskBounds.maxFields", Scopes: everyScope},
+	{Key: "limits", Scopes: accountScopes},
 }
 
-// SpecValue is the value spec, one scope's settings (a *Defaults, *Tenant or
+// SpecValue is the value spec, one scope's settings (a *Defaults, *Account or
 // *Repository), writes for key, found by the names the configuration
 // spells, and whether the scope has the key at all. A nested key under an
 // unset block is that block's zero value.

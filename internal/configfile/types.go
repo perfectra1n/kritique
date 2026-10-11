@@ -1,22 +1,29 @@
-// Package configfile loads the declarative configuration file: the model
-// providers, defaults, tenants, installations and repositories kritique
-// manages. Process configuration (addresses, database, log level) is
-// environment variables and lives in internal/config.
+// Package configfile is kritique's configuration: the configuration file with
+// its KRITIQUE_* environment overlay, and the settings for how kritique runs
+// that come from the environment alone. Process configuration (addresses,
+// database, log level) is environment variables too and lives in
+// internal/config.
 //
-// The file is the operator's source of truth and is applied atomically: the
-// whole document is decoded with unknown keys rejected, every secret
-// reference resolved, every filter compiled and smoke-tested, and every
-// invariant checked before any of it is returned. A bad file is an error and
-// the caller keeps the last good state.
+// The file is loaded whole: the document is decoded with unknown keys
+// rejected, every secret reference resolved, every filter compiled and
+// smoke-tested, and every invariant checked before any of it is returned. A
+// bad document is an error, and startup fails on it.
 package configfile
 
 import (
+	"cmp"
+	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
 
+	"go.yaml.in/yaml/v4"
+
+	"github.com/perfectra1n/kritique/internal/agent"
+	"github.com/perfectra1n/kritique/internal/egress"
 	"github.com/perfectra1n/kritique/internal/model"
-	"github.com/perfectra1n/kritique/internal/prfilter"
+	"github.com/perfectra1n/kritique/internal/review"
 	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
@@ -29,36 +36,61 @@ const (
 	ProviderOpenRouter = model.ProviderOpenRouter
 	ProviderOpenAI     = model.ProviderOpenAI
 	ProviderAnthropic  = model.ProviderAnthropic
+	ProviderOpenCode   = model.ProviderOpenCode
 )
 
-// Forge identifies which forge an installation talks to.
+// Forge identifies which forge a connection talks to.
 type Forge string
 
-// Forges kritique supports.
+// Forges a connection talks to. ForgeGitHub is github.com, through a
+// GitHub App. ForgeForgejo and ForgeGitea are a self-hosted instance at the
+// connection's URL, through a token: Gitea speaks the REST API, webhooks
+// and OAuth Forgejo does, so the two share one client, yet stay apart so
+// that an account is keyed by the forge it lives on. Each value is stored
+// as an account's and a connection's forge, and is part of an account's
+// id, so a value must never change.
 const (
 	ForgeGitHub  Forge = "github"
-	ForgeGitLab  Forge = "gitlab"
 	ForgeForgejo Forge = "forgejo"
-	// ForgeGitea is a Gitea installation. Gitea speaks the same REST API,
-	// webhooks and OAuth as Forgejo, so it is routed to the same client and
-	// provider code rather than getting its own (ADR-0003 amendment).
-	ForgeGitea Forge = "gitea"
+	ForgeGitea   Forge = "gitea"
 )
 
-// SecretRef points at where a secret value lives. Exactly one of Env, File
-// or Sealed is set. Values are resolved at load and never written back to
-// disk or the database. Sealed is ciphertext only a dashboard-managed tenant
-// may carry; Env and File would read the server's own environment and
-// filesystem, so only the operator's file may use them.
+// SecretRef names the environment variable a secret value lives in. Values are resolved at load and never written back to
+// disk or the database.
 type SecretRef struct {
-	Env    string `yaml:"env,omitempty"`
-	File   string `yaml:"file,omitempty"`
-	Sealed string `yaml:"sealed,omitempty"`
+	Env string `yaml:"env,omitempty"`
 }
 
-// Opener decrypts a sealed secret value.
-type Opener interface {
-	Open(sealed string) ([]byte, error)
+// ValueOrRef is a setting given inline, or by a reference to where it
+// lives like a secret's, for a value that is not secret but is often kept
+// next to one.
+type ValueOrRef struct {
+	Value string
+	Ref   SecretRef
+}
+
+// UnmarshalYAML takes a scalar as the value, or a mapping as the reference.
+func (v *ValueOrRef) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		return n.Decode(&v.Value)
+	}
+	// Node.Decode drops the strictness Parse asked for, so unknown keys are
+	// refused here.
+	for i := 0; n.Kind == yaml.MappingNode && i < len(n.Content); i += 2 {
+		if k := n.Content[i]; k.Value != "env" {
+			return fmt.Errorf("line %d: field %s not found in type configfile.SecretRef", k.Line, k.Value)
+		}
+	}
+	return n.Decode(&v.Ref)
+}
+
+// resolve is the value, read from its reference when it has one.
+func (v ValueOrRef) resolve(s *secrets) (string, error) {
+	if v.Ref.empty() {
+		return v.Value, nil
+	}
+	secret, err := s.read(v.Ref)
+	return secret.Value(), err
 }
 
 // Secret is a resolved secret value. Its String method redacts, so a Secret
@@ -92,15 +124,28 @@ type Provider struct {
 	// does not report a cost for; without it such calls cost zero while
 	// their tokens still count against limits.
 	Pricing model.Pricing `yaml:"pricing,omitempty"`
+	// Retries is how many more times a review's or a follow-up's step, the
+	// scorer's call or a split review's summary call on one of the
+	// provider's models is tried after it failed in a way another attempt
+	// may not (a 5xx, a 429, a timeout, a cut connection), at most
+	// MaxProviderRetries; zero tries once. A routing proxy that picks a
+	// model per request is where it earns its keep. The embedder does not
+	// use it.
+	Retries int `yaml:"retries,omitempty"`
 
 	apiKey Secret
 }
+
+// MaxProviderRetries bounds Provider.Retries: with backoff, five more
+// attempts span about a minute, which a runner's deadline absorbs.
+const MaxProviderRetries = 5
 
 // APIKeyValue returns the resolved API key.
 func (p Provider) APIKeyValue() Secret { return p.apiKey }
 
 // ModelRef names a model as "<provider>/<model>", where provider is a key of
-// the file's providers map and model is whatever the provider accepts.
+// the account's or the instance's providers map and model is whatever the
+// provider accepts.
 type ModelRef string
 
 // Provider returns the provider half of the reference, or "" when the
@@ -124,32 +169,29 @@ func (m ModelRef) Model() string {
 }
 
 // Models are the resolved completion roles; a role empty after resolution
-// means the feature is off. The embedding model is not here: it is
-// deployment-wide and lives in the process environment, because changing it
-// reindexes every repository.
+// means the feature is off. The embedding model is not here: it is the
+// instance's Embedding, since changing it reindexes every repository. The
+// resolved types carry json tags because the dashboard's API serves them
+// as they are.
 type Models struct {
-	Review   ModelRef
-	Fallback ModelRef
+	Review   ModelRef `json:"review"`
+	Fallback ModelRef `json:"fallback"`
+	// Effort is how hard the review model, and the fallback that takes its
+	// step, reasons; empty leaves it to the provider.
+	Effort model.Effort `json:"effort"`
 }
 
-// ModelsSpec sets the completion roles at one scope. A role written here,
-// even empty, replaces the broader scope's; one left out inherits it.
-type ModelsSpec struct {
-	Review   *ModelRef `yaml:"review,omitempty"`
-	Fallback *ModelRef `yaml:"fallback,omitempty"`
-}
-
-// Limits bound what a tenant may consume, as resolved. A cap of zero is no
+// Limits bound what an account may consume, as resolved. A cap of zero is no
 // cap; Concurrency is never zero once resolved.
 type Limits struct {
-	// Concurrency is the number of advisory-lock slots per tenant and model:
+	// Concurrency is the number of advisory-lock slots per account and model:
 	// how many model calls may run at once.
-	Concurrency int
-	// ReviewsPerDay caps review passes per tenant per calendar day.
-	ReviewsPerDay int
-	// TokensPerMonth caps input plus output tokens per tenant per calendar
+	Concurrency int `json:"concurrency"`
+	// ReviewsPerDay caps review passes per account per calendar day.
+	ReviewsPerDay int `json:"reviewsPerDay"`
+	// TokensPerMonth caps input plus output tokens per account per calendar
 	// month.
-	TokensPerMonth int64
+	TokensPerMonth int64 `json:"tokensPerMonth"`
 }
 
 // LimitsSpec sets limits at one scope. A limit written here replaces the
@@ -162,114 +204,152 @@ type LimitsSpec struct {
 	TokensPerMonth *int64 `yaml:"tokensPerMonth,omitempty"`
 }
 
-// DefaultConcurrency applies when no level of the file sets one.
+// DefaultConcurrency applies when no level of the configuration sets one.
 const DefaultConcurrency = 2
 
-// Runner overrides for the Kubernetes Job a tenant's index and review pods
-// run as. Kept as loose maps for resources because the values are copied
-// verbatim into the pod spec and the Kubernetes types are not a dependency
-// of this package.
-type Runner struct {
-	Resources             map[string]any `yaml:"resources,omitempty"`
-	ActiveDeadlineSeconds int64          `yaml:"activeDeadlineSeconds,omitempty"`
-}
-
-// DefaultRunnerDeadline bounds a runner Job when neither the tenant nor
-// defaults.runner sets activeDeadlineSeconds.
+// DefaultRunnerDeadline bounds a runner Job when KRITIQUE_RUNNER_DEADLINE
+// sets none.
 const DefaultRunnerDeadline = 15 * time.Minute
 
-// Defaults apply to every tenant unless overridden.
+// Defaults are the settings the file writes at its root: they apply to
+// every repository unless an entry overrides them, and Limits to every
+// account unless its entry sets its own.
 type Defaults struct {
-	// Runner is every tenant's runner block unless the tenant sets its own
-	// deadline or resources.
-	Runner    *Runner `yaml:"runner,omitempty"`
 	Overrides `yaml:",inline"`
 	Limits    LimitsSpec `yaml:"limits,omitempty"`
 }
 
-// Overrides are the repository settings every operator scope may set: the
-// defaults, a tenant and a repository entry. A field a narrower scope
+// Overrides are the repository settings every admin scope may set: the
+// file's own, an account and a repository entry. A field a narrower scope
 // writes replaces the broader scope's, even when it is empty or zero; a
-// field it leaves out inherits (ADR-0010 §2.4). Ignore globs are unioned
-// instead.
+// field it leaves out inherits. Ignore globs are unioned instead, and rules
+// add up by id. The keys are the ones a .kritique.yaml takes too, at the
+// same level, with the admin's own beside them.
 type Overrides struct {
-	Models ModelsSpec `yaml:"models,omitempty"`
-	Filter *string    `yaml:"filter,omitempty"`
-	Forks  *bool      `yaml:"forks,omitempty"`
-	Ignore []string   `yaml:"ignore,omitempty"`
-	// Settle delays a review job for a new head, so a burst of pushes
-	// collapses onto the last one before anything is spent.
-	Settle      *time.Duration `yaml:"settle,omitempty"`
-	Mode        ReviewMode     `yaml:"mode,omitempty"`
-	Agent       Agent          `yaml:"agent,omitempty"`
-	Incremental Incremental    `yaml:"incremental,omitempty"`
-	Review      ReviewSpec     `yaml:"review,omitempty"`
-	// Tasks are the operator's own tasks. They merge by name: a task a
-	// narrower scope writes replaces the broader scope's of that name, and
-	// one with enabled false switches it off.
+	// Enabled is where a repository starts, on or off, until an admin turns
+	// it on or off in the dashboard. A repository entry may not set it.
+	Enabled    *bool          `yaml:"enabled,omitempty"`
+	Review     ReviewSpec     `yaml:"review,omitempty"`
+	Confidence ConfidenceSpec `yaml:"confidence,omitempty"`
+	Trigger    TriggerSpec    `yaml:"trigger,omitempty"`
+	Comments   CommentsSpec   `yaml:"comments,omitempty"`
+	Agent      Agent          `yaml:"agent,omitempty"`
+	// Rules add to the broader scope's, one with an id already listed
+	// replacing that rule where it stands.
+	Rules   []Rule        `yaml:"rules,omitempty"`
+	Context []ContextFile `yaml:"context,omitempty"`
+	Skills  SkillsSpec    `yaml:"skills,omitempty"`
+	// Ignore are globs of the paths kritique leaves out of a review's
+	// context and of the index; a pull request that changes nothing else
+	// is skipped. They add to the broader scope's.
+	Ignore []string `yaml:"ignore,omitempty"`
+	// Tasks are the operator's own event tasks. They merge by name: a task
+	// a narrower scope writes replaces the broader scope's of that name,
+	// and one with enabled false switches it off.
 	Tasks []tasks.Task `yaml:"tasks,omitempty"`
-	// Allow bounds what the repository's own .kritique.yaml may choose.
-	Allow Allow `yaml:"allow,omitempty"`
-
-	filter *prfilter.Program
+	// TaskBounds bound tasks, the repository's and the operator's own.
+	TaskBounds TaskBounds `yaml:"taskBounds,omitempty"`
 }
 
-// Allow bounds what a repository's .kritique.yaml may choose (ADR-0010
-// §2.5), bound by bound: one written at a narrower scope replaces the
-// broader scope's, even when empty. A bound written nowhere leaves a
-// repository only the operator's own mode, model and commands, and limits
-// and a settle time at or below the operator's own.
-type Allow struct {
-	Modes    []ReviewMode `yaml:"modes,omitempty"`
-	Models   []ModelRef   `yaml:"models,omitempty"`
-	Commands []string     `yaml:"commands,omitempty"`
-	// Agent caps each agent limit a repository may set.
-	Agent  AllowAgent     `yaml:"agent,omitempty"`
-	Settle *time.Duration `yaml:"settle,omitempty"`
-	// Tasks bound tasks, the repository's and the operator's own.
-	Tasks *TaskBounds `yaml:"tasks,omitempty"`
+// ReviewSpec sets how a review is done at one scope: its models, a role
+// written here, even empty, replacing the broader scope's, how hard they
+// reason, whether a finding must carry a suggested fix, whether it
+// approves, how many files may change since the last review before a
+// re-review covers the whole pull request again, whether the summary
+// draws the change's flow, and whether its footer states the pull
+// request's spend.
+type ReviewSpec struct {
+	Model    *ModelRef `yaml:"model,omitempty"`
+	Fallback *ModelRef `yaml:"fallback,omitempty"`
+	// Effort is one of model.Efforts; written empty, it leaves the effort
+	// to the provider.
+	Effort      *model.Effort `yaml:"effort,omitempty"`
+	Fixes       *bool         `yaml:"fixes,omitempty"`
+	Approve     *bool         `yaml:"approve,omitempty"`
+	Incremental *int          `yaml:"incremental,omitempty"`
+	Diagram     *bool         `yaml:"diagram,omitempty"`
+	Cost        *bool         `yaml:"cost,omitempty"`
 }
 
-// AllowAgent caps the agent limits a repository may set.
-type AllowAgent struct {
-	MaxSteps           *int           `yaml:"maxSteps,omitempty"`
-	MaxToolOutputBytes *int           `yaml:"maxToolOutputBytes,omitempty"`
-	MaxTokens          *int64         `yaml:"maxTokens,omitempty"`
-	Timeout            *time.Duration `yaml:"timeout,omitempty"`
+// ConfidenceSpec sets how a review is judged at one scope: the model that
+// scores the reviewed pull request and the one that takes its call when it
+// fails, a model written here, even empty, replacing the broader scope's,
+// how hard they reason, the score the pull request must reach, whether
+// the commit status fails under it, the highest risk a change may carry
+// and still be approved, and the admin's guidance to the scorer on rating
+// risk.
+type ConfidenceSpec struct {
+	Model        *ModelRef     `yaml:"model,omitempty"`
+	Fallback     *ModelRef     `yaml:"fallback,omitempty"`
+	Effort       *model.Effort `yaml:"effort,omitempty"`
+	Threshold    *int          `yaml:"threshold,omitempty"`
+	Gate         *bool         `yaml:"gate,omitempty"`
+	Risk         *review.Risk  `yaml:"risk,omitempty"`
+	Instructions *string       `yaml:"instructions,omitempty"`
 }
 
-// Polling is the leader's backstop for missed webhooks: it lists each
-// installation's open pull requests every Interval.
-type Polling struct {
-	// Interval is how often to poll; an explicit 0 turns polling off, and
-	// unset is DefaultPollInterval.
-	Interval *time.Duration `yaml:"interval,omitempty"`
-	// Lookback bounds how far back a first or long-idle poll looks, so a
-	// long outage does not list every open pull request's history at once.
-	Lookback time.Duration `yaml:"lookback,omitempty"`
+// Confidence is how a repository's reviews are judged, as resolved. With no
+// Model nothing is scored.
+type Confidence struct {
+	Model ModelRef `json:"model"`
+	// Fallback takes the scorer's call when Model fails, as Models.Fallback
+	// takes a review's step.
+	Fallback ModelRef `json:"fallback"`
+	// Effort is how hard the model, and the fallback that takes its call,
+	// reasons, as Models.Effort.
+	Effort model.Effort `json:"effort"`
+	// Threshold is the score, out of MaxConfidence, a pull request must
+	// reach to be approved and, with Gate, for its commit status to pass.
+	Threshold int `json:"threshold"`
+	// Gate is true to fail the commit status under Threshold, so it can be
+	// a required check. Off unless set: a score never blocks a merge
+	// nobody asked it to, and the status only reports it.
+	Gate bool `json:"gate"`
+	// Risk is the highest risk a change may be rated and still be approved.
+	Risk review.Risk `json:"risk"`
+	// Instructions are the admin's guidance to the scorer on rating risk.
+	// A repository's own file cannot set them: a pull request must not be
+	// able to talk its risk down.
+	Instructions string `json:"instructions"`
 }
 
-// Poll defaults, when the file sets none.
+// MaxConfidence is the highest score, and DefaultConfidenceThreshold the
+// threshold no scope sets: a pull request passes only when nothing stands
+// against it.
 const (
-	DefaultPollInterval = 10 * time.Minute
-	DefaultPollLookback = 24 * time.Hour
+	MaxConfidence              = review.MaxConfidence
+	DefaultConfidenceThreshold = MaxConfidence
 )
 
+// TriggerSpec sets which pull requests get a review, and when, at one
+// scope. Its include and exclude lists add to the broader scope's, a
+// condition with a name already listed replacing that one where it stands.
+type TriggerSpec struct {
+	Filters `yaml:",inline"`
+	// Settle delays a review job for a new head, so a burst of pushes
+	// collapses onto the last one before anything is spent.
+	Settle *time.Duration `yaml:"settle,omitempty"`
+	// Limit pauses a pull request's automatic reviews once that many have
+	// completed, until someone resumes them; zero never pauses.
+	Limit *int `yaml:"limit,omitempty"`
+}
+
 // Tool is a command-line tool a runner pod mounts from an image, read-only,
-// for the agent's run tool (ADR-0011). The runner image's own tools (curl,
-// fd and rg in the -tools image) need no entry.
+// for the agent's run tool. The runner image's own tools (curl, fd and rg
+// in the -tools image) need no entry.
 type Tool struct {
 	// Name identifies the tool; it names the pod volume.
-	Name string `yaml:"name"`
+	Name string `json:"name"`
 	// Image is the image the tool comes from; pin it by digest.
-	Image string `yaml:"image"`
+	Image string `json:"image"`
 	// Path is the directory inside the image that holds the binaries; it
 	// goes first on the runner's PATH. Default "/". The binaries must be
-	// statically linked: the default runner image has no libc.
-	Path string `yaml:"path,omitempty"`
+	// statically linked or link only against glibc, libgcc and libstdc++,
+	// all the runner image carries.
+	Path string `json:"path,omitempty"`
 	// Commands are the binaries the tool provides, the names agent.commands
 	// allows; default the tool's name.
-	Commands []string `yaml:"commands,omitempty"`
+	Commands []string `json:"commands,omitempty"`
 }
 
 // Provides lists the commands the tool puts on the runner's PATH.
@@ -280,154 +360,132 @@ func (t Tool) Provides() []string {
 	return t.Commands
 }
 
-// Indexing tunes how repositories are onboarded into the embedding index.
-type Indexing struct {
-	// OnboardWindow is how many onboarding index jobs the leader keeps
-	// queued or running at once; tenants take turns, and the repositories
-	// whose pull requests moved last go first.
-	OnboardWindow int `yaml:"onboardWindow,omitempty"`
+// Embedding is the instance's embedder, which builds the similar-code
+// index: a model of one of the instance's openrouter or openai providers,
+// on its endpoint and key. There is one per instance because the index has
+// one vector dimension. Unset, indexing is off and reviews run without
+// vector retrieval.
+type Embedding struct {
+	// Ref is the model as the configuration names it, "<provider>/<model>".
+	Ref ModelRef `yaml:"model"`
+	// Dims is the vector dimension, which shapes the index table: a change
+	// of it or of the model rebuilds every repository's index.
+	Dims int `yaml:"dims"`
+	// MaxBatch, MaxBatchChars and MaxItemChars bound one request: inputs,
+	// characters, and characters per input, beyond which an input is cut.
+	// OpenAI-compatible servers differ widely in what they accept; unset,
+	// each is a default conservative enough for the common ones.
+	MaxBatch      int `yaml:"maxBatch,omitempty"`
+	MaxBatchChars int `yaml:"maxBatchChars,omitempty"`
+	MaxItemChars  int `yaml:"maxItemChars,omitempty"`
+	// SimilarFloor is the cosine similarity an index chunk needs to count
+	// as similar code, for the review's similar-code stage and the agent's
+	// search_code tool alike. Where useful matches part from noise depends
+	// on the model and the repository; unset is DefaultSimilarFloor.
+	SimilarFloor float64 `yaml:"similarFloor,omitempty"`
+
+	// BaseURL, Model and the key are the provider's, resolved at load:
+	// its endpoint, the model's id on it, and its key.
+	BaseURL string `yaml:"-"`
+	Model   string `yaml:"-"`
+	apiKey  Secret
 }
 
-// DefaultOnboardWindow applies when the file sets no onboardWindow.
-const DefaultOnboardWindow = 4
+// APIKeyValue returns the resolved API key.
+func (e *Embedding) APIKeyValue() Secret { return e.apiKey }
 
-// Retention controls what is deleted and when. Reviews, findings and usage
-// are kept indefinitely; only bulky, reproducible data expires.
-type Retention struct {
-	// DisabledIndexGrace is how long a disabled repository's vectors are
-	// kept before deletion, so re-enabling within the window reuses the
-	// index instead of rebuilding it.
-	DisabledIndexGrace time.Duration `yaml:"disabledIndexGrace,omitempty"`
-	// Transcripts is how long an agentic review's transcript is kept.
-	Transcripts time.Duration `yaml:"transcripts,omitempty"`
+// MaxEmbedDims is the largest dimension the index's halfvec column takes.
+const MaxEmbedDims = 4000
+
+// Bounds returns MaxBatch, MaxBatchChars and MaxItemChars, each the
+// embedder's default when unset.
+func (e *Embedding) Bounds() (batch, batchChars, itemChars int) {
+	return cmp.Or(e.MaxBatch, model.DefaultEmbedMaxBatch), cmp.Or(e.MaxBatchChars, model.DefaultEmbedMaxBatchChars),
+		cmp.Or(e.MaxItemChars, model.DefaultEmbedMaxItemChars)
 }
 
-// DefaultDisabledIndexGrace applies when the file sets no retention.
-const DefaultDisabledIndexGrace = 30 * 24 * time.Hour
+// DefaultSimilarFloor is the similar-code floor when the embedder sets
+// none.
+const DefaultSimilarFloor = 0.5
 
-// DefaultTranscripts applies when the file sets no transcript retention.
-const DefaultTranscripts = 30 * 24 * time.Hour
+// Floor returns SimilarFloor, DefaultSimilarFloor when unset.
+func (e *Embedding) Floor() float64 { return cmp.Or(e.SimilarFloor, DefaultSimilarFloor) }
 
-// minTranscripts is the shortest transcript retention the file may set.
-const minTranscripts = 24 * time.Hour
-
-// TranscriptsOrDefault returns the transcript retention or its default.
-func (r Retention) TranscriptsOrDefault() time.Duration {
-	if r.Transcripts > 0 {
-		return r.Transcripts
-	}
-	return DefaultTranscripts
-}
+// minRetention is the shortest transcript or diff retention that may be
+// set.
+const minRetention = 24 * time.Hour
 
 // DefaultIgnore is always skipped by chunking and the caller search, on top
-// of whatever the operator's file and the in-repo file add. Vendored and
-// generated trees otherwise dominate both.
+// of whatever the admin's file and the in-repo file add. Vendored and
+// generated trees otherwise dominate both, and lockfiles have nothing a
+// review can act on. Build output directories like dist/ and build/ are
+// left in: real source lives under those names often enough.
 var DefaultIgnore = []string{
-	"vendor/**",
-	"node_modules/**",
+	"**/vendor/**",
+	"**/node_modules/**",
 	"**/*.lock",
 	"**/package-lock.json",
+	"**/pnpm-lock.yaml",
+	"**/bun.lockb",
+	"**/.terraform.lock.hcl",
 	"**/go.sum",
+	"**/go.work.sum",
+	"**/zz_generated*.go",
+	"**/*.pb.go",
+	"**/*.pb.gw.go",
+	"**/*.generated.*",
+	"**/*.min.js",
+	"**/*.min.css",
+	"**/*.map",
+	"**/generated/**",
+	"**/__generated__/**",
+	"**/*.log",
 }
 
-// GitHubApp is a GitHub App credential owned by an installation. The client
-// id is not secret, but operators often keep it next to the key, so it may
-// be given inline or by reference; exactly one of the two.
-type GitHubApp struct {
-	ClientID      string    `yaml:"clientId,omitempty"`
-	ClientIDFrom  SecretRef `yaml:"clientIdFrom,omitempty"`
-	PrivateKey    SecretRef `yaml:"privateKey"`
-	WebhookSecret SecretRef `yaml:"webhookSecret"`
-
-	clientID      string
-	privateKey    Secret
-	webhookSecret Secret
-}
-
-// ClientIDValue returns the client id, inline or resolved.
-func (a GitHubApp) ClientIDValue() string { return a.clientID }
-
-// PrivateKeyValue returns the resolved private key PEM.
-func (a GitHubApp) PrivateKeyValue() Secret { return a.privateKey }
-
-// Installation is one bot on one forge account. Its name is the hook path,
-// /hooks/{name}, and must be unique across the whole file.
-type Installation struct {
-	Name    string `yaml:"name"`
-	Forge   Forge  `yaml:"forge"`
-	Host    string `yaml:"host,omitempty"`
-	Account string `yaml:"account"`
-
-	// App is set for GitHub installations.
-	App *GitHubApp `yaml:"app,omitempty"`
-	// Token and WebhookSecret are set for GitLab and Forgejo installations.
-	Token         SecretRef `yaml:"token,omitempty"`
-	WebhookSecret SecretRef `yaml:"webhookSecret,omitempty"`
-	// GitToken, optional for GitLab and Forgejo, is the token runner pods
-	// fetch with in place of Token. Token can write to the forge and would
-	// otherwise reach the pod that reads untrusted content, so a read-only
-	// token belongs here. Forgejo's agentic tasks run only with one.
-	GitToken SecretRef `yaml:"gitToken,omitempty"`
-
-	token         Secret
-	webhookSecret Secret
-	gitToken      Secret
-}
-
-// TokenValue returns the resolved bot token for GitLab and Forgejo.
-func (i Installation) TokenValue() Secret { return i.token }
-
-// GitTokenValue returns the resolved fetch token for GitLab and Forgejo,
-// empty when none is configured.
-func (i Installation) GitTokenValue() Secret { return i.gitToken }
-
-// WebhookSecretValue returns the resolved webhook secret for any forge.
-func (i Installation) WebhookSecretValue() Secret {
-	if i.App != nil {
-		return i.App.webhookSecret
-	}
-	return i.webhookSecret
-}
-
-// Repository carries per-repository overrides. Everything an installation
-// grants access to is watched whether or not it is listed here.
+// Repository carries per-repository overrides, the configuration's
+// owner/name entry for it. Everything a connection grants access to is
+// watched whether or not it has one.
 type Repository struct {
-	Name string `yaml:"name"`
-	// Installation names the tenant's installation the repository belongs
-	// to. It is required only when the owner is the account of more than
-	// one installation, so the same "owner/repo" on two forges is two
-	// entries.
-	Installation string `yaml:"installation,omitempty"`
-	Enabled      *bool  `yaml:"enabled,omitempty"`
-	Overrides    `yaml:",inline"`
+	// Name is the repository's name under its account, without the owner.
+	Name string `yaml:"-"`
+	// Overrides keep their yaml names, which the policy table looks them
+	// up by, though the entry is decoded as the file's repositories map.
+	Overrides `yaml:",inline"`
+
+	// where names the entry in errors.
+	where string
 }
 
-// ReviewMode is how a review is carried out.
-type ReviewMode string
+// RepoTraits is what kritique knows of a repository beyond its name: what the
+// forge says of it, that an archived repository is read-only and a fork a
+// copy of another one, and whether an admin turned it on or off from the
+// dashboard, nil until one does.
+type RepoTraits struct {
+	Archived, Fork bool
+	TurnedOn       *bool
+}
 
-// Review modes. An unset mode resolves to single.
-const (
-	ReviewSingle  ReviewMode = "single"
-	ReviewAgentic ReviewMode = "agentic"
-)
-
-// Valid reports whether m is a review mode.
-func (m ReviewMode) Valid() bool { return m == ReviewSingle || m == ReviewAgentic }
-
-func (m ReviewMode) String() string { return string(m) }
-
-// Agent bounds an agentic review. A field left unset takes its default from
+// Agent bounds a review's agent. A field left unset takes its default from
 // DefaultAgent; one that is set must be positive.
 type Agent struct {
-	MaxSteps           *int `yaml:"maxSteps,omitempty"`
-	MaxToolOutputBytes *int `yaml:"maxToolOutputBytes,omitempty"`
-	// MaxTokens bounds the prompt plus output tokens one agentic review
-	// may spend across all its steps.
-	MaxTokens *int64         `yaml:"maxTokens,omitempty"`
-	Timeout   *time.Duration `yaml:"timeout,omitempty"`
-	// Commands name the binaries the agent's run tool may execute (ADR-0008),
-	// such as curl, fd and rg. The tool is offered only for names the
-	// runner image has on its PATH, so the distroless image offers none.
+	Steps *int `yaml:"steps,omitempty"`
+	// Output bounds one tool result, in bytes.
+	Output *int `yaml:"output,omitempty"`
+	// Tokens bounds the prompt plus output tokens one review, or each part
+	// of a split one, may spend across all its steps.
+	Tokens *int64 `yaml:"tokens,omitempty"`
+	// Prompt bounds, in tokens, the opening prompt of a review, its
+	// confidence score and a follow-up: how much of the diff and context
+	// they start from before tools read the rest.
+	Prompt *int `yaml:"prompt,omitempty"`
+	// Parts is the most parts a review whose diff is over review.PartBytes
+	// is split into, each read by an agent with these bounds of its own; 1
+	// never splits.
+	Parts   *int           `yaml:"parts,omitempty"`
+	Timeout *time.Duration `yaml:"timeout,omitempty"`
+	// Commands name the binaries the agent's run tool may execute, such as
+	// curl, fd and rg. The tool is offered only for names the runner image
+	// has on its PATH, so the distroless image offers none.
 	Commands []string `yaml:"commands,omitempty"`
 	// CommandTimeout bounds one command the run tool executes.
 	CommandTimeout *time.Duration `yaml:"commandTimeout,omitempty"`
@@ -438,97 +496,128 @@ type AgentSettings struct {
 	MaxSteps           int
 	MaxToolOutputBytes int
 	MaxTokens          int64
+	MaxPromptTokens    int
+	MaxParts           int
 	Timeout            time.Duration
 	Commands           []string
 	CommandTimeout     time.Duration
 }
 
-// DefaultAgent applies to every agent bound a repository leaves unset. Its
-// MaxTokens is the agent loop's own default budget. No command is allowed
-// by default: a repository is opted into the run tool.
-var DefaultAgent = AgentSettings{
-	MaxSteps: 60, MaxToolOutputBytes: 32 << 10, MaxTokens: 4_000_000, Timeout: 20 * time.Minute, CommandTimeout: 30 * time.Second,
+// MarshalJSON is the API's form of the bounds: the durations in whole
+// seconds, as the dashboard shows them, and commands never null.
+func (a AgentSettings) MarshalJSON() ([]byte, error) {
+	commands := a.Commands
+	if commands == nil {
+		commands = []string{}
+	}
+	return json.Marshal(struct {
+		MaxSteps              int      `json:"maxSteps"`
+		MaxToolOutputBytes    int      `json:"maxToolOutputBytes"`
+		MaxTokens             int64    `json:"maxTokens"`
+		MaxPromptTokens       int      `json:"maxPromptTokens"`
+		MaxParts              int      `json:"maxParts"`
+		TimeoutSeconds        int64    `json:"timeoutSeconds"`
+		Commands              []string `json:"commands"`
+		CommandTimeoutSeconds int64    `json:"commandTimeoutSeconds"`
+	}{
+		MaxSteps: a.MaxSteps, MaxToolOutputBytes: a.MaxToolOutputBytes, MaxTokens: a.MaxTokens,
+		MaxPromptTokens: a.MaxPromptTokens, MaxParts: a.MaxParts, TimeoutSeconds: int64(a.Timeout.Seconds()), Commands: commands,
+		CommandTimeoutSeconds: int64(a.CommandTimeout.Seconds()),
+	})
 }
 
-// Incremental tunes incremental re-review.
-type Incremental struct {
-	// MaxDeltaFiles is how many files may change since the last review
-	// before a re-review covers the whole pull request again.
-	MaxDeltaFiles *int `yaml:"maxDeltaFiles,omitempty"`
+// DefaultAgent applies to every agent bound a repository leaves unset. Its
+// steps, tool output and tokens are the agent loop's own defaults. No
+// command is allowed by default: a repository is opted into the run tool.
+var DefaultAgent = AgentSettings{
+	MaxSteps:           agent.DefaultLimits.MaxSteps,
+	MaxToolOutputBytes: agent.DefaultLimits.MaxToolOutputBytes,
+	MaxTokens:          agent.DefaultLimits.MaxTokens,
+	MaxPromptTokens:    review.DefaultBudgetTokens,
+	MaxParts:           DefaultParts,
+	Timeout:            20 * time.Minute,
+	CommandTimeout:     30 * time.Second,
 }
+
+// DefaultParts is the most parts a review is split into unless agent.parts
+// says otherwise: a 512 KiB diff at review.PartBytes a part.
+const DefaultParts = 8
+
+// MinPromptTokens is the least agent.prompt takes: the system prompt, with
+// its repository instructions, and the pull request's description are paid
+// for out of the same budget, and below it little of the diff would fit.
+const MinPromptTokens = 8_000
 
 // IncrementalSettings are the resolved incremental settings.
 type IncrementalSettings struct {
 	MaxDeltaFiles int
 }
 
-// DefaultMaxDeltaFiles applies when a repository sets no maxDeltaFiles.
+// DefaultMaxDeltaFiles applies when a repository sets no review.incremental.
 const DefaultMaxDeltaFiles = 25
 
 // ReviewTemplates name repository files, read from the merge base, that
 // replace the built-in comment templates.
 type ReviewTemplates struct {
-	Summary string `yaml:"summary,omitempty"`
-	Inline  string `yaml:"inline,omitempty"`
+	Summary string `json:"summary"`
+	Inline  string `json:"inline"`
 }
 
-// Review is the operator's resolved presentation and strictness for a
+// Review is the admin's resolved presentation and strictness for a
 // repository. Paths name files in the repository's merge-base tree.
 type Review struct {
-	Instructions        []string
-	RequireSuggestedFix bool
-	Templates           ReviewTemplates
-	// MinSeverity is the least severe finding posted inline, nit or
-	// important; empty posts every one. A blocking finding is always
-	// posted, and the summary counts every finding.
-	MinSeverity string
+	RequireSuggestedFix bool            `json:"requireSuggestedFix"`
+	Templates           ReviewTemplates `json:"templates"`
 	// InlineComments is false to post the summary alone.
-	InlineComments bool
-	Context        []ContextFile
+	InlineComments bool `json:"inlineComments"`
+	// Approve is true to approve a pull request whose review found nothing
+	// blocking or important, or, where a confidence score is asked for,
+	// whose score and risk allow it, and to dismiss that approval when a
+	// later review's do not. Off unless set.
+	Approve bool `json:"approve"`
+	// Diagram is true to have the summary draw the flow the change adds
+	// or alters as a Mermaid diagram. Off unless set: it costs output
+	// tokens on every review.
+	Diagram bool `json:"diagram"`
+	// Cost is true to have the summary's footer state what the pull
+	// request's reviews have cost together. Off unless set: the comment
+	// is public, and the figure is the instance's spend.
+	Cost    bool          `json:"cost"`
+	Context []ContextFile `json:"context"`
+	// Rules are the checks the configuration writes, the broadest scope's
+	// first. The API serves them from the rules routes, with what each
+	// enforced, not with the settings.
+	Rules []Rule `json:"-"`
 }
 
 // ContextFile is a repository file that explains the code, named to the
-// reviewer with what it is: an agentic review is pointed at it, and a
-// single-shot one is given its content. With Paths it applies only when a
-// changed path matches one of them.
+// reviewer with what it is, which the agent reads with its tools. With
+// Paths it applies only when a changed path matches one of them.
 type ContextFile struct {
 	Path        string   `yaml:"path" json:"path"`
 	Description string   `yaml:"description" json:"description"`
 	Paths       []string `yaml:"paths,omitempty" json:"paths,omitempty"`
 }
 
-// Inline severity floors.
-const (
-	SeverityNit       = "nit"
-	SeverityImportant = "important"
-)
-
-// ReviewSpec sets the review block at one scope, field by field: a field
-// written here, even empty, replaces the broader scope's.
-type ReviewSpec struct {
-	Instructions        []string      `yaml:"instructions,omitempty"`
-	RequireSuggestedFix *bool         `yaml:"requireSuggestedFix,omitempty"`
-	Templates           TemplatesSpec `yaml:"templates,omitempty"`
-	MinSeverity         *string       `yaml:"minSeverity,omitempty"`
-	InlineComments      *bool         `yaml:"inlineComments,omitempty"`
-	Context             []ContextFile `yaml:"context,omitempty"`
-}
-
-// TemplatesSpec sets the comment templates at one scope; an empty path
-// written here restores the built-in template.
-type TemplatesSpec struct {
+// CommentsSpec sets how a review comments at one scope: whether findings
+// go inline, and the repository files that replace the built-in summary
+// and finding templates, where an empty path restores the built-in one.
+type CommentsSpec struct {
+	Inline  *bool   `yaml:"inline,omitempty"`
 	Summary *string `yaml:"summary,omitempty"`
-	Inline  *string `yaml:"inline,omitempty"`
+	Finding *string `yaml:"finding,omitempty"`
 }
 
-// Referenced lists the repository paths the block names: instructions
-// first, then the summary and inline templates and the context files,
-// deduplicated.
+// Referenced lists the repository paths the block names whose contents a
+// review reads: the rules' files first, then the summary and inline
+// templates, deduplicated. Context files are not among them: the agent is
+// pointed at those and reads them with its tools.
 func (r Review) Referenced() []string {
-	paths := append(append([]string(nil), r.Instructions...), r.Templates.Summary, r.Templates.Inline)
-	for _, c := range r.Context {
-		paths = append(paths, c.Path)
+	paths := make([]string, 0, len(r.Rules)+2)
+	for _, rule := range r.Rules {
+		paths = append(paths, rule.File)
 	}
+	paths = append(paths, r.Templates.Summary, r.Templates.Inline)
 	var out []string
 	for _, p := range paths {
 		if p != "" && !slices.Contains(out, p) {
@@ -538,85 +627,123 @@ func (r Review) Referenced() []string {
 	return out
 }
 
-// Tenant is a forge account and the unit of isolation.
-type Tenant struct {
-	Slug          string         `yaml:"slug"`
-	Runner        *Runner        `yaml:"runner,omitempty"`
-	Installations []Installation `yaml:"installations"`
-	Overrides     `yaml:",inline"`
-	Limits        LimitsSpec   `yaml:"limits,omitempty"`
-	Repositories  []Repository `yaml:"repositories,omitempty"`
+// Account is a forge account, <forge>/<name>, and the unit of isolation. It
+// exists because a connection serves it. Its entry under the
+// configuration's accounts holds what is its alone, its limits and
+// providers, and its owner/* and owner/name entries under repositories its
+// repositories' settings; an account with neither inherits the defaults.
+type Account struct {
+	Forge Forge  `yaml:"-"`
+	Name  string `yaml:"-"`
+	// Overrides are its owner/* entry's. They and Limits keep their yaml
+	// names, which the policy table looks them up by, though the account is
+	// gathered from the file's accounts and repositories maps.
+	Overrides `yaml:",inline"`
+	// Limits and Providers are its accounts entry's: its caps, and its own
+	// model providers, its keys for the models it pays for. A model
+	// reference for its repositories names one of them or one of the
+	// instance's, and a name may not be both.
+	Limits    LimitsSpec          `yaml:"limits"`
+	Providers map[string]Provider `yaml:"-"`
+	// Repositories are its owner/name entries.
+	Repositories []Repository `yaml:"-"`
 
-	origin Origin
+	// entry and pattern name its accounts entry and its owner/* entry in
+	// errors, "" for one it does not have.
+	entry, pattern string
 }
 
 // Egress is what runner pods may reach through the worker's gateway beyond
-// the forges the file itself names, which are always allowed. Hosts are exact, or a suffix with a leading "*."; the gateway
-// tunnels TLS to port 443 only. A credential is the token the gateway adds,
-// as a bearer, to a plain http:// request a runner makes to that host, so
-// the runner can use an API at a token's rate limit without holding it.
+// the forges the connections talk to, which are always allowed. Allow and
+// Deny entries are an exact host, a suffix with a leading "*.", "*" for
+// every host, or an IP address or CIDR; a denied destination is refused
+// however Allow matches it, a destination that is not on the public
+// internet is reached only when an Allow address covers it, and the
+// gateway tunnels TLS to port 443 only. A credential is the token the
+// gateway adds, as a bearer, to a plain http:// request a runner makes to
+// that host, so the runner can use an API at a token's rate limit without
+// holding it.
 type Egress struct {
-	AllowHosts  []string             `yaml:"allowHosts,omitempty"`
+	Allow       []string             `yaml:"allow,omitempty"`
+	Deny        []string             `yaml:"deny,omitempty"`
 	Credentials map[string]SecretRef `yaml:"credentials,omitempty"`
 
+	allow, deny egress.List
 	credentials map[string]Secret
 }
 
-// File is the whole configuration document.
+// File is the running configuration, as the configuration file and its
+// environment set it.
 type File struct {
-	Providers map[string]Provider `yaml:"providers,omitempty"`
-	Defaults  Defaults            `yaml:"defaults,omitempty"`
-	Polling   Polling             `yaml:"polling,omitempty"`
-	Indexing  Indexing            `yaml:"indexing,omitempty"`
-	Tools     []Tool              `yaml:"tools,omitempty"`
-	Retention Retention           `yaml:"retention,omitempty"`
-	Egress    Egress              `yaml:"egress,omitempty"`
-	Web       Web                 `yaml:"web,omitempty"`
-	Tenants   []Tenant            `yaml:"tenants"`
+	Auth        Auth
+	Connections []Connection
+	Providers   map[string]Provider
+	Defaults    Defaults
+	Egress      Egress
+	// Embedding is the instance's embedder, nil when indexing is off.
+	Embedding *Embedding
+	// Run is how kritique runs, from the environment.
+	Run Run
+	// Accounts are every account a running connection serves, in the order
+	// the connections list them.
+	Accounts []Account
 
 	hash string
-	// base is the parsed file a merged File was built from, nil for a
-	// parsed one; dashboard holds the tenants merged into it.
-	base      *File
-	dashboard []DashboardTenant
-	skipped   []SkippedTenant
+	// unserved are the account entries no connection serves.
+	unserved []Account
+	// envConnection names the connection the environment declared, "" for
+	// none.
+	envConnection string
+	// envProvider names the provider the environment declared, "" for none,
+	// and envKeys holds the instance defaults it set, by dotted path.
+	envProvider string
+	envKeys     map[string]bool
+	// secretEnv are the variables f's secrets came from, sorted.
+	secretEnv []string
 }
 
-// Hash is the hex SHA-256 of the file's bytes as parsed, or for a merged
-// File, of the parsed file's hash and each dashboard tenant's revision. The
-// leader records it in the store after applying the file, and followers
-// compare it with their own copy to report drift.
+// SecretEnv is the environment variables f's secrets came from, sorted,
+// which main removes from its environment once f is loaded.
+func (f *File) SecretEnv() []string { return f.secretEnv }
+
+// Hash is the hex SHA-256 of the file's bytes as parsed. The leader records
+// it in the store after applying the configuration, and followers compare
+// it with their own copy to report drift.
 func (f *File) Hash() string { return f.hash }
 
 // Settings are the effective settings for one repository after defaults,
-// tenant and repository layers are merged.
+// account and repository layers are merged.
 type Settings struct {
 	Enabled bool
 	Models  Models
-	Filter  *prfilter.Program
-	Forks   bool
+	// Filters are the admin's conditions on which pull requests are
+	// reviewed, compiled, the broadest scope's first.
+	Filters Filters
 	Limits  Limits
 	// Ignore is DefaultIgnore plus the repository's own globs. The in-repo
 	// file's globs are unioned in by the caller that has the checkout.
 	Ignore []string
 	// Settle delays a review job for a new head; zero means immediate.
-	Settle      time.Duration
-	Mode        ReviewMode
-	Agent       AgentSettings
-	Incremental IncrementalSettings
-	Review      Review
-	// Allow is the bounds as the narrowest scope writing each one set it;
-	// one no scope writes is left unset.
-	Allow Allow
-	// Tasks are the operator's tasks the configuration file wrote, merged
-	// by name across scopes and trusted whole. repoconfig.Merge resolves
-	// them, DashboardTasks and the repository's into the tasks that run.
+	Settle time.Duration
+	// MaxAutoReviews pauses a pull request's automatic reviews once that
+	// many have completed; zero never pauses.
+	MaxAutoReviews int
+	Agent          AgentSettings
+	Incremental    IncrementalSettings
+	Review         Review
+	Confidence     Confidence
+	Skills         Skills
+	// Providers name the model providers the repository's account may use,
+	// the instance's and its own, sorted: the ones a .kritique.yaml may
+	// choose a model of.
+	Providers []string
+	// Tasks are the operator's event tasks that are switched on, merged
+	// by name across scopes; repoconfig.MergeTasks clips them and adds the
+	// repository's.
 	Tasks []tasks.Task
-	// DashboardTasks are the operator-scope tasks a dashboard tenant
-	// wrote. A tenant admin may write them, so they are held to the task
-	// bounds and the operator's model, agent, mode and command bounds, as
-	// a repository's are.
-	DashboardTasks []tasks.Task
-	// TaskBounds are Allow.Tasks with every default applied.
+	// TaskBounds are the scopes' taskBounds with every default applied.
 	TaskBounds tasks.Bounds
+
+	// taskBounds are the bounds as the scopes write them, before defaults.
+	taskBounds TaskBounds
 }

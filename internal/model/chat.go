@@ -10,13 +10,13 @@ import (
 )
 
 // This file is the OpenAI chat completions wire format as kritique's model
-// gateway serves it (ADR-0004): the part of it the OpenAI adapter sends and
-// reads, decoded into a StepRequest and encoded from a StepResponse, so a
-// runner's adapter can talk to the gateway and the gateway can answer
-// through any provider's adapter.
+// gateway serves it: the part of it the OpenAI adapter sends and reads,
+// decoded into a StepRequest and encoded from a StepResponse, so a runner's
+// adapter can talk to the gateway and the gateway can answer through any
+// provider's adapter.
 
 // ErrBudget is a step the gateway refused because the run's token budget
-// or the tenant's monthly cap is spent.
+// or the account's monthly cap is spent.
 var ErrBudget = errors.New("model: token budget exhausted")
 
 // BudgetCode is the error code of the gateway's budget refusal.

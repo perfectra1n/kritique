@@ -3,8 +3,8 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -12,14 +12,13 @@ import (
 
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/jobs"
-	"github.com/perfectra1n/kritique/internal/repoconfig"
 	"github.com/perfectra1n/kritique/internal/store"
 	"github.com/perfectra1n/kritique/internal/taskrun"
 	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
 // Service is the store-backed Dispatcher: every write happens in one
-// tenant-scoped transaction together with the River insert, so a row and
+// account-scoped transaction together with the River insert, so a row and
 // its job either both exist or neither does.
 type Service struct {
 	store *store.Store
@@ -39,29 +38,69 @@ const (
 	reasonDisabled     = "disabled"
 	reasonDuplicate    = "duplicate"
 	reasonNotIndexed   = "not-indexed"
+	reasonFilter       = "filter"
+	reasonReviewed     = "reviewed"
+	reasonStale        = "stale"
+	reasonPaused       = "paused"
+	reasonClosed       = "closed"
 )
 
-// ActionBaseline is the poller's synthetic action for a pull request that
-// predates kritique's knowing its installation: it is recorded, not reviewed.
-const ActionBaseline = "baseline"
+// jobReview is Outcome.Job for a review.
+const jobReview = "review"
+
+// The poller's synthetic actions: ActionPoll for an open pull request it
+// lists, and ActionBaseline for one that predates kritique's knowing its
+// connection, which is recorded, not reviewed.
+const (
+	ActionPoll     = "poll"
+	ActionBaseline = "baseline"
+)
 
 // pullRequestActions are the pull request actions that record the pull
-// request, each saying whether it also starts a review; "poll" and
+// request, each saying whether it also starts a review; ActionPoll and
 // ActionBaseline are the poller's synthetic ones. The review job starts at
 // once: the worker waits out the repository's settle time (jobs.Settles),
-// since .kritique.yaml may set it.
+// since .kritique.yaml may set it. The record-only actions keep the title,
+// body, labels and draft state current between pushes: a review job reads
+// them when it builds its prompt, and the filter and the rules judge them,
+// so an edit that arrives after the push that queued the job, as
+// Renovate's title update does a second after its force-push, must land
+// on the row before the job reads it. A label change is recorded the same
+// way, and starts a review where its head has none a label could not
+// change (store.LabelSettled): a filter that reads labels may now let
+// through the head it kept out.
 var pullRequestActions = map[string]bool{
-	"opened":           true,
-	"reopened":         true,
-	"ready_for_review": true,
-	"synchronize":      true,
-	"poll":             true,
-	ActionBaseline:     false,
+	"opened":             true,
+	"reopened":           true,
+	"ready_for_review":   true,
+	"synchronize":        true,
+	ActionPoll:           true,
+	ActionBaseline:       false,
+	"edited":             false,
+	"labeled":            true,
+	"unlabeled":          true,
+	"converted_to_draft": false,
+}
+
+// RecordDelivery implements DeliveryRecorder.
+func (s *Service) RecordDelivery(ctx context.Context, connectionID string) error {
+	if err := s.store.RecordWebhookDelivery(ctx, connectionID); err != nil {
+		return fmt.Errorf("ingest: record delivery: %w", err)
+	}
+	return nil
+}
+
+// RecordUnsigned implements DeliveryRecorder.
+func (s *Service) RecordUnsigned(ctx context.Context, connectionID string) error {
+	if err := s.store.RecordUnsignedWebhook(ctx, connectionID); err != nil {
+		return fmt.Errorf("ingest: record unsigned delivery: %w", err)
+	}
+	return nil
 }
 
 // Dispatch implements Dispatcher. A delivery is offered to tasks too,
 // whatever the review pipeline made of it; the outcome is the review
-// pipeline's unless it did nothing and tasks did.
+// pipeline's unless it queued nothing and tasks did.
 func (s *Service) Dispatch(ctx context.Context, req Request) (Outcome, error) {
 	var out Outcome
 	var err error
@@ -70,29 +109,23 @@ func (s *Service) Dispatch(ctx context.Context, req Request) (Outcome, error) {
 		out, err = s.pullRequest(ctx, req)
 	case webhook.KindComment:
 		out, err = s.comment(ctx, req)
+	case webhook.KindThread:
+		out, err = s.thread(ctx, req)
 	case webhook.KindPush:
 		out, err = s.push(ctx, req)
 	case webhook.KindInstallation:
 		out, err = s.installation(ctx, req)
+	case webhook.KindRepository:
+		out, err = s.repository(ctx, req)
 	default:
 		out = Outcome{Status: Ignored, Reason: string(req.Event.Kind)}
 	}
 	if err != nil {
 		return out, err
 	}
-	// Tasks persist in a transaction of their own, after the review
-	// pipeline's has committed. When that one enqueued nothing, what it
-	// wrote is idempotent, so a failure here is the forge's to redeliver
-	// (the delivery id keeps a redelivery from running tasks twice); when
-	// it enqueued a job, a 500 would redeliver a delivery already acted
-	// on, so tasks miss this one instead.
 	queued, err := s.tasks(ctx, req)
 	if err != nil {
-		if out.Status != Enqueued {
-			return out, err
-		}
-		slog.Error("ingest: delivery not offered to tasks", "delivery", req.Event.Delivery, "error", err)
-		return out, nil
+		return out, err
 	}
 	if queued && out.Status != Enqueued {
 		out = Outcome{Status: Enqueued, Job: jobTaskDispatch}
@@ -100,28 +133,25 @@ func (s *Service) Dispatch(ctx context.Context, req Request) (Outcome, error) {
 	return out, nil
 }
 
+// jobTaskDispatch is Outcome.Job for a delivery handed to tasks.
 const jobTaskDispatch = "task_dispatch"
 
 // tasks stores a delivery some task could run on and enqueues the job that
 // resolves which do. Only a forge's own delivery is offered: the poller's
 // synthetic events carry no event name. Resolving the repository's tasks
 // reads its .kritique.yaml through the forge, so it is the job's to do, as
-// is the loop guard, which needs the installation's bot login; here only
-// the operator's settings are consulted (see taskrun.Candidate).
+// is the loop guard, which needs the connection's bot login; here only the
+// admin's settings are consulted (see taskrun.Candidate). Tasks have
+// their own switch, taskBounds.enabled, apart from whether the repository
+// is reviewed.
 func (s *Service) tasks(ctx context.Context, req Request) (bool, error) {
 	ev := req.Event
-	if ev.Repository == nil || ev.RawEvent == "" {
+	if ev.Repository == nil || ev.RawEvent == "" || req.Connection == nil {
 		return false, nil
 	}
-	settings := req.File.Settings(req.Tenant, req.Installation.Name, ev.Repository.FullName)
-	operator, err := repoconfig.Merge(nil, settings)
-	if err != nil {
-		// Without a file Merge has nothing to parse; the operator's tasks
-		// are still in operator.
-		slog.Warn("ingest: operator tasks not merged", "error", err)
-	}
+	settings := req.File.Settings(req.Account, ev.Repository.FullName)
 	in := taskrun.Input(ev)
-	if !taskrun.Candidate(in, operator.Tasks, settings.TaskBounds) {
+	if !taskrun.Candidate(in, settings.Tasks, settings.TaskBounds) {
 		return false, nil
 	}
 	var payload json.RawMessage
@@ -134,20 +164,20 @@ func (s *Service) tasks(ctx context.Context, req Request) (bool, error) {
 		subjectKind, subjectNumber = in.Subject.Kind, in.Subject.Number
 	}
 	queued := false
-	err = s.store.WithTenant(ctx, req.Tenant.ID(), func(tx pgx.Tx) error {
+	err := s.store.WithAccount(ctx, req.Account.ID(), func(tx pgx.Tx) error {
 		rid, err := ensureRepository(ctx, tx, req, ev.Repository)
 		if err != nil {
 			return err
 		}
 		id, err := store.InsertTaskEvent(ctx, tx, store.TaskEvent{
-			TenantID: req.Tenant.ID(), InstallationID: req.Installation.ID(), RepositoryID: rid, Forge: in.Forge, Event: in.Event,
+			AccountID: req.Account.ID(), ConnectionID: req.Connection.ID(), RepositoryID: rid, Forge: in.Forge, Event: in.Event,
 			RawEvent: ev.RawEvent, Action: ev.Action, Sender: ev.Sender, Delivery: ev.Delivery, SubjectKind: subjectKind,
 			SubjectNumber: subjectNumber, Payload: payload,
 		})
 		if err != nil || id == "" {
 			return err
 		}
-		dispatch := jobs.TaskDispatchArgs{TenantID: req.Tenant.ID(), RepositoryID: rid, EventID: id}
+		dispatch := jobs.TaskDispatchArgs{AccountID: req.Account.ID(), RepositoryID: rid, EventID: id}
 		if _, err := s.queue.InsertTx(ctx, tx, dispatch, nil); err != nil {
 			return fmt.Errorf("ingest: enqueue task dispatch: %w", err)
 		}
@@ -166,70 +196,163 @@ func (s *Service) pullRequest(ctx context.Context, req Request) (Outcome, error)
 	review, ok := pullRequestActions[ev.Action]
 	if !ok {
 		if ev.Action == "closed" {
-			err := s.store.WithTenant(ctx, req.Tenant.ID(), func(tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, `UPDATE pull_requests SET state = 'closed', updated_at = now()
-					WHERE repository_id = $1 AND number = $2`, repoID(req, ev.Repository.FullName), pr.Number)
-				return err
+			err := s.store.WithAccount(ctx, req.Account.ID(), func(tx pgx.Tx) error {
+				return store.ClosePullRequest(ctx, tx, repoID(req, ev.Repository.FullName), pr.Number, pr.Merged, pr.ClosedAt, pr.UpdatedAt)
 			})
-			return Outcome{Status: Ignored, Reason: "closed"}, err
+			return Outcome{Status: Ignored, Reason: reasonClosed}, err
 		}
 		return Outcome{Status: Ignored, Reason: reasonAction}, nil
 	}
-	settings := req.File.Settings(req.Tenant, req.Installation.Name, ev.Repository.FullName)
+	settings := req.File.Settings(req.Account, ev.Repository.FullName)
+	runs, err := s.runs(ctx, req)
+	if err != nil {
+		return Outcome{}, err
+	}
+	// The filter says what is reviewed, not what is recorded: an action
+	// that records only is not judged by it, or a draft's edit would leave
+	// the row behind under a filter that skips drafts. A label change it
+	// keeps out is recorded all the same, the labels being what it judges,
+	// and so is a fork's pull request: a maintainer asks for the review of
+	// one the filter keeps out with "@<bot> review", which needs the pull
+	// request known.
+	recorded := jobs.LabelChange(ev.Action) || pr.Fork
+	filtered := false
 	switch {
-	case !settings.Enabled:
+	case !runs:
 		return Outcome{Status: Skipped, Reason: reasonDisabled}, nil
-	case pr.Fork && !settings.Forks:
-		return Outcome{Status: Skipped, Reason: "fork"}, nil
-	case settings.Filter != nil:
-		ok, err := settings.Filter.Eval(pr.FilterVars(ev.Action))
+	case review:
+		skip, by, err := settings.Filters.Skips(pr.FilterVars(ev.Action), nil)
 		if err != nil {
-			return Outcome{}, fmt.Errorf("ingest: filter: %w", err)
+			return Outcome{}, fmt.Errorf("ingest: filter %s: %w", by.Label(), err)
 		}
-		if !ok {
-			return Outcome{Status: Skipped, Reason: "filter"}, nil
+		if skip && !recorded {
+			return Outcome{Status: Skipped, Reason: reasonFilter}, nil
 		}
+		filtered = skip
 	}
 
-	labels, err := json.Marshal(pr.LabelVars())
+	labelVars, err := json.Marshal(pr.LabelVars())
 	if err != nil {
 		return Outcome{}, fmt.Errorf("ingest: encode labels: %w", err)
 	}
-	out := Outcome{Status: Enqueued, Job: "review"}
-	err = s.store.WithTenant(ctx, req.Tenant.ID(), func(tx pgx.Tx) error {
+	out := Outcome{Status: Enqueued, Job: jobReview}
+	err = s.store.WithAccount(ctx, req.Account.ID(), func(tx pgx.Tx) error {
 		rid, err := ensureRepository(ctx, tx, req, ev.Repository)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO pull_requests (tenant_id, repository_id, number, title, author, author_is_bot, draft, fork, state,
-				head_ref, head_sha, base_ref, base_sha, url, body, opened_at, labels, merged)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open', $9, $10, $11, $12, $13, $14, $15, $16, $17)
-			ON CONFLICT (repository_id, number) DO UPDATE SET
-				title = EXCLUDED.title, author = EXCLUDED.author, author_is_bot = EXCLUDED.author_is_bot, draft = EXCLUDED.draft,
-				fork = EXCLUDED.fork, state = 'open', head_ref = EXCLUDED.head_ref, head_sha = EXCLUDED.head_sha,
-				base_ref = EXCLUDED.base_ref, base_sha = EXCLUDED.base_sha, url = EXCLUDED.url, body = EXCLUDED.body,
-				labels = EXCLUDED.labels, merged = EXCLUDED.merged, updated_at = now()`,
-			req.Tenant.ID(), rid, pr.Number, pr.Title, pr.Author, pr.AuthorIsBot, pr.Draft, pr.Fork,
-			pr.HeadRef, pr.HeadSHA, pr.BaseRef, pr.BaseSHA, pr.URL, pr.Body, nullTime(pr), labels, pr.Merged); err != nil {
-			return fmt.Errorf("ingest: upsert pull request: %w", err)
+		applied, err := store.UpsertPullRequest(ctx, tx, store.PullRequestRow{
+			AccountID: req.Account.ID(), RepositoryID: rid, Number: pr.Number, Title: pr.Title, Author: pr.Author,
+			AuthorIsBot: pr.AuthorIsBot, Draft: pr.Draft, Fork: pr.Fork, Merged: pr.Merged, State: pr.State, HeadRef: pr.HeadRef,
+			HeadSHA: pr.HeadSHA, BaseRef: pr.BaseRef, URL: pr.URL, Body: pr.Body, OpenedAt: pr.CreatedAt, UpdatedAt: pr.UpdatedAt,
+			ClosedAt: pr.ClosedAt, Labels: labelVars,
+		})
+		if err != nil {
+			return err
 		}
-		if !review {
+		switch {
+		case !applied:
+			out = Outcome{Status: Skipped, Reason: reasonStale}
+			return nil
+		case !review:
 			out = Outcome{Status: Skipped, Reason: ev.Action}
 			return nil
+		case filtered:
+			out = Outcome{Status: Skipped, Reason: reasonFilter}
+			return nil
+		case pr.State == "closed":
+			// Merged or closed, whatever the action says: it is recorded,
+			// and takes no more reviews.
+			out = Outcome{Status: Skipped, Reason: reasonClosed}
+			return nil
 		}
-		res, err := s.queue.InsertTx(ctx, tx, jobs.ReviewArgs{
-			TenantID: req.Tenant.ID(), RepositoryID: rid, Number: pr.Number, HeadSHA: pr.HeadSHA, Trigger: ev.Action,
-		}, nil)
+		// A paused pull request is recorded, not reviewed, until someone
+		// resumes it or asks for a review.
+		paused, err := store.PullRequestPaused(ctx, tx, rid, pr.Number)
 		if err != nil {
-			return fmt.Errorf("ingest: enqueue review: %w", err)
+			return err
 		}
-		if res.UniqueSkippedAsDuplicate {
-			out = Outcome{Status: Skipped, Reason: reasonDuplicate, Job: "review"}
+		if paused {
+			out = Outcome{Status: Skipped, Reason: reasonPaused}
+			return nil
 		}
-		return nil
+		if jobs.LabelChange(ev.Action) {
+			out, err = s.labelChange(ctx, tx, req, rid, pr)
+			return err
+		}
+		out, err = s.review(ctx, tx, req, rid, pr)
+		return err
 	})
 	return out, err
+}
+
+// review queues the review of the head a push, a poll or the pull request's
+// opening starts, unless the head has one already or one still to come.
+func (s *Service) review(ctx context.Context, tx pgx.Tx, req Request, rid string, pr *webhook.PullRequest) (Outcome, error) {
+	// A job with a Request of its own, a re-run's or a label change's, is
+	// the head's review to come though the unique key does not span it. It
+	// is looked for before the head's reviews: a job that finished in
+	// between has its review recorded by then.
+	queued, err := jobs.HeadQueued(ctx, tx, req.Account.ID(), rid, pr.Number, pr.HeadSHA)
+	if err != nil {
+		return Outcome{}, err
+	}
+	// A head a review has seen is not news: a poll lists a pull request
+	// whenever anything about it moved, a comment or a label included,
+	// and a webhook event may be delivered again, or reopen a pull
+	// request whose head stands reviewed. The queue's unique key alone
+	// would not say so once River has cleaned the earlier job up.
+	var reviewed bool
+	if req.Event.Action == ActionPoll {
+		reviewed, err = store.PollSettled(ctx, tx, rid, pr.Number, pr.HeadSHA)
+	} else {
+		reviewed, err = store.HeadReviewed(ctx, tx, rid, pr.Number, pr.HeadSHA)
+	}
+	switch {
+	case err != nil:
+		return Outcome{}, err
+	case reviewed:
+		return Outcome{Status: Skipped, Reason: reasonReviewed}, nil
+	case queued:
+		return Outcome{Status: Skipped, Reason: reasonDuplicate, Job: jobReview}, nil
+	}
+	res, err := s.queue.InsertTx(ctx, tx, jobs.ReviewArgs{
+		AccountID: req.Account.ID(), RepositoryID: rid, Number: pr.Number, HeadSHA: pr.HeadSHA, Trigger: req.Event.Action,
+	}, nil)
+	if err != nil {
+		return Outcome{}, fmt.Errorf("ingest: enqueue review: %w", err)
+	}
+	if res.UniqueSkippedAsDuplicate {
+		return Outcome{Status: Skipped, Reason: reasonDuplicate, Job: jobReview}, nil
+	}
+	return Outcome{Status: Enqueued, Job: jobReview}, nil
+}
+
+// labelChange queues the review a label change starts, unless the head has
+// one a label could not change or one still to come; the job is looked for
+// first, as in review.
+func (s *Service) labelChange(ctx context.Context, tx pgx.Tx, req Request, rid string, pr *webhook.PullRequest) (Outcome, error) {
+	queued, err := jobs.HeadQueued(ctx, tx, req.Account.ID(), rid, pr.Number, pr.HeadSHA)
+	if err != nil {
+		return Outcome{}, err
+	}
+	settled, err := store.LabelSettled(ctx, tx, rid, pr.Number, pr.HeadSHA)
+	switch {
+	case err != nil:
+		return Outcome{}, err
+	case settled:
+		return Outcome{Status: Skipped, Reason: reasonReviewed}, nil
+	case queued:
+		return Outcome{Status: Skipped, Reason: reasonDuplicate, Job: jobReview}, nil
+	}
+	_, err = jobs.EnqueueLabelChange(ctx, tx, s.queue, req.Account.ID(), rid, pr.Number, req.Event.Action)
+	switch {
+	case errors.Is(err, jobs.ErrRerunQueued):
+		return Outcome{Status: Skipped, Reason: reasonDuplicate, Job: jobReview}, nil
+	case err != nil:
+		return Outcome{}, fmt.Errorf("ingest: enqueue review: %w", err)
+	}
+	return Outcome{Status: Enqueued, Job: jobReview}, nil
 }
 
 func (s *Service) comment(ctx context.Context, req Request) (Outcome, error) {
@@ -248,29 +371,68 @@ func (s *Service) comment(ctx context.Context, req Request) (Outcome, error) {
 	}
 	// The cheap gate: a bot never triggers a follow-up, and a comment with
 	// no mention at all is not one. The worker checks the mention against
-	// the installation's resolved bot identity and the author's access.
+	// the connection's resolved bot identity and the author's access.
 	if c.AuthorIsBot || !strings.Contains(c.Body, "@") {
 		return Outcome{Status: Skipped, Reason: "no-mention"}, nil
 	}
-	settings := req.File.Settings(req.Tenant, req.Installation.Name, ev.Repository.FullName)
-	if !settings.Enabled {
-		return Outcome{Status: Skipped, Reason: reasonDisabled}, nil
+	if runs, err := s.runs(ctx, req); err != nil || !runs {
+		return Outcome{Status: Skipped, Reason: reasonDisabled}, err
 	}
 	out := Outcome{Status: Enqueued, Job: "followup"}
-	err := s.store.WithTenant(ctx, req.Tenant.ID(), func(tx pgx.Tx) error {
+	err := s.store.WithAccount(ctx, req.Account.ID(), func(tx pgx.Tx) error {
 		rid, err := ensureRepository(ctx, tx, req, ev.Repository)
 		if err != nil {
 			return err
 		}
 		res, err := s.queue.InsertTx(ctx, tx, jobs.FollowUpArgs{
-			TenantID: req.Tenant.ID(), RepositoryID: rid, Number: c.Number, CommentID: c.ID,
-			Inline: c.Inline, Path: c.Path, Line: c.Line,
+			AccountID: req.Account.ID(), RepositoryID: rid, Number: c.Number, CommentID: c.ID,
+			Inline: c.Inline,
 		}, nil)
 		if err != nil {
 			return fmt.Errorf("ingest: enqueue follow-up: %w", err)
 		}
 		if res.UniqueSkippedAsDuplicate {
 			out = Outcome{Status: Skipped, Reason: reasonDuplicate, Job: "followup"}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// thread queues the thread a person resolved or unresolved for the worker,
+// which dismisses or restores the finding it holds. The bot resolves the
+// threads of the findings a review found gone and of the ones a mention
+// dismissed; neither is a person's decision.
+func (s *Service) thread(ctx context.Context, req Request) (Outcome, error) {
+	ev := req.Event
+	th := ev.Thread
+	if ev.Repository == nil {
+		return Outcome{Status: Ignored, Reason: reasonNoRepository}, nil
+	}
+	if th == nil || th.CommentID == 0 {
+		return Outcome{Status: Ignored, Reason: "no thread"}, nil
+	}
+	if th.SenderIsBot {
+		return Outcome{Status: Skipped, Reason: "bot"}, nil
+	}
+	if runs, err := s.runs(ctx, req); err != nil || !runs {
+		return Outcome{Status: Skipped, Reason: reasonDisabled}, err
+	}
+	out := Outcome{Status: Enqueued, Job: "thread"}
+	err := s.store.WithAccount(ctx, req.Account.ID(), func(tx pgx.Tx) error {
+		rid, err := ensureRepository(ctx, tx, req, ev.Repository)
+		if err != nil {
+			return err
+		}
+		res, err := s.queue.InsertTx(ctx, tx, jobs.ThreadArgs{
+			AccountID: req.Account.ID(), RepositoryID: rid, Number: th.Number, CommentID: th.CommentID,
+			Resolved: th.Resolved, Outdated: th.Outdated, Sender: th.Sender,
+		}, nil)
+		if err != nil {
+			return fmt.Errorf("ingest: enqueue thread: %w", err)
+		}
+		if res.UniqueSkippedAsDuplicate {
+			out = Outcome{Status: Skipped, Reason: reasonDuplicate, Job: "thread"}
 		}
 		return nil
 	})
@@ -288,12 +450,11 @@ func (s *Service) push(ctx context.Context, req Request) (Outcome, error) {
 	if ev.Push.After == "" || strings.Trim(ev.Push.After, "0") == "" {
 		return Outcome{Status: Skipped, Reason: "branch-deleted"}, nil
 	}
-	settings := req.File.Settings(req.Tenant, req.Installation.Name, ev.Repository.FullName)
-	if !settings.Enabled {
-		return Outcome{Status: Skipped, Reason: reasonDisabled}, nil
+	if runs, err := s.runs(ctx, req); err != nil || !runs {
+		return Outcome{Status: Skipped, Reason: reasonDisabled}, err
 	}
 	out := Outcome{Status: Enqueued, Job: "index"}
-	err := s.store.WithTenant(ctx, req.Tenant.ID(), func(tx pgx.Tx) error {
+	err := s.store.WithAccount(ctx, req.Account.ID(), func(tx pgx.Tx) error {
 		rid, err := ensureRepository(ctx, tx, req, ev.Repository)
 		if err != nil {
 			return err
@@ -301,16 +462,16 @@ func (s *Service) push(ctx context.Context, req Request) (Outcome, error) {
 		// A repository without an index waits for the leader's onboarding
 		// feeder, which paces full builds; a push would queue its full build
 		// ahead of every other repository's.
-		var indexed bool
-		if err := tx.QueryRow(ctx, `SELECT active_index_run_id IS NOT NULL FROM repositories WHERE id = $1`, rid).Scan(&indexed); err != nil {
-			return fmt.Errorf("ingest: read index state: %w", err)
+		indexed, err := store.RepositoryIndexed(ctx, tx, rid)
+		if err != nil {
+			return err
 		}
 		if !indexed {
 			out = Outcome{Status: Skipped, Reason: reasonNotIndexed}
 			return nil
 		}
 		res, err := s.queue.InsertTx(ctx, tx, jobs.IndexArgs{
-			TenantID: req.Tenant.ID(), RepositoryID: rid, CommitSHA: ev.Push.After, Trigger: jobs.TriggerPush,
+			AccountID: req.Account.ID(), RepositoryID: rid, CommitSHA: ev.Push.After, Trigger: jobs.TriggerPush,
 		}, nil)
 		if err != nil {
 			return fmt.Errorf("ingest: enqueue index: %w", err)
@@ -323,8 +484,8 @@ func (s *Service) push(ctx context.Context, req Request) (Outcome, error) {
 	return out, err
 }
 
-// installation records the forge's installation id and the repositories
-// the App now sees. Repositories the App loses are disabled, not deleted.
+// installation records the repositories the App now sees. Repositories the
+// App loses are disabled, not deleted.
 func (s *Service) installation(ctx context.Context, req Request) (Outcome, error) {
 	ev := req.Event
 	inst := ev.Installation
@@ -336,64 +497,90 @@ func (s *Service) installation(ctx context.Context, req Request) (Outcome, error
 	if !enable && !disable {
 		return Outcome{Status: Ignored, Reason: reasonAction}, nil
 	}
-	err := s.store.WithTenant(ctx, req.Tenant.ID(), func(tx pgx.Tx) error {
-		if inst.ID != 0 {
-			if _, err := tx.Exec(ctx, `UPDATE installations SET external_id = $1, updated_at = now() WHERE id = $2`,
-				inst.ID, req.Installation.ID()); err != nil {
-				return fmt.Errorf("ingest: record installation id: %w", err)
-			}
-		}
+	err := s.store.WithAccount(ctx, req.Account.ID(), func(tx pgx.Tx) error {
 		if disable && len(inst.Repositories) == 0 {
-			// The whole installation went away.
-			_, err := tx.Exec(ctx, `UPDATE repositories SET enabled = false, disabled_at = coalesce(disabled_at, now()), updated_at = now()
-				WHERE installation_id = $1 AND managed_by = 'forge'`, req.Installation.ID())
-			return err
+			// The App left this account: its repositories go, not those of
+			// the other accounts the connection serves.
+			return store.DisableForgeRepositories(ctx, tx, req.Account.ID(), "")
 		}
 		for _, name := range inst.Repositories {
 			if enable {
-				if _, err := ensureRepository(ctx, tx, req, &webhook.Repository{FullName: name}); err != nil {
+				// An installation event names a repository without saying
+				// whether it is archived or a fork.
+				if _, _, err := store.EnsureRepository(ctx, tx, req.Account.ID(), store.ReachedRepository{FullName: name}); err != nil {
 					return err
 				}
 				continue
 			}
-			if _, err := tx.Exec(ctx, `UPDATE repositories SET enabled = false, disabled_at = coalesce(disabled_at, now()), updated_at = now()
-				WHERE id = $1 AND managed_by = 'forge'`, repoID(req, name)); err != nil {
-				return fmt.Errorf("ingest: disable repository %s: %w", name, err)
+			if err := store.DisableForgeRepositories(ctx, tx, req.Account.ID(), repoID(req, name)); err != nil {
+				return err
 			}
 		}
 		return nil
 	})
-	return Outcome{Status: Enqueued, Job: "installation", Reason: ev.Action}, err
+	return Outcome{Status: Recorded, Reason: ev.Action}, err
 }
 
-// ensureRepository makes sure the repository row exists and, for a
-// forge-managed row, that it is enabled: the forge just told us about it. A
-// file-managed row keeps its settings and enabled flag, only learning the
-// default branch.
-func ensureRepository(ctx context.Context, tx pgx.Tx, req Request, repo *webhook.Repository) (string, error) {
-	id := repoID(req, repo.FullName)
-	_, err := tx.Exec(ctx, `
-		INSERT INTO repositories (id, tenant_id, installation_id, name, default_branch, managed_by, enabled)
-		VALUES ($1, $2, $3, $4, $5, 'forge', true)
-		ON CONFLICT (installation_id, name) DO UPDATE SET
-			default_branch = CASE WHEN EXCLUDED.default_branch <> '' THEN EXCLUDED.default_branch ELSE repositories.default_branch END,
-			enabled = CASE WHEN repositories.managed_by = 'forge' THEN true ELSE repositories.enabled END,
-			disabled_at = CASE WHEN repositories.managed_by = 'forge' THEN NULL ELSE repositories.disabled_at END,
-			updated_at = now()`,
-		id, req.Tenant.ID(), req.Installation.ID(), repo.FullName, repo.DefaultBranch)
-	if err != nil {
-		return "", fmt.Errorf("ingest: ensure repository %s: %w", repo.FullName, err)
+// repository records what the forge now says of a repository: that it was
+// created, archived, unarchived, renamed or transferred. A repository
+// deleted is disabled, and so is the row of the name one renamed or
+// transferred had, as one the App no longer reaches is. That row is the
+// old owner's, which kritique may not serve; a transfer to an account it
+// does not serve never reaches here.
+func (s *Service) repository(ctx context.Context, req Request) (Outcome, error) {
+	ev := req.Event
+	if ev.Repository == nil {
+		return Outcome{Status: Ignored, Reason: reasonNoRepository}, nil
 	}
-	return id, nil
+	out := Outcome{Status: Recorded, Reason: ev.Action}
+	err := s.store.WithAccount(ctx, req.Account.ID(), func(tx pgx.Tx) error {
+		if ev.Action == "deleted" {
+			return store.DisableForgeRepositories(ctx, tx, req.Account.ID(), repoID(req, ev.Repository.FullName))
+		}
+		_, err := ensureRepository(ctx, tx, req, ev.Repository)
+		return err
+	})
+	if err != nil || ev.Previous == "" {
+		return out, err
+	}
+	owner, _, _ := strings.Cut(ev.Previous, "/")
+	previous, ok := req.File.Account(req.Account.Forge, owner)
+	if !ok {
+		return out, nil
+	}
+	id := configfile.RepositoryID(previous.ID(), ev.Previous)
+	// A rename that changes only the case keeps its row.
+	if id == repoID(req, ev.Repository.FullName) {
+		return out, nil
+	}
+	return out, s.store.WithAccount(ctx, previous.ID(), func(tx pgx.Tx) error {
+		return store.DisableForgeRepositories(ctx, tx, previous.ID(), id)
+	})
+}
+
+func ensureRepository(ctx context.Context, tx pgx.Tx, req Request, repo *webhook.Repository) (string, error) {
+	id, _, err := store.EnsureRepository(ctx, tx, req.Account.ID(), store.ReachedRepository{
+		FullName: repo.FullName, DefaultBranch: repo.DefaultBranch, Traits: &repo.RepoTraits,
+	})
+	return id, err
+}
+
+// runs reports whether the event's repository is reviewed: what the event
+// says of it, and the choice an admin made for it in the dashboard.
+func (s *Service) runs(ctx context.Context, req Request) (bool, error) {
+	repo := req.Event.Repository
+	t := repo.RepoTraits
+	err := s.store.WithAccount(ctx, req.Account.ID(), func(tx pgx.Tx) error {
+		var err error
+		t.TurnedOn, err = store.TurnedOn(ctx, tx, repoID(req, repo.FullName))
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return req.File.Runs(req.Account, repo.FullName, t), nil
 }
 
 func repoID(req Request, fullName string) string {
-	return configfile.RepositoryID(req.Installation.ID(), fullName)
-}
-
-func nullTime(pr *webhook.PullRequest) any {
-	if pr.CreatedAt.IsZero() {
-		return nil
-	}
-	return pr.CreatedAt
+	return configfile.RepositoryID(req.Account.ID(), fullName)
 }

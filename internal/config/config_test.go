@@ -1,12 +1,9 @@
 package config
 
 import (
-	"bytes"
-	"encoding/base64"
 	"log/slog"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestLoad(t *testing.T) {
@@ -25,19 +22,16 @@ func TestLoad(t *testing.T) {
 				if c.LogFormat != "json" {
 					t.Fatalf("log format default = %q", c.LogFormat)
 				}
-				if c.ConfigFile != "/etc/kritique/config.yaml" || c.ConfigReloadInterval != 10*time.Second {
-					t.Fatalf("config file defaults = %q, %s", c.ConfigFile, c.ConfigReloadInterval)
+				if c.ConfigFile != "" {
+					t.Fatalf("config file default = %q", c.ConfigFile)
 				}
-				if c.EmbeddingEnabled() || c.DatabaseOwnerURL != "" || c.ReindexOnModelChange {
-					t.Fatalf("embedder and owner should be unset by default: %+v", c)
+				if c.DatabaseOwnerURL != "" {
+					t.Fatalf("owner should be unset by default: %+v", c)
 				}
 				if lvl, _ := c.Level(); lvl != slog.LevelInfo {
 					t.Fatalf("level default = %v", lvl)
 				}
-				if c.WebAddr != ":8083" {
-					t.Fatalf("web addr default = %q", c.WebAddr)
-				}
-				if c.WebURL != "" || c.WebURLParsed() != nil || c.WebEnabled(RoleAll) {
+				if c.WebURL != "" || c.WebURLParsed() != nil {
 					t.Fatalf("web should be unconfigured by default: %+v", c)
 				}
 			},
@@ -56,24 +50,11 @@ func TestLoad(t *testing.T) {
 		},
 		{name: "bad level", env: map[string]string{"KRITIQUE_LOG_LEVEL": "loud"}, wantErr: true},
 		{name: "bad format", env: map[string]string{"KRITIQUE_LOG_FORMAT": "xml"}, wantErr: true},
-		{name: "zero reload interval", env: map[string]string{"KRITIQUE_CONFIG_RELOAD_INTERVAL": "0s"}, wantErr: true},
 		{name: "database url required", env: map[string]string{"KRITIQUE_DATABASE_URL": ""}, wantErr: true},
-		{name: "embedder half configured", env: map[string]string{"KRITIQUE_EMBED_MODEL": "m", "KRITIQUE_EMBED_DIMS": "1024"}, wantErr: true},
-		{name: "embedder dims over halfvec limit", env: map[string]string{"KRITIQUE_EMBED_BASE_URL": "https://e", "KRITIQUE_EMBED_API_KEY": "k", "KRITIQUE_EMBED_MODEL": "m", "KRITIQUE_EMBED_DIMS": "4096"}, wantErr: true},
-		{name: "embedder max batch zero", env: map[string]string{"KRITIQUE_EMBED_MAX_BATCH": "0"}, wantErr: true},
 		{name: "same role for app and runner", env: map[string]string{"KRITIQUE_DATABASE_RUNNER_ROLE": "kritique_app"}, wantErr: true},
 		{name: "zero leader retry", env: map[string]string{"KRITIQUE_LEADER_RETRY_INTERVAL": "0"}, wantErr: true},
 		{name: "unknown executor", env: map[string]string{"KRITIQUE_EXECUTOR": "docker"}, wantErr: true},
 		{name: "zero review workers", env: map[string]string{"KRITIQUE_REVIEW_WORKERS": "0"}, wantErr: true},
-		{
-			name: "embedder fully configured",
-			env:  map[string]string{"KRITIQUE_EMBED_BASE_URL": "https://e", "KRITIQUE_EMBED_API_KEY": "k", "KRITIQUE_EMBED_MODEL": "m", "KRITIQUE_EMBED_DIMS": "1024"},
-			check: func(t *testing.T, c *Config) {
-				if !c.EmbeddingEnabled() || c.EmbedDims != 1024 || c.EmbedMaxBatch != 64 {
-					t.Fatalf("embedder = %+v", c)
-				}
-			},
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -102,10 +83,12 @@ func TestWebURL(t *testing.T) {
 		url     string
 		wantErr bool
 		want    string // expected WebURL after Load, defaults to url when empty and wantErr is false
+		path    string // expected WebBasePath
 	}{
 		{name: "unset", url: ""},
 		{name: "valid https", url: "https://dash.example.com"},
 		{name: "trailing slash trimmed", url: "http://dash.example.com/", want: "http://dash.example.com"},
+		{name: "under a path", url: "https://example.com/kritique/", want: "https://example.com/kritique", path: "/kritique"},
 		{name: "missing scheme", url: "dash.example.com", wantErr: true},
 		{name: "non-http scheme", url: "ftp://dash.example.com", wantErr: true},
 		{name: "missing host", url: "https:///path", wantErr: true},
@@ -130,12 +113,12 @@ func TestWebURL(t *testing.T) {
 			if want == "" {
 				want = tt.url
 			}
-			if cfg.WebURL != want {
-				t.Fatalf("WebURL = %q, want %q", cfg.WebURL, want)
+			if cfg.WebURL != want || cfg.WebBasePath() != tt.path {
+				t.Fatalf("WebURL = %q, base path %q, want %q, %q", cfg.WebURL, cfg.WebBasePath(), want, tt.path)
 			}
 			if tt.url == "" {
-				if cfg.WebURLParsed() != nil || cfg.WebEnabled(RoleAll) || !cfg.WebEnabled(RoleWeb) {
-					t.Fatalf("web role always serves the dashboard, all does only once WebURL is set: %+v", cfg)
+				if cfg.WebURLParsed() != nil {
+					t.Fatalf("WebURLParsed() = %v, want nil", cfg.WebURLParsed())
 				}
 				return
 			}
@@ -143,111 +126,64 @@ func TestWebURL(t *testing.T) {
 			if u == nil || u.String() == "" {
 				t.Fatalf("WebURLParsed() = %v", u)
 			}
-			if !cfg.WebEnabled(RoleAll) || !cfg.WebEnabled(RoleWeb) {
-				t.Fatal("web should be enabled for all and web once WebURL is set")
-			}
 		})
 	}
 }
 
-func TestRoleValidation(t *testing.T) {
+func TestCommandValidation(t *testing.T) {
 	t.Setenv("KRITIQUE_DATABASE_URL", "postgres://app@db/kritique")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cfg.ValidateWorker(); err == nil {
-		t.Fatal("kubernetes executor without a runner image must fail")
+	err = cfg.ValidateServe()
+	for _, want := range []string{"KRITIQUE_RUNNER_IMAGE", "KRITIQUE_WEB_URL", "KRITIQUE_GATEWAY_URL"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("serve without a runner image, a web URL or the gateway = %v, want %s named", err, want)
+		}
 	}
-	cfg.RunnerImage = "img"
-	if err := cfg.ValidateWorker(); err != nil {
+	cfg.RunnerImage, cfg.WebURL, cfg.GatewayURL = "img", "https://dash.example.com", "http://kritique-gateway:8082"
+	if err := cfg.ValidateServe(); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Executor, cfg.RunnerImage = "local", ""
-	if err := cfg.ValidateWorker(); err == nil {
-		t.Fatal("local executor without a runner DSN must fail")
+	cfg.RunnerImagePullPolicy = "Sometimes"
+	if err := cfg.ValidateServe(); err == nil || !strings.Contains(err.Error(), "KRITIQUE_RUNNER_IMAGE_PULL_POLICY") {
+		t.Fatalf("serve with an unknown runner pull policy = %v", err)
+	}
+	cfg.RunnerImagePullPolicy = "IfNotPresent"
+	if err := cfg.ValidateServe(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Executor, cfg.RunnerImage = ExecutorLocal, ""
+	if err := cfg.ValidateServe(); err == nil || !strings.Contains(err.Error(), "KRITIQUE_RUNNER_DATABASE_URL") {
+		t.Fatalf("local executor without a runner DSN = %v", err)
 	}
 	if err := cfg.ValidateRunner(); err == nil {
-		t.Fatal("runner without its inputs must fail")
+		t.Fatal("run without its inputs must fail")
 	}
 	cfg.RunSpecFile = "/var/run/kritique/spec.json"
 	if err := cfg.ValidateRunner(); err != nil {
 		t.Fatal(err)
 	}
-	if err := cfg.ValidateWeb(); err == nil {
-		t.Fatal("web role without KRITIQUE_WEB_URL must fail")
-	}
-	cfg.WebURL = "https://dash.example.com"
-	if err := cfg.ValidateWeb(); err != nil {
-		t.Fatal(err)
-	}
 }
 
-func TestParseRole(t *testing.T) {
-	tests := []struct {
-		in      string
-		want    Role
+func TestParseCommand(t *testing.T) {
+	for _, tt := range []struct {
+		args    []string
+		want    Command
 		wantErr bool
 	}{
-		{in: "all", want: RoleAll},
-		{in: " Worker ", want: RoleWorker},
-		{in: "ingest", want: RoleIngest},
-		{in: "runner", want: RoleRunner},
-		{in: "Web", want: RoleWeb},
-		{in: "", wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.in, func(t *testing.T) {
-			got, err := ParseRole(tt.in)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("ParseRole(%q) = %q, want error", tt.in, got)
-				}
-				return
-			}
-			if err != nil || got != tt.want {
-				t.Fatalf("ParseRole(%q) = %q, %v; want %q", tt.in, got, err, tt.want)
-			}
-		})
-	}
-}
-
-func TestDashboardKeyring(t *testing.T) {
-	key := func(b byte) string { return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{b}, 32)) }
-	tests := []struct {
-		name    string
-		env     map[string]string
-		wantErr string
-		wantNil bool
-	}{
-		{name: "unset", wantNil: true},
-		{name: "current key", env: map[string]string{"KRITIQUE_DASHBOARD_KEY": key('a')}},
-		{name: "current and old keys", env: map[string]string{"KRITIQUE_DASHBOARD_KEY": key('a'), "KRITIQUE_DASHBOARD_OLD_KEYS": key('b') + "," + key('c')}},
-		{name: "short key", env: map[string]string{"KRITIQUE_DASHBOARD_KEY": "c2hvcnQ="}, wantErr: "KRITIQUE_DASHBOARD_KEY"},
-		{name: "bad old key", env: map[string]string{"KRITIQUE_DASHBOARD_KEY": key('a'), "KRITIQUE_DASHBOARD_OLD_KEYS": "nope"}, wantErr: "KRITIQUE_DASHBOARD_OLD_KEYS"},
-		{name: "old key repeats the current one", env: map[string]string{"KRITIQUE_DASHBOARD_KEY": key('a'), "KRITIQUE_DASHBOARD_OLD_KEYS": key('a')}, wantErr: "duplicate"},
-		{name: "old keys without a current key", env: map[string]string{"KRITIQUE_DASHBOARD_OLD_KEYS": key('b')}, wantErr: "KRITIQUE_DASHBOARD_KEY"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("KRITIQUE_DATABASE_URL", "postgres://app@db/kritique")
-			for k, v := range tt.env {
-				t.Setenv(k, v)
-			}
-			cfg, err := Load()
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("Load = %v, want an error mentioning %q", err, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Load: %v", err)
-			}
-			if got := cfg.DashboardKeyring(); (got == nil) != tt.wantNil {
-				t.Fatalf("DashboardKeyring() = %v, want nil %v", got, tt.wantNil)
-			}
-		})
+		{args: nil, want: CommandServe},
+		{args: []string{"serve"}, want: CommandServe},
+		{args: []string{"run"}, want: CommandRun},
+		{args: []string{"--role", "all"}, wantErr: true},
+		{args: []string{"worker"}, wantErr: true},
+		{args: []string{"serve", "extra"}, wantErr: true},
+	} {
+		got, err := ParseCommand(tt.args)
+		if (err != nil) != tt.wantErr || got != tt.want {
+			t.Errorf("ParseCommand(%q) = %q, %v; want %q (error %v)", tt.args, got, err, tt.want, tt.wantErr)
+		}
 	}
 }
 
@@ -263,11 +199,9 @@ func TestEnv(t *testing.T) {
 		vars[e.Name] = e
 	}
 	for name, want := range map[string]EnvVar{
-		"KRITIQUE_ADDR":                   {Name: "KRITIQUE_ADDR", Value: ":9090", Set: true},
-		"KRITIQUE_METRICS_ADDR":           {Name: "KRITIQUE_METRICS_ADDR", Value: ":8081"},
-		"KRITIQUE_CONFIG_RELOAD_INTERVAL": {Name: "KRITIQUE_CONFIG_RELOAD_INTERVAL", Value: "10s"},
-		"KRITIQUE_DATABASE_URL":           {Name: "KRITIQUE_DATABASE_URL", Value: "set", Secret: true, Set: true},
-		"KRITIQUE_DASHBOARD_KEY":          {Name: "KRITIQUE_DASHBOARD_KEY", Value: "not set", Secret: true},
+		"KRITIQUE_ADDR":         {Name: "KRITIQUE_ADDR", Value: ":9090", Set: true},
+		"KRITIQUE_METRICS_ADDR": {Name: "KRITIQUE_METRICS_ADDR", Value: ":8081"},
+		"KRITIQUE_DATABASE_URL": {Name: "KRITIQUE_DATABASE_URL", Value: "set", Secret: true, Set: true},
 	} {
 		if vars[name] != want {
 			t.Errorf("%s = %+v, want %+v", name, vars[name], want)

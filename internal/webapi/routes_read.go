@@ -3,11 +3,12 @@ package webapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +19,6 @@ import (
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/repoconfig"
 	"github.com/perfectra1n/kritique/internal/store"
-	"github.com/perfectra1n/kritique/internal/tasks"
 )
 
 // recentIndexRuns is how many index runs a repository's detail lists.
@@ -27,55 +27,88 @@ const recentIndexRuns = 20
 // registerReads mounts the read-only API.
 func (s *Server) registerReads(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/me", s.handler(s.getMe))
-	mux.HandleFunc("GET /api/v1/tenants", s.handler(s.listTenants))
-	mux.HandleFunc("GET /api/v1/operator/tenants", s.handler(s.listOperatorTenants))
-	mux.HandleFunc("GET /api/v1/operator/instance", s.handler(s.listInstanceSettings))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}", s.tenant(s.getTenant))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/repos", s.tenant(s.listRepos))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/repos/{owner}/{repo}", s.tenant(s.getRepo))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/index-runs", s.tenant(s.listIndexRuns))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/pulls", s.tenant(s.listPulls))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/pulls/{owner}/{repo}/{number}", s.tenant(s.getPull))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/followups", s.tenant(s.listFollowups))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/followups/{commentId}/transcript", s.tenant(s.getFollowupTranscript))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/reviews/{id}", s.tenant(s.getReview))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/reviews/{id}/diff", s.tenant(s.getReviewDiff))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/reviews/{id}/transcript", s.tenant(s.getReviewTranscript))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/reviews/{id}/raw", s.tenant(s.getReviewRaw))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/usage", s.tenant(s.getUsage))
-	mux.HandleFunc("GET /api/v1/tenants/{slug}/queue", s.tenant(s.listQueue))
+	mux.HandleFunc("PUT /api/v1/me/settings", s.handler(s.putSettings))
+	mux.HandleFunc("GET /api/v1/accounts", s.handler(s.listAccounts))
+	mux.HandleFunc("GET /api/v1/queue", s.handler(s.listInstanceQueue))
+	mux.HandleFunc("GET /api/v1/admin/accounts", s.admin(s.listAdminAccounts))
+	mux.HandleFunc("GET /api/v1/admin/instance", s.admin(s.listInstanceSettings))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}", s.account(s.getAccount))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/repos", s.account(s.listRepos))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/repos/{owner}/{repo}", s.account(s.getRepo))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/index-runs", s.account(s.listIndexRuns))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/pulls", s.account(s.listPulls))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/pulls/{owner}/{repo}/{number}", s.account(s.getPull))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/findings", s.account(s.listFindings))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/rules", s.account(s.listRules))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/followups", s.account(s.listFollowups))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/followups/{commentId}/transcript", s.account(s.getFollowupTranscript))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/reviews/{id}", s.account(s.getReview))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/reviews/{id}/diff", s.account(s.getReviewDiff))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/reviews/{id}/transcript", s.account(s.getReviewTranscript))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/reviews/{id}/raw", s.account(s.getReviewRaw))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/usage", s.account(s.getUsage))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/analytics", s.account(s.getAnalytics))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/attention", s.account(s.getAttention))
+	mux.HandleFunc("GET /api/v1/accounts/{forge}/{name}/queue", s.account(s.listQueue))
+}
+
+func toUser(a store.User) User {
+	return User{ID: a.ID, DisplayName: a.DisplayName, Email: a.Email, AvatarURL: a.AvatarURL}
 }
 
 func (s *Server) getMe(w http.ResponseWriter, r *http.Request) error {
 	p := auth.PrincipalFrom(r.Context())
-	me := Me{
-		Account:  account(p.Account),
-		Operator: p.Operator, Tenants: []TenantMembership{},
-	}
+	me := Me{User: toUser(p.User), Admin: p.Admin, Accounts: []string{}, Settings: UserSettings(p.User.Settings)}
 	for _, t := range readable(s.current.Get(), p) {
-		me.Tenants = append(me.Tenants, TenantMembership{Slug: t.Slug, Role: roleOn(p, t.ID()), ManagedBy: t.Origin()})
+		me.Accounts = append(me.Accounts, t.Slug())
 	}
 	writeJSON(w, http.StatusOK, me)
 	return nil
 }
 
-// readable lists the file's tenants p may read, in file order.
-func readable(file *configfile.File, p *auth.Principal) []*configfile.Tenant {
-	var out []*configfile.Tenant
-	for i := range file.Tenants {
-		if p.CanRead(file.Tenants[i].ID()) {
-			out = append(out, &file.Tenants[i])
+// timeZoneName is the shape of an IANA zone name. Whether it names a zone
+// is the browser's to say, which is what formats with it: the server's own
+// zone database need not match the viewer's.
+var timeZoneName = regexp.MustCompile(`^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+){0,2}$`)
+
+// putSettings replaces the caller's own settings.
+func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) error {
+	var req UserSettings
+	if err := readBody(r, &req); err != nil {
+		return err
+	}
+	switch {
+	case req.TimeZone != "" && (len(req.TimeZone) > 64 || !timeZoneName.MatchString(req.TimeZone)):
+		return errBadRequest(CodeBadRequest, "timeZone must be an IANA time zone name, or empty")
+	case req.Clock != "" && req.Clock != "12" && req.Clock != "24":
+		return errBadRequest(CodeBadRequest, `clock must be "12", "24" or empty`)
+	case req.Theme != "" && req.Theme != "light" && req.Theme != "dark":
+		return errBadRequest(CodeBadRequest, `theme must be "light", "dark" or empty`)
+	}
+	if err := s.store.SetUserSettings(r.Context(), auth.PrincipalFrom(r.Context()).User.ID, store.UserSettings(req)); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+// readable lists the running accounts p may read, in order.
+func readable(file *configfile.File, p *auth.Principal) []*configfile.Account {
+	var out []*configfile.Account
+	for i := range file.Accounts {
+		if p.CanRead(file.Accounts[i].ID()) {
+			out = append(out, &file.Accounts[i])
 		}
 	}
 	return out
 }
 
-func (s *Server) listTenants(w http.ResponseWriter, r *http.Request) error {
+func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) error {
 	p := auth.PrincipalFrom(r.Context())
 	file := s.current.Get()
-	out := []TenantSummary{}
+	out := []AccountSummary{}
 	for _, t := range readable(file, p) {
-		sum, err := s.tenantSummary(r.Context(), file, t, roleOn(p, t.ID()))
+		sum, err := s.accountSummary(r.Context(), file, t)
 		if err != nil {
 			return err
 		}
@@ -85,152 +118,146 @@ func (s *Server) listTenants(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (s *Server) tenantSummary(ctx context.Context, file *configfile.File, t *configfile.Tenant, role auth.Role) (TenantSummary, error) {
-	var stats store.TenantStats
-	err := s.store.WithTenant(ctx, t.ID(), func(tx pgx.Tx) error {
+func (s *Server) accountSummary(ctx context.Context, file *configfile.File, t *configfile.Account) (AccountSummary, error) {
+	var stats store.AccountStats
+	var attention store.Attention
+	var polled *time.Time
+	var webhooks map[string]store.WebhookDeliveries
+	err := s.store.WithAccount(ctx, t.ID(), func(tx pgx.Tx) error {
 		var err error
-		stats, err = store.ReadTenantStats(ctx, tx)
+		stats, err = store.ReadAccountStats(ctx, tx, func(name string, traits configfile.RepoTraits) bool { return file.Runs(t, name, traits) })
+		if err != nil {
+			return err
+		}
+		if attention, err = store.ReadAttention(ctx, tx); err != nil {
+			return err
+		}
+		if polled, err = store.ReadLastPoll(ctx, tx); err != nil {
+			return err
+		}
+		webhooks, err = store.ReadWebhookDeliveries(ctx, tx)
 		return err
 	})
 	if err != nil {
-		return TenantSummary{}, err
+		return AccountSummary{}, err
 	}
-	return TenantSummary{
-		Slug: t.Slug, ManagedBy: t.Origin(), Role: role, Installations: stats.Installations, Repositories: stats.Repositories,
-		Reviews7d: stats.Reviews7d, Usage: monthUsage(stats.Month, file.Settings(t, "", "").Limits),
-	}, nil
+	sum := AccountSummary{
+		Slug: t.Slug(), Forge: t.Forge, Repositories: stats.Repositories,
+		Reviews7d: stats.Reviews7d, Usage: monthUsage(stats.Month, file.Settings(t, "").Limits),
+		Attention: attentionDTO(attention), LastPolledAt: polled,
+	}
+	if in := file.ConnectionFor(t); in != nil {
+		sum.Connection = in.Name
+		d := webhooks[in.ID()]
+		sum.LastWebhookAt, sum.LastUnsignedWebhookAt = d.Verified, d.Unsigned
+	}
+	return sum, nil
 }
 
 func monthUsage(m store.MonthUsage, l configfile.Limits) MonthUsage {
 	return MonthUsage{
 		Tokens: m.Tokens, CostUSD: m.CostUSD, TokensPerMonth: l.TokensPerMonth,
 		ReviewsToday: m.ReviewsToday, ReviewsPerDay: l.ReviewsPerDay,
+		Reviews: m.Reviews, ReviewCostUSD: m.ReviewCostUSD, MedianReviewCostUSD: m.MedianReviewCostUSD,
 	}
 }
 
-// listOperatorTenants lists every tenant of the running configuration and
-// every dashboard tenant stored but not part of it. It is reported as a
-// missing route to anyone but an operator.
-func (s *Server) listOperatorTenants(w http.ResponseWriter, r *http.Request) error {
-	p := auth.PrincipalFrom(r.Context())
-	if !p.Operator {
-		return errNotFound("route")
-	}
+// listAdminAccounts lists every running account, and every entry of the
+// instance spec no connection serves. It is reported as a missing route to
+// anyone but an admin.
+func (s *Server) listAdminAccounts(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	file := s.current.Get()
-	stored, err := s.store.DashboardTenants(ctx)
-	if err != nil {
-		return err
-	}
-	revisions := map[string]int64{}
-	for _, d := range stored {
-		revisions[d.Slug] = d.Revision
-	}
-	out := []OperatorTenant{}
-	for i := range file.Tenants {
-		t := &file.Tenants[i]
-		sum, err := s.tenantSummary(ctx, file, t, auth.RoleAdmin)
+	out := []AdminAccount{}
+	for i := range file.Accounts {
+		sum, err := s.accountSummary(ctx, file, &file.Accounts[i])
 		if err != nil {
 			return err
 		}
-		out = append(out, OperatorTenant{TenantSummary: sum, Live: true, Revision: revisions[t.Slug]})
-		delete(revisions, t.Slug)
+		out = append(out, AdminAccount{AccountSummary: sum, Live: true})
 	}
-	for _, d := range stored {
-		if rev, ok := revisions[d.Slug]; ok {
-			out = append(out, OperatorTenant{
-				Slug: d.Slug, ManagedBy: configfile.OriginDashboard, Role: auth.RoleAdmin,
-				Revision: rev,
-			})
-		}
-	}
-	for _, sk := range file.Skipped() {
-		out = append(out, OperatorTenant{Slug: sk.Slug, ManagedBy: configfile.OriginFile, Role: auth.RoleAdmin, Conflict: sk.Reason})
+	for _, a := range file.Unserved() {
+		out = append(out, AdminAccount{Slug: a.Slug(), Forge: a.Forge, Conflict: "no connection serves this account"})
 	}
 	writeJSON(w, http.StatusOK, out)
 	return nil
 }
 
-func (s *Server) getTenant(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) getAccount(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	ctx := r.Context()
 	var month store.MonthUsage
+	var webhooks map[string]store.WebhookDeliveries
+	var polled *time.Time
 	if err := s.read(ctx, t, func(tx pgx.Tx) error {
 		var err error
-		month, err = store.ReadMonthUsage(ctx, tx)
+		if month, err = store.ReadMonthUsage(ctx, tx); err != nil {
+			return err
+		}
+		if webhooks, err = store.ReadWebhookDeliveries(ctx, tx); err != nil {
+			return err
+		}
+		polled, err = store.ReadLastPoll(ctx, tx)
 		return err
 	}); err != nil {
 		return err
 	}
-	settings := t.file.Settings(t.tenant, "", "")
-	d := TenantDetail{
-		Slug: t.tenant.Slug, ManagedBy: t.tenant.Origin(), Role: t.role(), Installations: []Installation{},
-		Models: models(settings.Models), Limits: limits(settings.Limits), Filter: filterSource(settings),
-		Usage: monthUsage(month, settings.Limits),
+	settings := t.file.Settings(t.account, "")
+	d := AccountDetail{
+		Slug:   t.account.Slug(),
+		Models: settings.Models, Limits: settings.Limits, Filters: settings.Filters,
+		Usage: monthUsage(month, settings.Limits), LastPolledAt: polled,
 	}
-	for i := range t.tenant.Installations {
-		d.Installations = append(d.Installations, installation(&t.tenant.Installations[i]))
+	if in := t.file.ConnectionFor(t.account); in != nil {
+		d.Connection = connection(in)
+		d.Connection.delivered(webhooks[in.ID()])
 	}
 	writeJSON(w, http.StatusOK, d)
 	return nil
 }
 
-func installation(in *configfile.Installation) Installation {
-	out := Installation{
-		Name: in.Name, Forge: in.Forge, Host: in.Host, Account: in.Account, CredentialKind: CredentialToken,
-		HookPath: "/hooks/" + in.Name,
+func connection(in *configfile.Connection) Connection {
+	return Connection{
+		Name: in.Name, Forge: in.Forge, WebURL: in.WebURL(), Accounts: in.Accounts, HookPath: "/hooks/" + in.Name,
 		Credentials: CredentialsSet{
-			Token: in.TokenValue().Value() != "", GitToken: in.GitTokenValue().Value() != "",
+			ClientID: in.App.ClientIDValue() != "", PrivateKey: in.App.PrivateKeyValue().Value() != "",
 			WebhookSecret: in.WebhookSecretValue().Value() != "",
 		},
 	}
-	if in.App != nil {
-		out.CredentialKind = CredentialApp
-		out.Credentials.ClientID = in.App.ClientIDValue() != ""
-		out.Credentials.PrivateKey = in.App.PrivateKeyValue().Value() != ""
-	}
-	return out
 }
 
-func models(m configfile.Models) Models { return Models{Review: m.Review, Fallback: m.Fallback} }
-
-func limits(l configfile.Limits) Limits {
-	return Limits{Concurrency: l.Concurrency, ReviewsPerDay: l.ReviewsPerDay, TokensPerMonth: l.TokensPerMonth}
-}
-
-func filterSource(s configfile.Settings) string {
-	if s.Filter == nil {
-		return ""
-	}
-	return s.Filter.Source()
-}
-
-func (s *Server) listRepos(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) listRepos(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	page, err := parsePage(r)
 	if err != nil {
 		return err
+	}
+	f := store.RepoFilter{Kind: store.RepoKind(r.URL.Query().Get("type"))}
+	if !f.Kind.Valid() {
+		return errBadRequest(CodeBadRequest, "type must be forks or archived")
 	}
 	ctx := r.Context()
 	var rows []store.RepoRow
 	var next *store.Cursor
 	if err := s.read(ctx, t, func(tx pgx.Tx) error {
-		rows, next, err = store.ListRepos(ctx, tx, page)
+		rows, next, err = store.ListRepos(ctx, tx, f, page)
 		return err
 	}); err != nil {
 		return err
 	}
 	items := make([]Repository, len(rows))
 	for i, row := range rows {
-		items[i] = repository(row)
+		items[i] = repository(row, t.file.Runs(t.account, row.FullName, row.RepoTraits))
 	}
 	writeJSON(w, http.StatusOK, newPage(items, next))
 	return nil
 }
 
-func repository(r store.RepoRow) Repository {
+// repository is r as the API shows it: enabled when the App reaches it and
+// it runs.
+func repository(r store.RepoRow, on bool) Repository {
 	out := Repository{
-		ID: r.ID, FullName: r.FullName, Installation: r.Installation, Enabled: r.Enabled, ManagedBy: r.ManagedBy,
-		DefaultBranch: r.DefaultBranch,
-		Index:         IndexState{ActiveCommit: r.ActiveCommit, ActiveAt: r.ActiveAt, LastRunStatus: r.LastIndexStatus, LastRunAt: r.LastIndexAt},
+		ID: r.ID, FullName: r.FullName, Enabled: r.Enabled && on, ManagedBy: r.ManagedBy,
+		DefaultBranch: r.DefaultBranch, Archived: r.Archived, Fork: r.Fork, TurnedOn: r.TurnedOn,
+		Index: IndexState{ActiveCommit: r.ActiveCommit, ActiveAt: r.ActiveAt, LastRunStatus: r.LastIndexStatus, LastRunAt: r.LastIndexAt},
 	}
 	if r.LastReview != nil {
 		out.LastReview = &ReviewRef{ID: r.LastReview.ID, Status: r.LastReview.Status, CreatedAt: r.LastReview.CreatedAt}
@@ -238,33 +265,25 @@ func repository(r store.RepoRow) Repository {
 	return out
 }
 
-// findRepo resolves {owner}/{repo}, and ?installation= when a tenant has
-// the same repository under two installations.
+// findRepo resolves {owner}/{repo}.
 func findRepo(ctx context.Context, tx pgx.Tx, r *http.Request) (store.RepoRow, error) {
-	return lookupRepo(ctx, tx, r.PathValue("owner")+"/"+r.PathValue("repo"), r.URL.Query().Get("installation"))
+	return lookupRepo(ctx, tx, r.PathValue("owner")+"/"+r.PathValue("repo"))
 }
 
-// lookupRepo resolves a repository by name and, when several installations
-// hold it, by installation: a name that stays ambiguous is a 409 listing
-// them, never a guess.
-func lookupRepo(ctx context.Context, tx pgx.Tx, name, installation string) (store.RepoRow, error) {
-	row, err := store.FindRepo(ctx, tx, name, installation)
+// lookupRepo resolves a repository of the account by its full name.
+func lookupRepo(ctx context.Context, tx pgx.Tx, name string) (store.RepoRow, error) {
+	row, err := store.FindRepo(ctx, tx, name)
 	if errors.Is(err, store.ErrNotFound) {
 		return row, errNotFound("repository")
-	}
-	if e, ok := errors.AsType[*store.AmbiguousRepoError](err); ok {
-		return row, errStatus(http.StatusConflict, CodeAmbiguous, "several installations hold this repository; pass ?installation=",
-			ambiguousRepoDetails{Installations: e.Installations})
 	}
 	return row, err
 }
 
-func (s *Server) getRepo(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) getRepo(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	ctx := r.Context()
 	var row store.RepoRow
 	var runs []store.IndexRunRow
 	var file *store.RepoFileRow
-	var taskConfig *store.TaskConfigRow
 	if err := s.read(ctx, t, func(tx pgx.Tx) error {
 		var err error
 		if row, err = findRepo(ctx, tx, r); err != nil {
@@ -280,37 +299,21 @@ func (s *Server) getRepo(w http.ResponseWriter, r *http.Request, t *tenantScope)
 		case !errors.Is(err, store.ErrNotFound):
 			return err
 		}
-		tc, err := store.RepoTaskConfig(ctx, tx, row.ID)
-		switch {
-		case err == nil:
-			taskConfig = &tc
-		case !errors.Is(err, store.ErrNotFound):
-			return err
-		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	settings := t.file.Settings(t.tenant, row.Installation, row.FullName)
+	settings := t.file.Settings(t.account, row.FullName)
 	d := RepoDetail{
-		Repository: repository(row), Settings: repoSettings(settings), Sources: t.file.Sources(t.tenant, row.Installation, row.FullName),
+		Repository: repository(row, t.file.Runs(t.account, row.FullName, row.RepoTraits)),
+		Settings:   repoSettings(settings), Sources: t.file.Sources(t.account, row.FullName),
 		RepoConfig: repoConfig(settings, file), IndexRuns: indexRuns(runs),
 	}
-	var taskDoc *string
-	switch {
-	case taskConfig != nil:
-		d.TasksSource, d.TasksCommit, taskDoc = TasksSourceDefaultBranch, taskConfig.Commit, taskConfig.Doc
-	case file != nil:
-		d.TasksSource, d.TasksCommit, taskDoc = TasksSourceLastReview, file.Commit, file.Doc
-	default:
-		d.TasksSource = TasksSourceLastReview
-	}
-	d.Tasks, d.TaskNotes, d.TasksIgnored = repoTasks(settings, taskDoc)
 	writeJSON(w, http.StatusOK, d)
 	return nil
 }
 
-// repoConfig applies the .kritique.yaml a review read to the operator's
+// repoConfig applies the .kritique.yaml a review read to the admin's
 // settings as they are now; nil when no review has read one.
 func repoConfig(settings configfile.Settings, row *store.RepoFileRow) *RepoConfig {
 	if row == nil {
@@ -323,10 +326,7 @@ func repoConfig(settings configfile.Settings, row *store.RepoFileRow) *RepoConfi
 	m, err := repoconfig.Merge(doc, settings)
 	out := &RepoConfig{
 		ReviewID: row.ReviewID, Commit: row.Commit, Found: row.Doc != nil, Settings: repoSettings(m.Settings),
-		SkipPaths: nonNil(m.Skip.OnlyPaths), Dropped: nonNil(m.Dropped),
-	}
-	if m.InRepoFilter != nil {
-		out.Filter = m.InRepoFilter.Source()
+		Dropped: m.Dropped, Filters: m.InRepoFilters,
 	}
 	if err != nil {
 		out.Ignored = err.Error()
@@ -334,92 +334,14 @@ func repoConfig(settings configfile.Settings, row *store.RepoFileRow) *RepoConfi
 	return out
 }
 
-// repoTasks resolves the tasks that run for the repository from the
-// operator's settings and the repository's .kritique.yaml, nil when there is
-// none. A file that does not parse leaves the operator's tasks, as it does
-// for a run, and ignored says why.
-func repoTasks(settings configfile.Settings, file *string) (defs []TaskDef, notes []TaskNote, ignored string) {
-	var doc []byte
-	if file != nil {
-		doc = []byte(*file)
-	}
-	m, err := repoconfig.Merge(doc, settings)
-	if err != nil {
-		ignored = err.Error()
-	}
-	named := func(ts []tasks.Task, name string) bool {
-		return slices.ContainsFunc(ts, func(t tasks.Task) bool { return t.Name == name })
-	}
-	defs = make([]TaskDef, len(m.Tasks))
-	for i, t := range m.Tasks {
-		d := TaskDef{
-			Name: t.Name, Source: configfile.SourceRepository, If: t.If, Mode: string(t.RunMode()), Triggers: []string{}, Actions: []string{},
-		}
-		switch {
-		case named(settings.Tasks, t.Name):
-			d.Source = configfile.SourceFile
-		case named(settings.DashboardTasks, t.Name):
-			d.Source = configfile.SourceDashboard
-		}
-		for _, tr := range t.On {
-			d.Triggers = append(d.Triggers, tr.Names()...)
-		}
-		a := t.Actions
-		for _, k := range []struct {
-			kind string
-			set  bool
-		}{
-			{tasks.ActionComment, a.Comment != nil && a.Comment.PostMode() != tasks.CommentNone},
-			{tasks.ActionLabels, a.Labels != nil},
-			{tasks.ActionState, a.State != nil},
-			{tasks.ActionAssign, a.Assign != nil},
-			{tasks.ActionReviewers, a.Reviewers != nil},
-			{tasks.ActionInlineComments, a.InlineComments != nil},
-		} {
-			if k.set {
-				d.Actions = append(d.Actions, k.kind)
-			}
-		}
-		defs[i] = d
-	}
-	notes = make([]TaskNote, len(m.TaskNotes))
-	for i, n := range m.TaskNotes {
-		notes[i] = TaskNote{Task: n.Task, What: n.What, Reason: n.Reason}
-	}
-	return defs, notes, ignored
-}
-
+// repoSettings is s as the API serves it; the slices the dashboard reads
+// are never null.
 func repoSettings(s configfile.Settings) RepoSettings {
 	return RepoSettings{
-		Enabled: s.Enabled, Mode: s.Mode, Models: models(s.Models), Filter: filterSource(s), Forks: s.Forks,
-		Ignore: nonNil(slices.Clone(s.Ignore)), SettleSeconds: int64(s.Settle.Seconds()), MaxDeltaFiles: s.Incremental.MaxDeltaFiles,
-		Review: ReviewBlock{
-			Instructions: nonNil(s.Review.Instructions), RequireSuggestedFix: s.Review.RequireSuggestedFix, Templates: s.Review.Templates,
-			MinSeverity: s.Review.MinSeverity, InlineComments: s.Review.InlineComments, Context: nonNil(s.Review.Context),
-		},
-		Agent: AgentLimits{
-			MaxSteps: s.Agent.MaxSteps, MaxToolOutputBytes: s.Agent.MaxToolOutputBytes, MaxTokens: s.Agent.MaxTokens,
-			TimeoutSeconds: int64(s.Agent.Timeout.Seconds()), Commands: nonNil(s.Agent.Commands),
-			CommandTimeoutSeconds: int64(s.Agent.CommandTimeout.Seconds()),
-		},
-		Limits: limits(s.Limits),
-		Allow:  allowBounds(s.Allow),
-	}
-}
-
-func allowBounds(a configfile.Allow) AllowBounds {
-	seconds := func(d *time.Duration) *int64 {
-		if d == nil {
-			return nil
-		}
-		return new(int64(d.Seconds()))
-	}
-	return AllowBounds{
-		Modes: a.Modes, Models: a.Models, Commands: a.Commands, SettleSeconds: seconds(a.Settle),
-		Agent: AllowAgentBounds{
-			MaxSteps: a.Agent.MaxSteps, MaxToolOutputBytes: a.Agent.MaxToolOutputBytes, MaxTokens: a.Agent.MaxTokens,
-			TimeoutSeconds: seconds(a.Agent.Timeout),
-		},
+		Enabled: s.Enabled, Models: s.Models, Filters: s.Filters,
+		Ignore: s.Ignore, SettleSeconds: int64(s.Settle.Seconds()), MaxAutoReviews: s.MaxAutoReviews,
+		MaxDeltaFiles: s.Incremental.MaxDeltaFiles,
+		Review:        s.Review, Confidence: s.Confidence, Skills: s.Skills, Agent: s.Agent, Limits: s.Limits,
 	}
 }
 
@@ -440,11 +362,11 @@ func repoFilter(ctx context.Context, tx pgx.Tx, r *http.Request) (string, error)
 	if name == "" {
 		return "", nil
 	}
-	row, err := lookupRepo(ctx, tx, name, r.URL.Query().Get("installation"))
+	row, err := lookupRepo(ctx, tx, name)
 	return row.ID, err
 }
 
-func (s *Server) listIndexRuns(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
+func (s *Server) listIndexRuns(w http.ResponseWriter, r *http.Request, t *accountScope) error {
 	page, err := parsePage(r)
 	if err != nil {
 		return err
@@ -467,25 +389,17 @@ func (s *Server) listIndexRuns(w http.ResponseWriter, r *http.Request, t *tenant
 }
 
 func (s *Server) listInstanceSettings(w http.ResponseWriter, r *http.Request) error {
-	if !auth.PrincipalFrom(r.Context()).Operator {
-		return errNotFound("route")
-	}
 	writeJSON(w, http.StatusOK, instanceSettings(s.current.Get(), s.env))
 	return nil
 }
 
-// instanceSettings are the settings no tenant owns: this process's
-// environment, then the file's instance blocks.
+// instanceSettings are the settings no account owns: this process's
+// environment, then the connections, sign-in, and the instance defaults,
+// each with where it comes from.
 func instanceSettings(f *configfile.File, env []config.EnvVar) []InstanceSetting {
 	out := []InstanceSetting{}
 	add := func(section, key, value string, source configfile.Source) {
 		out = append(out, InstanceSetting{Section: section, Key: key, Value: value, Source: source})
-	}
-	from := func(set bool) configfile.Source {
-		if set {
-			return configfile.SourceFile
-		}
-		return configfile.SourceDefault
 	}
 	for _, e := range env {
 		source := configfile.SourceDefault
@@ -494,39 +408,64 @@ func instanceSettings(f *configfile.File, env []config.EnvVar) []InstanceSetting
 		}
 		add("environment", e.Name, withoutCredentials(e.Value), source)
 	}
-	for _, name := range slices.Sorted(maps.Keys(f.Providers)) {
-		p := f.Providers[name]
+	for _, in := range f.Connections {
+		source := configfile.SourceFile
+		if f.ConnectionFromEnv(in.Name) {
+			source = configfile.SourceEnv
+		}
+		add("apps", in.Name, strings.Join(in.Accounts, ", ")+", webhook /hooks/"+in.Name, source)
+	}
+	a := f.Auth
+	// An auth key an environment variable set shows as coming from it.
+	authFrom := func(path string, set bool) configfile.Source {
+		switch {
+		case a.FromEnv(path):
+			return configfile.SourceEnv
+		case set:
+			return configfile.SourceFile
+		}
+		return configfile.SourceDefault
+	}
+	add("auth", "sessionTTL", a.SessionTTLOrDefault().String(), authFrom("sessionTTL", a.SessionTTL > 0))
+	admin, _, local := a.AdminUser()
+	if !local {
+		admin = "none"
+	}
+	add("auth", "admin", admin, authFrom("admin.password", local))
+	for _, s := range a.SignIns() {
+		value := s.Label()
+		if s.Issuer != "" {
+			value += " at " + s.Issuer
+		}
+		if s.RoleMappingExpr == "" {
+			value += ", no role mapping"
+		}
+		add("auth", string(s.Type()), value, authFrom(string(s.Type())+".clientId", true))
+	}
+	layer := f.FileLayer()
+	for _, name := range slices.Sorted(maps.Keys(layer.Providers)) {
+		p := layer.Providers[name]
 		value := string(p.Type)
 		if p.BaseURL != "" {
 			value += " at " + withoutCredentials(p.BaseURL)
 		}
-		if p.APIKeyValue().Value() == "" {
-			value += ", no API key"
+		add("providers", name, value, p.Source)
+	}
+	for _, m := range []struct {
+		key string
+		v   configfile.FileValue
+	}{{"model", layer.Review}, {"fallback", layer.Fallback}} {
+		if m.v.Value != "" {
+			add("review", m.key, m.v.Value, m.v.Source)
 		}
-		add("providers", name, value, configfile.SourceFile)
 	}
-	add("polling", "interval", f.PollInterval().String(), from(f.Polling.Interval != nil))
-	add("polling", "lookback", f.PollLookback().String(), from(f.Polling.Lookback > 0))
-	add("indexing", "onboardWindow", strconv.Itoa(f.OnboardWindow()), from(f.Indexing.OnboardWindow > 0))
-	add("retention", "disabledIndexGrace", f.DisabledIndexGrace().String(), from(f.Retention.DisabledIndexGrace > 0))
-	add("retention", "transcripts", f.Retention.TranscriptsOrDefault().String(), from(f.Retention.Transcripts > 0))
-	deadline, _ := f.RunnerFor(nil)
-	runner := f.Defaults.Runner
-	add("defaults", "runner.activeDeadlineSeconds", deadline.String(), from(runner != nil && runner.ActiveDeadlineSeconds > 0))
-	for _, t := range f.Tools {
-		add("tools", t.Name, t.Image+" ("+strings.Join(t.Provides(), ", ")+")", configfile.SourceFile)
+	for _, d := range layer.Defaults {
+		group, key, _ := strings.Cut(d.Key, ".")
+		add(group, key, d.Value, d.Source)
 	}
-	add("egress", "allowHosts", listOrNone(f.Egress.AllowHosts), from(len(f.Egress.AllowHosts) > 0))
-	for _, sp := range f.Web.SignIn {
-		add("web", "signIn."+sp.Name, string(sp.Type), configfile.SourceFile)
+	if e := layer.Embedding; e != nil {
+		add("embedding", e.Model, fmt.Sprintf("%d dimensions", e.Dims), e.Source)
 	}
-	add("web", "operators", strconv.Itoa(len(f.Web.Operators)), from(len(f.Web.Operators) > 0))
-	ttl := f.Web.SessionTTL
-	if ttl == 0 {
-		ttl = configfile.DefaultSessionTTL
-	}
-	add("web", "sessionTTL", ttl.String(), from(f.Web.SessionTTL > 0))
-	add("web", "dashboardForgeHosts", strings.Join(f.DashboardForgeHosts(), ", "), from(len(f.Web.DashboardForgeHosts) > 0))
 	return out
 }
 
@@ -539,11 +478,4 @@ func withoutCredentials(s string) string {
 	}
 	u.User = nil
 	return u.String() + " (credentials hidden)"
-}
-
-func listOrNone(xs []string) string {
-	if len(xs) == 0 {
-		return "none"
-	}
-	return strings.Join(xs, ", ")
 }

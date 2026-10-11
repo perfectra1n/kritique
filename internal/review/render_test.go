@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"net/url"
 	"reflect"
 	"runtime"
 	"strings"
@@ -11,15 +12,69 @@ import (
 
 func sampleData() RenderData {
 	res := Result{
-		Summary: Summary{Take: "Solid change with one real bug.", Praise: []string{"Clear tests"}},
+		Summary: Summary{Headline: "Adds the widget cache.", Take: "Solid change with one real bug.", Praise: []string{"Clear tests"}},
 		Findings: []Finding{
-			{Path: "main.go", Line: 11, Severity: SeverityBlocking, Title: "nil map write", Explanation: "m is nil here.", SuggestedFix: "m = map[string]int{}",
-				URL: "https://forge.example/o/r/blob/0123456789abcdef/main.go#L11"},
+			{Path: "main.go", Line: 11, Severity: SeverityBlocking, Category: CategoryCorrectness, Title: "nil map write", Explanation: "m is nil here.",
+				SuggestedFix: "m = map[string]int{}", URL: "https://forge.example/o/r/blob/0123456789abcdef/main.go#L11"},
 			{Path: "README.md", Line: 2, Severity: SeverityNit, Title: "typo", Explanation: "the the"},
 		},
 	}
-	return RenderData{Number: 42, HeadSHA: "0123456789abcdef", Model: "vendor/model-x", Result: res, Counts: res.Counts(),
+	return RenderData{Number: 42, HeadSHA: "0123456789abcdef", Model: "vendor/model-x", Reviews: 1, Result: res, Counts: res.Counts(),
 		Notes: []string{"1 file(s) were omitted from the diff to fit the context budget"}}
+}
+
+func TestFooterSubject(t *testing.T) {
+	for in, want := range map[string]string{
+		"fix(cache): evict stale entries":                                   "fix(cache): evict stale entries",
+		"  feat: trailing  \n\nbody\n":                                      "feat: trailing",
+		"fix: handle ] correctly":                                           "fix: handle \\] correctly",
+		"[x](https://evil.examp) <i>x</i> *b* `c`":                          "\\[x\\](https://evil.examp) \\<i\\>x\\</i\\> \\*b\\* \\`c\\`",
+		"back\\slash_and_under":                                             "back\\\\slash\\_and\\_under",
+		"fix(cache): evict the widget cache when the backing table changes": "fix(cache): evict the widget cache when...",
+		"feat: ünïcödé subject that runs past forty characters for sure":    "feat: ünïcödé subject that runs past for...",
+		"": "",
+	} {
+		if got := FooterSubject(in); got != want {
+			t.Errorf("FooterSubject(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRenderSummaryRerunBadge(t *testing.T) {
+	d := sampleData()
+	body, _ := RenderSummary(t.Context(), Templates{}, d)
+	if strings.Contains(body, "badges/rerun") || !strings.Contains(body, "\n## Kritique Review\n") {
+		t.Fatalf("without a dashboard the heading is bare:\n%s", body)
+	}
+	d.WebURL, d.PullURL = "https://kritique.example/k", "https://kritique.example/k/#/a/github/acme/pulls/acme/widgets/42"
+	body, _ = RenderSummary(t.Context(), Templates{}, d)
+	want := "\n## <a href=\"https://kritique.example/k/#/a/github/acme/pulls/acme/widgets/42\"><picture>" +
+		"<source media=\"(prefers-color-scheme: dark)\" srcset=\"https://kritique.example/k/badges/rerun-dark.svg\">" +
+		"<img alt=\"Re-run\" src=\"https://kritique.example/k/badges/rerun.svg\" align=\"right\"></picture></a>Kritique Review\n"
+	if !strings.Contains(body, want) {
+		t.Fatalf("missing %q in:\n%s", want, body)
+	}
+}
+
+func TestPullPageURL(t *testing.T) {
+	web, _ := url.Parse("https://kritique.example/k")
+	tests := []struct {
+		name                        string
+		web                         *url.URL
+		forge, account, owner, repo string
+		want                        string
+	}{
+		{"no dashboard", nil, "github", "acme", "acme", "widgets", ""},
+		{"with a base path", web, "github", "acme", "acme", "widgets", "https://kritique.example/k/#/a/github/acme/pulls/acme/widgets/42"},
+		{"escaped segments", web, "forgejo", "Acme Org", "acme", "a/b", "https://kritique.example/k/#/a/forgejo/Acme%20Org/pulls/acme/a%2Fb/42"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PullPageURL(tt.web, tt.forge, tt.account, tt.owner, tt.repo, 42); got != tt.want {
+				t.Fatalf("PullPageURL = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestRenderSummaryDefault(t *testing.T) {
@@ -32,14 +87,15 @@ func TestRenderSummaryDefault(t *testing.T) {
 		t.Fatalf("first line = %q", first)
 	}
 	for _, want := range []string{
-		"### kritique review",
-		"**2 findings** · 1 blocking · 0 important · 1 nit",
-		"Solid change with one real bug.",
-		"- Clear tests",
-		"- **[blocking]** [`main.go:11`](https://forge.example/o/r/blob/0123456789abcdef/main.go#L11) nil map write",
+		"## Kritique Review\n\nAdds the widget cache.\n\n**2 findings** · 1 blocking · 1 nit\n\n## Findings\n",
+		"**2 findings** · 1 blocking · 1 nit\n",
+		"## Findings\n\n- **[blocking",
+		"### Summary\n\nSolid change with one real bug.\n\n**What's good**\n\n- Clear tests\n",
+		"- **[blocking · correctness]** [`main.go:11`](https://forge.example/o/r/blob/0123456789abcdef/main.go#L11) nil map write",
 		"- **[nit]** `README.md:2` typo",
 		"_1 file(s) were omitted from the diff to fit the context budget._",
-		"Reviewed `0123456` by kritique with vendor/model-x. Reviews never block a merge.",
+		// Without the head's subject the footer names it by hash.
+		"<sub>Reviews (1) · Last reviewed commit: `0123456` · vendor/model-x</sub>",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in:\n%s", want, body)
@@ -48,17 +104,204 @@ func TestRenderSummaryDefault(t *testing.T) {
 	if strings.Contains(body, "\n\n\n") {
 		t.Fatalf("blank lines doubled:\n%s", body)
 	}
-	if strings.Index(body, "2 findings") > strings.Index(body, "Solid change") || strings.Index(body, "Solid change") > strings.Index(body, "`main.go:11`") {
-		t.Fatalf("sections out of order:\n%s", body)
+	if strings.Index(body, "2 findings") > strings.Index(body, "`main.go:11`") || strings.Index(body, "`main.go:11`") > strings.Index(body, "### Summary") {
+		t.Fatalf("the findings come before the summary:\n%s", body)
 	}
 
 	empty := sampleData()
 	empty.Result.Findings, empty.Counts, empty.Notes, empty.Result.Summary.Praise = nil, Counts{}, nil, nil
-	empty.Incremental, empty.PriorHeadSHA = true, "fedcba9876543210"
+	empty.Incremental, empty.PriorHeadSHA, empty.Reviews = true, "fedcba9876543210", 2
+	empty.HeadSubject = FooterSubject("fix(cache): evict the widget cache when the backing table changes")
 	body, _ = RenderSummary(t.Context(), Templates{}, empty)
-	if !strings.Contains(body, "Nothing worth flagging") || strings.Contains(body, "_1 file") || !strings.Contains(body, "`fedcba9`") ||
-		strings.Contains(body, "0 findings") || strings.Contains(body, "\n\n\n") {
+	// An incremental review says so in the footer alone, with the subject
+	// cut to fit.
+	if !strings.Contains(body, "**No findings**\n\n### Summary\n\nSolid change") || strings.Contains(body, "Incremental review") ||
+		!strings.Contains(body, "<sub>Reviews (2) · Last reviewed commit: \"fix(cache): evict the widget cache when...\" · vendor/model-x</sub>") ||
+		strings.Contains(body, "_1 file") || strings.Contains(body, "0 findings") || strings.Contains(body, "Findings\n") ||
+		strings.Contains(body, "\n\n\n") {
 		t.Fatalf("empty body:\n%s", body)
+	}
+}
+
+func TestRenderSummaryDiagram(t *testing.T) {
+	d := sampleData()
+	body, _ := RenderSummary(t.Context(), Templates{}, d)
+	if strings.Contains(body, "mermaid") {
+		t.Fatalf("a review without a diagram draws none:\n%s", body)
+	}
+	d.Result.Summary.Diagram = "flowchart TD\n  A --> B"
+	body, _ = RenderSummary(t.Context(), Templates{}, d)
+	want := "Solid change with one real bug.\n\n<details open>\n<summary>Flow</summary>\n\n" +
+		"```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n  A --> B\n```\n\n</details>\n\n**What's good**\n"
+	if !strings.Contains(body, want) || strings.Contains(body, "\n\n\n") {
+		t.Fatalf("missing %q in:\n%s", want, body)
+	}
+}
+
+// TestRenderSummaryConfidence: a scored review states its score under the
+// findings count, with the threshold it missed, and an unscored one says
+// nothing of it.
+func TestRenderSummaryConfidence(t *testing.T) {
+	tests := []struct {
+		name       string
+		confidence *Confidence
+		want       string
+	}{
+		{
+			name: "a score that passes", confidence: &Confidence{Score: 5, Threshold: 5, Risk: RiskLow, Reason: "Nothing stands against it."},
+			want: "1 nit\n\n**Confidence 5/5** · low risk: Nothing stands against it.\n\n## Findings\n",
+		},
+		{
+			name: "a score under the threshold", confidence: &Confidence{Score: 2, Threshold: 4, Reason: "The nil map write stands."},
+			want: "1 nit\n\n**Confidence 2/5**: The nil map write stands.\n\n## Findings\n",
+		},
+		{name: "no score", want: "1 nit\n\n## Findings\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := sampleData()
+			data.Confidence = tt.confidence
+			body, notes := RenderSummary(t.Context(), Templates{}, data)
+			if len(notes) != 0 || !strings.Contains(body, tt.want) || strings.Contains(body, "\n\n\n") {
+				t.Fatalf("notes = %v, want %q in:\n%s", notes, tt.want, body)
+			}
+		})
+	}
+}
+
+// TestRenderSummaryCost: the footer ends with what the pull request's
+// reviews cost where the repository shows it, and FormatUSD keeps a small
+// amount from reading as free.
+func TestRenderSummaryCost(t *testing.T) {
+	d := sampleData()
+	d.Cost = FormatUSD(1.234)
+	body, _ := RenderSummary(t.Context(), Templates{}, d)
+	if !strings.Contains(body, "<sub>Reviews (1) · Last reviewed commit: `0123456` · vendor/model-x · $1.23</sub>") {
+		t.Fatalf("footer without the cost:\n%s", body)
+	}
+	// The model's effort, when one is set, follows the model after a slash.
+	d.Effort = "high"
+	if body, _ := RenderSummary(t.Context(), Templates{}, d); !strings.Contains(body, " · vendor/model-x/high · $1.23</sub>") {
+		t.Fatalf("footer without the effort:\n%s", body)
+	}
+	for amount, want := range map[float64]string{0: "$0", 0.0042: "$0.0042", 0.01: "$0.01", 12.5: "$12.50"} {
+		if got := FormatUSD(amount); got != want {
+			t.Errorf("FormatUSD(%v) = %q, want %q", amount, got, want)
+		}
+	}
+}
+
+// TestRenderSummaryApproval: a review that may approve says whether it
+// did, under the confidence line when there is one, with the reason the
+// score's line does not state already; one that may not says nothing.
+func TestRenderSummaryApproval(t *testing.T) {
+	tests := []struct {
+		name       string
+		confidence *Confidence
+		approval   *Approval
+		want       string
+	}{
+		{name: "approved on its findings", approval: &Approval{Approved: true, Reason: "nothing blocking or important found"},
+			want: "1 nit\n\n**Approved**: nothing blocking or important found\n\n## Findings\n"},
+		{name: "approved on its score", confidence: &Confidence{Score: 5, Threshold: 4, Risk: RiskLow, Reason: "Clean."}, approval: &Approval{Approved: true},
+			want: "**Confidence 5/5** · low risk: Clean.\n\n**Approved**\n\n## Findings\n"},
+		{name: "withheld", confidence: &Confidence{Score: 2, Threshold: 4, Reason: "The nil map write stands."},
+			approval: &Approval{Reason: "confidence 2/5 is below the threshold of 4"},
+			want:     "**Confidence 2/5**: The nil map write stands.\n\n**Not approved**: confidence 2/5 is below the threshold of 4\n\n## Findings\n"},
+		{name: "not asked to approve", want: "1 nit\n\n## Findings\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := sampleData()
+			data.Confidence, data.Approval = tt.confidence, tt.approval
+			body, notes := RenderSummary(t.Context(), Templates{}, data)
+			if len(notes) != 0 || !strings.Contains(body, tt.want) || strings.Contains(body, "\n\n\n") {
+				t.Fatalf("notes = %v, want %q in:\n%s", notes, tt.want, body)
+			}
+			if tt.approval == nil && strings.Contains(body, "pproved") {
+				t.Fatalf("an approval appears unasked:\n%s", body)
+			}
+		})
+	}
+}
+
+// TestRenderSummaryLinks renders what the worker adds once it knows the
+// forge: commit links, a thread per finding, the last review's findings
+// and the ones off the diff, and no praise for a bot's pull request.
+func TestRenderSummaryLinks(t *testing.T) {
+	d := sampleData()
+	d.HeadURL, d.AuthorIsBot = "https://forge.example/o/r/commit/0123456789abcdef", true
+	d.Result.Findings[0].ThreadURL = "https://forge.example/o/r/pull/42#r1"
+	d.Incremental, d.PriorHeadSHA, d.PriorHeadURL = true, "fedcba9876543210", "https://forge.example/o/r/commit/fedcba9876543210"
+	d.Reviews, d.HeadSubject = 3, "fix(cache): evict stale entries"
+	d.Prior = []PriorFinding{
+		{Path: "main.go", Line: 9, Severity: SeverityBlocking, Title: "nil map write", Resolved: true,
+			URL: "https://forge.example/o/r/blob/fedcba9876543210/main.go#L9", ThreadURL: "https://forge.example/o/r/pull/42#r2"},
+		{Path: "util.go", Line: 3, Severity: SeverityImportant, Title: "unchecked error", Resolved: true},
+		{Path: "cache.go", Line: 5, Severity: SeverityNit, Title: "terse name", Dismissed: true, DismissReason: "house style"},
+	}
+	d.Unanchored = []Finding{{Path: "other.go", Line: 7, Severity: SeverityImportant, Title: "stale cache", Explanation: "The cache is\nnever cleared."}}
+	body, notes := RenderSummary(t.Context(), Templates{}, d)
+	if len(notes) != 0 {
+		t.Fatalf("notes = %v", notes)
+	}
+	for _, want := range []string{
+		"- **[blocking · correctness]** [`main.go:11`](https://forge.example/o/r/blob/0123456789abcdef/main.go#L11) [nil map write](https://forge.example/o/r/pull/42#r1)\n",
+		"- **[nit]** `README.md:2` typo\n",
+		"**Outside the diff**\n\n- **[important]** `other.go:7` stale cache\n\n  The cache is\n  never cleared.\n",
+		"<details>\n<summary>Earlier findings (2 resolved, 1 dismissed)</summary>\n\n" +
+			"- **[blocking]** [`main.go:9`](https://forge.example/o/r/blob/fedcba9876543210/main.go#L9) [nil map write](https://forge.example/o/r/pull/42#r2) · resolved\n" +
+			"- **[important]** `util.go:3` unchecked error · resolved\n" +
+			"- **[nit]** `cache.go:5` terse name · dismissed: house style\n\n</details>\n\n### Summary",
+		"<sub>Reviews (3) · Last reviewed commit: [\"fix(cache): evict stale entries\"](https://forge.example/o/r/commit/0123456789abcdef) · vendor/model-x</sub>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "What's good") || strings.Contains(body, "Clear tests") || strings.Contains(body, "\n\n\n") {
+		t.Fatalf("a bot's pull request is praised, or blank lines doubled:\n%s", body)
+	}
+	if strings.Index(body, "## Findings") > strings.Index(body, "**Outside the diff**") ||
+		strings.Index(body, "**Outside the diff**") > strings.Index(body, "<summary>Earlier findings") ||
+		strings.Index(body, "<summary>Earlier findings") > strings.Index(body, "### Summary") || strings.Index(body, "### Summary") > strings.Index(body, "_1 file") {
+		t.Fatalf("sections out of order:\n%s", body)
+	}
+}
+
+// TestRenderSummaryOutsideDiffOnly: findings the diff does not show count
+// in the summary's line like any other, so a review with only those does
+// not read as finding nothing.
+func TestRenderSummaryOutsideDiffOnly(t *testing.T) {
+	d := sampleData()
+	d.Result.Findings = nil
+	d.Unanchored = []Finding{
+		{Path: "other.go", Line: 7, Severity: SeverityImportant, Title: "stale cache", Explanation: "Never cleared."},
+		// Reported again off the diff, under the thread its first report opened.
+		{Path: "other.go", Line: 9, Severity: SeverityNit, Title: "terse name", Explanation: "Still.", ThreadURL: "https://forge.example/o/r/pull/42#r3"},
+	}
+	d.Counts = Result{Findings: d.Unanchored}.Counts()
+	body, _ := RenderSummary(t.Context(), Templates{}, d)
+	if !strings.Contains(body, "**2 findings** · 1 important · 1 nit\n") || strings.Contains(body, "No findings") ||
+		!strings.Contains(body, "**Outside the diff**\n\n- **[important]** `other.go:7` stale cache\n") ||
+		!strings.Contains(body, "- **[nit]** `other.go:9` [terse name](https://forge.example/o/r/pull/42#r3)\n") {
+		t.Fatalf("body:\n%s", body)
+	}
+}
+
+// TestRenderSummaryHeldBack: findings a re-review held back are listed
+// folded away, and count nowhere.
+func TestRenderSummaryHeldBack(t *testing.T) {
+	d := sampleData()
+	d.Result.Findings, d.Counts = nil, Counts{}
+	d.HeldBack = []Finding{{Path: "old.go", Line: 3, Severity: SeverityImportant, Category: CategoryReliability, Title: "unbounded retry",
+		URL: "https://forge.example/o/r/blob/0123456789abcdef/old.go#L3"}}
+	body, _ := RenderSummary(t.Context(), Templates{}, d)
+	want := "**No findings**\n\n## Findings\n\n<details>\n<summary>Held back (1): not on lines changed since the last review</summary>\n\n" +
+		"- **[important · reliability]** [`old.go:3`](https://forge.example/o/r/blob/0123456789abcdef/old.go#L3) unbounded retry\n\n" +
+		"</details>\n\n### Summary\n"
+	if !strings.Contains(body, want) || strings.Contains(body, "\n\n\n") {
+		t.Fatalf("missing %q in:\n%s", want, body)
 	}
 }
 
@@ -89,13 +332,13 @@ func TestRenderSummaryIncomplete(t *testing.T) {
 		t.Fatalf("notes = %v", notes)
 	}
 	for _, want := range []string{
-		Marker(7), "### kritique review", "**Review incomplete for `0123456`:** agent stopped: max_steps.", "_a note._",
+		Marker(7), "## Kritique Review\n\n**Review incomplete for", "**Review incomplete for `0123456`:** agent stopped: max_steps.", "_a note._",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in:\n%s", want, body)
 		}
 	}
-	for _, unwanted := range []string{"Nothing worth flagging", "blocking ·"} {
+	for _, unwanted := range []string{"No findings", "blocking"} {
 		if strings.Contains(body, unwanted) {
 			t.Fatalf("an incomplete review must not claim %q:\n%s", unwanted, body)
 		}
@@ -158,7 +401,7 @@ func TestRenderSummaryCustom(t *testing.T) {
 			if len(notes) != 1 || !strings.Contains(notes[0], tt.note) {
 				t.Fatalf("notes = %v, want one containing %q", notes, tt.note)
 			}
-			if !strings.Contains(body, "### kritique review") || !strings.Contains(body, notes[0]) {
+			if !strings.Contains(body, "## Kritique Review\n") || !strings.Contains(body, notes[0]) {
 				t.Fatalf("fallback body should be the default and carry the note:\n%s", body)
 			}
 			if len(body) > MaxRenderBytes {
@@ -177,11 +420,15 @@ func TestRenderSummaryMarkerCannotBeRemoved(t *testing.T) {
 
 func TestRenderInline(t *testing.T) {
 	f := sampleData().Result.Findings[0]
+	marker := FindingMarker(Fingerprint(f)) + "\n"
 	body, notes := RenderInline(t.Context(), Templates{}, f)
 	if len(notes) != 0 {
 		t.Fatalf("notes = %v", notes)
 	}
-	for _, want := range []string{"**[blocking]** **nil map write**", "m is nil here.", "m = map[string]int{}"} {
+	if !strings.HasPrefix(body, marker) {
+		t.Fatalf("inline comment does not lead with its marker:\n%s", body)
+	}
+	for _, want := range []string{"**[blocking · correctness]** **nil map write**", "m is nil here.", "m = map[string]int{}"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in:\n%s", want, body)
 		}
@@ -206,11 +453,11 @@ func TestRenderInline(t *testing.T) {
 	}
 
 	body, notes = RenderInline(t.Context(), Templates{Inline: "{{ .Severity }}|{{ .Path }}:{{ .Line }}|{{ .Title }}|{{ .Explanation }}|{{ .SuggestedFix }}"}, f)
-	if len(notes) != 0 || body != "blocking|main.go:11|nil map write|m is nil here.|m = map[string]int{}" {
+	if len(notes) != 0 || body != marker+"blocking|main.go:11|nil map write|m is nil here.|m = map[string]int{}" {
 		t.Fatalf("custom inline = %q, notes %v", body, notes)
 	}
 	body, notes = RenderInline(t.Context(), Templates{Inline: `{{ template "x" }}`}, f)
-	if len(notes) != 1 || !strings.Contains(body, "**nil map write**") {
+	if len(notes) != 1 || !strings.HasPrefix(body, marker) || !strings.Contains(body, "**nil map write**") {
 		t.Fatalf("fallback inline = %q, notes %v", body, notes)
 	}
 }
@@ -358,5 +605,19 @@ func TestCallLimitsMatchTheDocs(t *testing.T) {
 				t.Fatalf("out = %q, err = %v", out, err)
 			}
 		})
+	}
+}
+
+func TestPlainSuggestions(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"text\n```suggestion\nx := 1\n```\n", "text\n```\nx := 1\n```\n"},
+		{"  ````suggestion  \nx\n````", "  ````\nx\n````"},
+		{"```go\nx\n```", "```go\nx\n```"},
+		{"```suggestions\nx\n```", "```suggestions\nx\n```"},
+		{"a ```suggestion in prose", "a ```suggestion in prose"},
+	} {
+		if got := PlainSuggestions(tt.in); got != tt.want {
+			t.Errorf("PlainSuggestions(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }

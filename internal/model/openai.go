@@ -1,12 +1,15 @@
 package model
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
+	"time"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -18,6 +21,14 @@ var attribution = map[string]string{
 	"HTTP-Referer": "https://github.com/perfectra1n/kritique",
 	"X-Title":      "kritique",
 }
+
+// Version is the kritique version the adapters identify themselves with to
+// a provider; main sets it once at startup. Model gateways that distinguish
+// coding agents from generic SDK traffic ask for a client's own user agent
+// rather than the SDK's.
+var Version = "dev"
+
+func userAgent() string { return "kritique/" + Version }
 
 // OpenAIConfig configures an OpenAI chat-completions adapter.
 type OpenAIConfig struct {
@@ -33,8 +44,32 @@ type OpenAIConfig struct {
 	// ReportsModel trusts the response's model field to name the model
 	// that answered, as kritique's model gateway sets it.
 	ReportsModel bool
-	Pricing      Pricing
+	// OpenCode names the step's conversation in the header OpenCode Go
+	// and Zen route and cache prompts by; without it they refuse the
+	// request.
+	OpenCode bool
+	Pricing  Pricing
+	// Retries is how many times the SDK's client sends a request the
+	// server failed again on its own, minding its Retry-After and
+	// x-should-retry headers; zero sends it once. A provider's adapter
+	// leaves it at zero: the gateway owns retrying, with the provider's
+	// retries, and the SDK's own would multiply its attempts.
+	Retries int
+	// RequestTimeout bounds one request; zero is StepTimeout, a
+	// provider's. The runner's client of the gateway allows the gateway's
+	// whole step budget.
+	RequestTimeout time.Duration
+	// Part names, in PartHeader on every request, the part of a split
+	// review the runner's client of the gateway steps for; zero sends none.
+	Part int
 }
+
+// sessionHeader carries StepRequest.Session to OpenCode.
+const sessionHeader = "x-opencode-session"
+
+// PartHeader carries, from a runner to the gateway, the part of a split
+// review a step is for.
+const PartHeader = "X-Kritique-Part"
 
 // OpenAI is a Stepper over the chat completions API of OpenAI or any server
 // compatible with it.
@@ -42,6 +77,7 @@ type OpenAI struct {
 	client       openai.Client
 	openRouter   bool
 	reportsModel bool
+	openCode     bool
 	pricing      Pricing
 }
 
@@ -60,11 +96,17 @@ func NewOpenAI(cfg OpenAIConfig) (*OpenAI, error) {
 	if cfg.HTTPClient != nil {
 		opts = append(opts, option.WithHTTPClient(cfg.HTTPClient))
 	}
+	opts = append(opts, option.WithHeader("User-Agent", userAgent()), option.WithMaxRetries(cfg.Retries),
+		option.WithRequestTimeout(cmp.Or(cfg.RequestTimeout, StepTimeout)))
 	for k, v := range attribution {
 		opts = append(opts, option.WithHeader(k, v))
 	}
+	if cfg.Part > 0 {
+		opts = append(opts, option.WithHeader(PartHeader, strconv.Itoa(cfg.Part)))
+	}
 	return &OpenAI{
-		client: openai.NewClient(opts...), openRouter: cfg.OpenRouter, reportsModel: cfg.OpenRouter || cfg.ReportsModel, pricing: cfg.Pricing,
+		client: openai.NewClient(opts...), openRouter: cfg.OpenRouter, reportsModel: cfg.OpenRouter || cfg.ReportsModel,
+		openCode: cfg.OpenCode, pricing: cfg.Pricing,
 	}, nil
 }
 
@@ -88,12 +130,27 @@ func (o *OpenAI) Step(ctx context.Context, req StepRequest) (StepResponse, error
 	if err != nil {
 		return StepResponse{}, err
 	}
+	var opts []option.RequestOption
+	if o.openCode && req.Session != "" {
+		opts = append(opts, option.WithHeader(sessionHeader, req.Session))
+	}
 	if o.openRouter {
-		// OpenRouter walks the models list itself, primary first.
-		var opts []option.RequestOption
+		// OpenRouter walks the models list itself, primary first. The
+		// top-level cache_control is its automatic prompt caching, a
+		// breakpoint on the last cacheable block that moves forward as the
+		// conversation grows; without it, providers whose caching is not
+		// automatic (Anthropic, Gemini) cache none of a tool loop's steps.
 		opts = append(opts, option.WithJSONSet("usage", map[string]any{"include": true}))
+		if !req.Once {
+			opts = append(opts, option.WithJSONSet("cache_control", map[string]any{"type": "ephemeral"}))
+		}
 		if len(req.Fallbacks) > 0 {
 			opts = append(opts, option.WithJSONSet("models", append([]string{req.Model}, req.Fallbacks...)))
+		}
+		if req.Effort != "" {
+			// OpenRouter's own reasoning parameter, which it maps to the
+			// nearest level each model in the list takes.
+			opts = append(opts, option.WithJSONSet("reasoning", map[string]any{"effort": string(req.Effort)}))
 		}
 		resp, err := o.step(ctx, params, req.Model, opts...)
 		if err != nil {
@@ -101,7 +158,7 @@ func (o *OpenAI) Step(ctx context.Context, req StepRequest) (StepResponse, error
 		}
 		return resp, nil
 	}
-	return eachModel(ctx, req, func(id string) (StepResponse, error) { return o.step(ctx, params, id) })
+	return eachModel(ctx, req, func(id string) (StepResponse, error) { return o.step(ctx, params, id, opts...) })
 }
 
 func (o *OpenAI) step(
@@ -113,7 +170,7 @@ func (o *OpenAI) step(
 		return StepResponse{}, fmt.Errorf("%w: %s", ErrBudget, apiErr.Message)
 	}
 	if err != nil {
-		return StepResponse{}, err
+		return StepResponse{}, openAIError(err)
 	}
 	if len(cc.Choices) == 0 {
 		return StepResponse{}, errors.New("response has no choices")
@@ -125,17 +182,14 @@ func (o *OpenAI) step(
 		// in the list, and the gateway answers for a model the runner only
 		// names as "review"; both responses say which. Another provider's
 		// model field names a dated snapshot of the one asked for, which is
-		// not what the operator configured, so it is not used.
+		// not what an admin configured, so it is not used.
 		out.Model = cc.Model
 	}
 	for _, tc := range msg.ToolCalls {
 		if tc.Type != "function" {
 			continue
 		}
-		args := tc.Function.Arguments
-		if args == "" {
-			args = "{}"
-		}
+		args := cmp.Or(tc.Function.Arguments, "{}")
 		out.ToolCalls = append(out.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Input: json.RawMessage(args)})
 	}
 
@@ -163,6 +217,15 @@ func (o *OpenAI) step(
 		out.CostUSD = o.pricing.cost(modelID, out.Usage)
 	}
 	return out, nil
+}
+
+// openAIError adds the body a server refused a request with to the SDK's
+// error, whose own text is only the status; the body says why.
+func openAIError(err error) error {
+	if e, ok := errors.AsType[*openai.Error](err); ok && e.RawJSON() != "" {
+		return fmt.Errorf("%w %s", err, e.RawJSON())
+	}
+	return err
 }
 
 func openAIStop(finish string) StopReason {
@@ -195,6 +258,9 @@ func (o *OpenAI) params(req StepRequest) (openai.ChatCompletionNewParams, error)
 		} else {
 			p.MaxCompletionTokens = openai.Int(req.MaxTokens)
 		}
+	}
+	if req.Effort != "" && !o.openRouter {
+		p.ReasoningEffort = shared.ReasoningEffort(req.Effort)
 	}
 	if len(req.Tools) == 0 {
 		return p, nil
@@ -231,10 +297,7 @@ func openAIMessages(m Message) []openai.ChatCompletionMessageParamUnion {
 			a.Content.OfString = openai.String(m.Text)
 		}
 		for _, c := range m.ToolCalls {
-			args := string(c.Input)
-			if args == "" {
-				args = "{}"
-			}
+			args := cmp.Or(string(c.Input), "{}")
 			a.ToolCalls = append(a.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{
 				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
 					ID: c.ID, Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{Name: c.Name, Arguments: args},
@@ -248,7 +311,7 @@ func openAIMessages(m Message) []openai.ChatCompletionMessageParamUnion {
 		content := r.Content
 		if r.IsError {
 			// Chat completions has no error flag on a tool message.
-			content = "Error: " + content
+			content = toolErrorPrefix + content
 		}
 		out = append(out, openai.ToolMessage(content, r.CallID))
 	}

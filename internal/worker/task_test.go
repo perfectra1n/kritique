@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/riverqueue/river"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/executor"
@@ -57,9 +57,9 @@ func TestIsBot(t *testing.T) {
 
 func TestMatchTasksAndJobs(t *testing.T) {
 	ts := taskDefs(t, `
-- {name: triage, mode: single, on: [{issue: [opened]}], if: '!("triaged" in subject.labels)'}
+- {name: triage, mode: single, on: [{issue: [opened]}], when: [{expr: '!("triaged" in subject.labels)'}]}
 - {name: closer, on: [{issue: [closed]}]}
-- {name: broken, on: [{issue: []}], if: 'subject.nope == 1'}
+- {name: broken, on: [{issue: []}], when: [{expr: 'subject.nope == 1'}]}
 - {name: releases, on: [{raw: {event: release}}]}
 `)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -88,18 +88,18 @@ func TestMatchTasksAndJobs(t *testing.T) {
 		})
 	}
 
-	args := jobs.TaskDispatchArgs{TenantID: "t", RepositoryID: "r", EventID: "e"}
+	args := jobs.TaskDispatchArgs{AccountID: "t", RepositoryID: "r", EventID: "e"}
 	ev := store.TaskEvent{SubjectKind: "issue", SubjectNumber: 7}
 	runs, queued := taskJobs(ts[:2], args, ev, []string{"issue.opened", "raw:issues.opened"}, "sha")
 	wantRuns := []store.TaskRun{
-		{TenantID: "t", RepositoryID: "r", Task: "triage", EventID: "e", SubjectKind: "issue", SubjectNumber: 7, Trigger: "issue.opened",
+		{AccountID: "t", RepositoryID: "r", Task: "triage", EventID: "e", SubjectKind: "issue", SubjectNumber: 7, Trigger: "issue.opened",
 			Mode: "single", ConfigSHA: "sha"},
-		{TenantID: "t", RepositoryID: "r", Task: "closer", EventID: "e", SubjectKind: "issue", SubjectNumber: 7, Trigger: "issue.opened",
+		{AccountID: "t", RepositoryID: "r", Task: "closer", EventID: "e", SubjectKind: "issue", SubjectNumber: 7, Trigger: "issue.opened",
 			Mode: "agentic", ConfigSHA: "sha"},
 	}
 	wantJobs := []jobs.TaskArgs{
-		{TenantID: "t", RepositoryID: "r", EventID: "e", Task: "triage", ConfigSHA: "sha"},
-		{TenantID: "t", RepositoryID: "r", EventID: "e", Task: "closer", ConfigSHA: "sha"},
+		{AccountID: "t", RepositoryID: "r", EventID: "e", Task: "triage", ConfigSHA: "sha"},
+		{AccountID: "t", RepositoryID: "r", EventID: "e", Task: "closer", ConfigSHA: "sha"},
 	}
 	if !reflect.DeepEqual(runs, wantRuns) || !reflect.DeepEqual(queued, wantJobs) {
 		t.Fatalf("taskJobs = %+v, %+v", runs, queued)
@@ -204,7 +204,7 @@ func TestThreadTail(t *testing.T) {
 }
 
 func TestRelatedIssues(t *testing.T) {
-	got := relatedIssues([]forge.Issue{{Number: 7, Title: "self"}, {Number: 3, Title: "other", State: "open", IsPull: true}}, 7)
+	got := relatedIssues([]forge.Issue{{Number: 7, Title: "self"}, {Number: 3, Title: "other", State: "open", PullRequest: true}}, 7)
 	if want := []relatedIssue{{Number: 3, Title: "other", State: "open", Pull: true}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("relatedIssues = %+v", got)
 	}
@@ -259,7 +259,7 @@ func TestDraftGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, _, err := repoconfig.Parse(doc)
+	f, err := repoconfig.Parse(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,9 +270,9 @@ func TestDraftGuard(t *testing.T) {
 		raw   map[string]any
 		want  int
 	}{
-		{"ready", forge.Issue{Number: 2, IsPull: true, State: "open"}, nil, 1},
-		{"draft on the forge", forge.Issue{Number: 2, IsPull: true, State: "open", Draft: true}, nil, 0},
-		{"draft in the delivery", forge.Issue{Number: 2, IsPull: true, State: "open"},
+		{"ready", forge.Issue{Number: 2, PullRequest: true, State: "open"}, nil, 1},
+		{"draft on the forge", forge.Issue{Number: 2, PullRequest: true, State: "open", Draft: true}, nil, 0},
+		{"draft in the delivery", forge.Issue{Number: 2, PullRequest: true, State: "open"},
 			map[string]any{"pull_request": map[string]any{"number": float64(2), "draft": true}}, 0},
 	}
 	for _, tt := range tests {
@@ -314,8 +314,8 @@ func TestAgenticSlotNeedsReadToken(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &taskRunner{
-				w:      &Task{GatewayURL: "http://gateway", Executor: noExecutor{}},
-				file:   &configfile.File{Providers: map[string]configfile.Provider{"openrouter": {}}},
+				w:    &Task{GatewayURL: "http://gateway", Executor: noExecutor{}},
+				file: &configfile.File{Providers: map[string]configfile.Provider{"openrouter": {}}}, account: &configfile.Account{},
 				task:   &tasks.Task{Models: tasks.Models{Review: "openrouter/m"}},
 				client: readTokenForge{err: tt.err}, owner: "acme", name: "widgets",
 			}

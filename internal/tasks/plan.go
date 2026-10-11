@@ -74,7 +74,7 @@ const (
 // exist in the repository, and a proposed one must match a propose glob;
 // a user must be well formed, allowed by f.UserAllowed and, when
 // proposed, listed; a state change must be declared; inline comments and
-// review requests need a pull request. A block whose if is false, or
+// review requests need a pull request. A block none of whose when conditions holds, or
 // fails, contributes nothing. When a label is both added and removed, the
 // add wins. Everything left out is in Dropped with its reason. Finally the
 // report comment is rendered with the planned actions as .Applied.
@@ -109,14 +109,15 @@ func (pb *planner) drop(action, value, reason string) {
 // blocked says why g does not hold, "" when it does. A guard that fails
 // is noted under action, since no value may carry the reason.
 func (pb *planner) blocked(g *guard, action string) string {
-	ok, err := g.eval(pb.vars)
+	ok, failed, err := g.eval(pb.vars)
 	switch {
+	case ok:
 	case err != nil:
-		reason := "its if failed: " + err.Error()
-		pb.drop(action, g.src, reason)
+		reason := "its when failed: " + err.Error()
+		pb.drop(action, failed, reason)
 		return reason
-	case !ok:
-		return "its if is false"
+	default:
+		return "no when condition holds"
 	}
 	return ""
 }

@@ -7,14 +7,17 @@ package contextpack
 
 import (
 	"bytes"
+	"cmp"
 	"context"
-	"fmt"
-	"sort"
+	"io"
+	"slices"
 	"time"
 
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/storer"
 
 	"github.com/perfectra1n/kritique/internal/chunk"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // Stages, in the order the prompt spends its budget on them.
@@ -22,9 +25,33 @@ const (
 	StageOverlay    = "overlay"
 	StageDefinition = "definition"
 	StageCaller     = "caller"
-	// StageSimilar is added by the worker from the embedding index.
+	// StageSimilar is what the gateway finds in the embedding index for the
+	// diff's hunks.
 	StageSimilar = "similar"
 )
+
+// Similar-code bounds the gateway enforces on one request and a run keeps
+// to: texts embedded per request, and characters per text.
+const (
+	SimilarQueries    = 12
+	SimilarQueryChars = 3000
+)
+
+// SimilarRequest is what a run sends the gateway to search its
+// repository's index: the texts to embed, and the paths to leave out of
+// the answer, which the prompt already carries.
+type SimilarRequest struct {
+	Queries []string `json:"queries"`
+	Exclude []string `json:"exclude,omitempty"`
+}
+
+// SimilarResponse is the gateway's answer: the nearest chunks, StageSimilar
+// each, and whether the repository has an index to search at all, so a run
+// can tell an empty answer from no index.
+type SimilarResponse struct {
+	Chunks  []Chunk `json:"chunks"`
+	Indexed bool    `json:"indexed"`
+}
 
 // Chunk is one piece of context and the stage that contributed it.
 type Chunk struct {
@@ -127,7 +154,7 @@ type builder struct {
 	callers     map[string][]Chunk
 }
 
-func (b *builder) ignored(path string) bool { return chunk.Ignored(b.in.Ignore, path) }
+func (b *builder) ignored(path string) bool { return chunk.Matches(b.in.Ignore, path) }
 
 func (b *builder) read(tree *object.Tree, path string) []byte {
 	if tree == nil {
@@ -137,14 +164,18 @@ func (b *builder) read(tree *object.Tree, path string) []byte {
 	if err != nil || f.Size > int64(b.opts.MaxFileBytes) {
 		return nil
 	}
-	if bin, err := f.IsBinary(); err != nil || bin {
-		return nil
-	}
-	s, err := f.Contents()
+	// Read once, as bytes; a binary file, which holds a NUL, is nothing to
+	// read.
+	r, err := f.Reader()
 	if err != nil {
 		return nil
 	}
-	return []byte(s)
+	defer func() { _ = r.Close() }()
+	src, err := io.ReadAll(r)
+	if err != nil || bytes.IndexByte(src, 0) >= 0 {
+		return nil
+	}
+	return src
 }
 
 // overlay is stage 1, and it also collects what stages 2 and 3 look for.
@@ -153,6 +184,12 @@ func (b *builder) overlay(ctx context.Context) error {
 	b.overlayDecls = map[string]bool{}
 	idCount := map[string]int{}
 	seenSymbol := map[string]bool{}
+	// A renamed file's base side is under its old name, as are the lines
+	// the diff removed from it.
+	basePath := map[string]string{}
+	for old, renamed := range Renames(b.in.Diff) {
+		basePath[renamed] = old
+	}
 	for _, path := range b.in.Changed {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -169,11 +206,15 @@ func (b *builder) overlay(ctx context.Context) error {
 		for _, id := range f.Identifiers(added) {
 			idCount[id]++
 		}
-		if base := b.read(b.in.Base, path); base != nil {
-			bf := b.parser.Parse(path, base)
-			for _, id := range bf.Identifiers(d.removed[path]) {
+		// The declarations are all the rest of the pass needs.
+		f.Close()
+		old := cmp.Or(basePath[path], path)
+		if base := b.read(b.in.Base, old); base != nil {
+			bf := b.parser.Parse(old, base)
+			for _, id := range bf.Identifiers(d.removed[old]) {
 				idCount[id]++
 			}
+			bf.Close()
 		}
 		covered := map[int]bool{}
 		for _, run := range runs(added, b.opts.WindowRadius) {
@@ -215,24 +256,17 @@ func (b *builder) overlay(ctx context.Context) error {
 			b.identifiers = append(b.identifiers, id)
 		}
 	}
-	sort.Slice(b.identifiers, func(i, j int) bool {
-		if idCount[b.identifiers[i]] != idCount[b.identifiers[j]] {
-			return idCount[b.identifiers[i]] > idCount[b.identifiers[j]]
-		}
-		return b.identifiers[i] < b.identifiers[j]
-	})
-	if len(b.identifiers) > b.opts.MaxIdentifiers {
-		b.identifiers = b.identifiers[:b.opts.MaxIdentifiers]
-	}
+	slices.SortFunc(b.identifiers, func(x, y string) int { return cmp.Or(cmp.Compare(idCount[y], idCount[x]), cmp.Compare(x, y)) })
+	b.identifiers = b.identifiers[:min(len(b.identifiers), b.opts.MaxIdentifiers)]
 	b.stats.Overlay = len(b.overlayChunks)
 	b.stats.Identifiers = len(b.identifiers)
 	b.stats.ChangedSymbols = len(b.changedSymbols)
 	return nil
 }
 
-func subset(start, end int, shown map[int]bool) bool {
+func subset(start, end int, shown map[int]string) bool {
 	for l := start; l <= end; l++ {
-		if !shown[l] {
+		if _, ok := shown[l]; !ok {
 			return false
 		}
 	}
@@ -269,7 +303,7 @@ func (b *builder) scan(ctx context.Context) error {
 		}
 		if b.stats.FilesScanned >= b.opts.MaxScanFiles || b.stats.BytesScanned >= b.opts.MaxScanBytes {
 			b.stats.ScanTruncated = true
-			return errStop
+			return storer.ErrStop
 		}
 		if f.Size > int64(b.opts.MaxFileBytes) || b.ignored(f.Name) {
 			return nil
@@ -310,6 +344,7 @@ func (b *builder) scan(ctx context.Context) error {
 			return nil
 		}
 		pf := b.parser.Parse(f.Name, src)
+		defer pf.Close()
 		b.stats.FilesParsed++
 		if len(pf.Decls) == 0 {
 			return nil
@@ -342,16 +377,13 @@ func (b *builder) scan(ctx context.Context) error {
 	})
 }
 
-// errStop ends the tree walk early without failing it.
-var errStop = fmt.Errorf("contextpack: scan budget reached")
-
 // assemble orders and caps the stages and truncates chunks to size.
 func (b *builder) assemble() []Chunk {
 	var out []Chunk
 	total := 0
 	add := func(c Chunk) bool {
 		if len(c.Text) > b.opts.MaxChunkBytes {
-			c.Text = c.Text[:b.opts.MaxChunkBytes] + "\n… (truncated)"
+			c.Text = textcut.Prefix(c.Text, b.opts.MaxChunkBytes) + "\n… (truncated)"
 		}
 		if total+len(c.Text) > b.opts.MaxPackBytes {
 			return false
@@ -415,18 +447,9 @@ func pick(cs []Chunk, n int) []Chunk {
 		if len(out) == n {
 			break
 		}
-		if !containsChunk(out, c) {
+		if !slices.ContainsFunc(out, func(x Chunk) bool { return x.Path == c.Path && x.StartLine == c.StartLine }) {
 			out = append(out, c)
 		}
 	}
 	return out
-}
-
-func containsChunk(cs []Chunk, c Chunk) bool {
-	for _, x := range cs {
-		if x.Path == c.Path && x.StartLine == c.StartLine {
-			return true
-		}
-	}
-	return false
 }

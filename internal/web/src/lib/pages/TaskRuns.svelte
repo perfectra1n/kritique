@@ -1,138 +1,198 @@
 <script lang="ts">
+  // Every task run of the account, newest first: what ran on which issue
+  // or pull request, on what event, and how it ended.
+  import { tick, untrack } from 'svelte';
   import { getJSON } from '../api.svelte';
-  import { href } from '../router.svelte';
+  import { href, navigate, replace } from '../router.svelte';
+  import { TASK_RUN_STATUSES, taskRunFilter, type TaskRunFilter } from '../routes';
   import { Paged, Resource, live } from '../resource.svelte';
+  import { accountApi, pullRoute, repoRoute } from '../links';
   import { duration, taskTone } from '../format';
-  import { pullRoute, repoRoute } from '../links';
+  import { formatTokens, type Parsed, type TokenSpec } from '../tokensearch';
+  import { listKeys } from '../listkeys';
   import type { Page, Repository, TaskRun, TaskRunStatus } from '../types';
   import StateView from '../components/StateView.svelte';
   import LoadMore from '../components/LoadMore.svelte';
+  import TokenSearch from '../components/TokenSearch.svelte';
+  import Segmented from '../components/Segmented.svelte';
   import Pill from '../components/Pill.svelte';
   import Time from '../components/Time.svelte';
 
-  let { slug, owner, repo, installation }: { slug: string; owner?: string; repo?: string; installation?: string } = $props();
+  const STATUSES: readonly { value: TaskRunStatus | ''; label: string }[] = [
+    { value: '', label: 'All' },
+    { value: 'queued', label: 'Queued' },
+    { value: 'running', label: 'Running' },
+    { value: 'succeeded', label: 'Succeeded' },
+    { value: 'failed', label: 'Failed' },
+    { value: 'skipped', label: 'Skipped' },
+  ];
 
-  const STATUSES: readonly TaskRunStatus[] = ['queued', 'running', 'succeeded', 'failed', 'skipped'];
+  let { slug, filter }: { slug: string; filter?: TaskRunFilter } = $props();
 
-  // A repository's page fixes the repository; the tenant's lets it be chosen.
-  const fixedRepo = $derived(owner !== undefined && repo !== undefined ? `${owner}/${repo}` : '');
-  let repoName = $state('');
-  let status = $state<TaskRunStatus | ''>('');
-  let taskInput = $state('');
-  let task = $state('');
-
-  const tenant = $derived(`/api/v1/tenants/${encodeURIComponent(slug)}`);
-
+  const account = $derived(accountApi(slug));
   function query(after?: string): string {
     const p = new URLSearchParams({ limit: '50' });
-    const r = fixedRepo || repoName;
-    if (r) p.set('repo', r);
-    if (fixedRepo && installation) p.set('installation', installation);
-    if (task) p.set('task', task);
-    if (status) p.set('status', status);
+    for (const k of ['repo', 'task', 'status'] as const) {
+      const v = filter?.[k];
+      if (v) p.set(k, v);
+    }
     if (after) p.set('cursor', after);
-    return `${tenant}/task-runs?${p}`;
+    return `${account}/task-runs?${p}`;
   }
-
   const paged = new Paged<TaskRun>(query, (r) => r.id);
   const res = paged.first;
-  const repos = new Resource(() => getJSON<Page<Repository>>(`${tenant}/repos?limit=100`));
-
+  const repos = new Resource(() => getJSON<Page<Repository>>(`${account}/repos?limit=100`));
   $effect(() => {
     void paged.load();
   });
   $effect(() => {
-    if (!fixedRepo) void repos.load();
+    void repos.load();
   });
-  $effect(() => live((e) => e.tenant === slug && e.kind === 'task_run', () => void paged.load()));
+  $effect(() => live((e) => e.account === slug && e.kind === 'task_run', () => void paged.load()));
+
+  // A bare word in the box is a task's name: the list has no other text to
+  // search.
+  const specs = $derived<TokenSpec[]>([
+    { key: 'repo', hint: 'a repository', values: (repos.data?.items ?? []).map((r) => r.fullName) },
+    { key: 'task', hint: 'a task name', values: [...new Set(paged.items.map((r) => r.task))].sort(), open: true },
+    { key: 'status', hint: TASK_RUN_STATUSES.join(', '), values: TASK_RUN_STATUSES },
+  ]);
+  const boxText = (f: TaskRunFilter | undefined) => formatTokens(specs, { repo: f?.repo, task: f?.task, status: f?.status });
+
+  // As on the findings list: written is the box's text for the filter it
+  // last wrote to the URL, and any other change to the filter rewrites it.
+  let searchEl = $state<HTMLInputElement | undefined>(undefined);
+  let text = $state(untrack(() => boxText(filter)));
+  let written = untrack(() => boxText(filter));
+  function onapply(p: Parsed): void {
+    const f = taskRunFilter({ ...p.tokens, task: p.tokens.task ?? p.q });
+    written = boxText(f);
+    replace({ name: 'tasks', slug, filter: f });
+  }
   $effect(() => {
-    const v = taskInput.trim();
-    const t = setTimeout(() => (task = v), 250);
-    return () => clearTimeout(t);
+    const t = boxText(filter);
+    if (t === written) return;
+    written = t;
+    text = t;
   });
 
-  const items = $derived(paged.items);
+  function clearFilters(): void {
+    replace({ name: 'tasks', slug });
+    searchEl?.focus();
+  }
+
+  const runOf = (r: TaskRun) => ({ name: 'taskRun' as const, slug, id: r.id });
+
+  let selectedId = $state('');
+  const selected = $derived(paged.items.findIndex((r) => r.id === selectedId));
+  async function select(i: number): Promise<void> {
+    const r = paged.items[i];
+    if (!r) return;
+    selectedId = r.id;
+    await tick();
+    document.querySelector(`.task-runs [data-index="${i}"]`)?.scrollIntoView({ block: 'nearest' });
+  }
+  $effect(() =>
+    listKeys({
+      count: () => paged.items.length,
+      get: () => selected,
+      set: (i) => void select(i),
+      open: (i) => {
+        const r = paged.items[i];
+        if (r) navigate(runOf(r));
+      },
+      focusSearch: () => searchEl?.focus(),
+    }),
+  );
+
+  function onRowClick(e: MouseEvent, r: TaskRun): void {
+    if ((e.target as Element).closest('a, button') || getSelection()?.toString()) return;
+    navigate(runOf(r));
+  }
 </script>
+
+<svelte:head><title>Task runs · {slug} · kritique</title></svelte:head>
 
 <main class="page">
   <div class="page-inner">
-    <header class="page-head">
-      {#if fixedRepo}
-        <p class="crumbs">
-          <a href={href({ name: 'repos', slug })}>Repositories</a> /
-          <a class="mono" href={href(repoRoute(slug, fixedRepo, installation))}>{fixedRepo}</a> /
-        </p>
-      {/if}
-      <h1>Task runs</h1>
-    </header>
+    <header class="page-head"><h1>Task runs</h1></header>
     <div class="toolbar" role="search">
-      <label class="search-box">
-        <span class="sr-only">Task</span>
-        <input type="search" placeholder="Task name" bind:value={taskInput} />
-      </label>
-      {#if !fixedRepo}
-        <label class="select">
-          <span class="sr-only">Repository</span>
-          <select bind:value={repoName} aria-label="Repository">
-            <option value="">All repositories</option>
-            {#each repos.data?.items ?? [] as r (r.id)}
-              <option value={r.fullName}>{r.fullName}</option>
-            {/each}
-          </select>
-        </label>
-      {/if}
-      <label class="select">
-        <span class="sr-only">Status</span>
-        <select bind:value={status} aria-label="Status">
-          <option value="">Any status</option>
-          {#each STATUSES as s (s)}<option value={s}>{s}</option>{/each}
-        </select>
-      </label>
+      <TokenSearch
+        id="task-run-search"
+        label="Search task runs"
+        placeholder="Task name, or filter by repo:, task: or status:"
+        {specs}
+        bind:text
+        bind:input={searchEl}
+        ready={!!repos.data}
+        {onapply}
+      />
+      <Segmented
+        label="Status"
+        options={STATUSES}
+        value={filter?.status ?? ''}
+        onchange={(status) => replace({ name: 'tasks', slug, filter: taskRunFilter({ ...filter, status }) })}
+      />
     </div>
-    <StateView {res} retry={() => res.load()} isEmpty={() => items.length === 0} empty="No task runs match.">
+    <StateView {res} retry={() => res.load()}>
       {#snippet children()}
-        <div class="table-wrap">
-          <table class="data task-runs">
-            <thead>
-              <tr>
-                <th scope="col">Status</th><th scope="col">Task</th>
-                {#if !fixedRepo}<th scope="col">Repository</th>{/if}
-                <th scope="col">Subject</th><th scope="col">Trigger</th><th scope="col">Mode</th>
-                <th scope="col">Outcome</th><th scope="col">Queued</th><th scope="col">Took</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each items as r (r.id)}
+        {#if paged.items.length === 0 && filter}
+          <div class="state-msg">
+            <span>No task runs match these filters.</span>
+            <button class="btn btn-small" onclick={clearFilters}>Clear filters</button>
+          </div>
+        {:else if paged.items.length === 0}
+          <p class="state-msg">No task runs yet: they appear here as events reach the tasks a repository runs.</p>
+        {:else}
+          <div class="table-wrap table-card">
+            <table class="data task-runs">
+              <thead>
                 <tr>
-                  <td><Pill tone={taskTone[r.status]} label={r.status} /></td>
-                  <td class="mono"><a href={href({ name: 'taskRun', slug, id: r.id })}>{r.task}</a></td>
-                  {#if !fixedRepo}<td class="mono small">{r.repository}</td>{/if}
-                  <td class="mono small">
-                    {#if r.subjectKind === 'pull'}
-                      <a href={href(pullRoute(slug, { repository: r.repository, number: r.subjectNumber }, fixedRepo ? installation : undefined))}>#{r.subjectNumber}</a>
-                    {:else if r.subjectNumber}
-                      #{r.subjectNumber}
-                    {:else}
-                      —
-                    {/if}
-                  </td>
-                  <td class="mono small">{r.trigger || '—'}</td>
-                  <td>{r.mode}</td>
-                  <td class="small">
-                    {#if r.error}<span class="error-text">{r.error}</span>
-                    {:else if r.reason}<span class="muted">{r.reason}</span>
-                    {:else if r.droppedCount}<span>{r.droppedCount} dropped</span>
-                    {/if}
-                  </td>
-                  <td><Time iso={r.createdAt} /></td>
-                  <td>{r.durationMs !== null ? duration(r.durationMs) : '…'}</td>
+                  <th scope="col">Status</th>
+                  <th scope="col">Task</th>
+                  <th scope="col">Subject</th>
+                  <th scope="col">Trigger</th>
+                  <th scope="col">Mode</th>
+                  <th scope="col">Outcome</th>
+                  <th scope="col" class="num">Queued</th>
+                  <th scope="col" class="num">Took</th>
                 </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-        <LoadMore {paged} />
+              </thead>
+              <tbody>
+                {#each paged.items as r, i (r.id)}
+                  <tr class="task-run-row" class:selected={i === selected} data-index={i} onclick={(e) => onRowClick(e, r)}>
+                    <td><Pill tone={taskTone[r.status]} label={r.status} /></td>
+                    <td class="mono">
+                      <a href={href(runOf(r))} aria-current={i === selected ? 'true' : undefined}>{r.task}</a>
+                    </td>
+                    <td class="mono small">
+                      {#if r.subjectKind === 'pull'}
+                        <a href={href(pullRoute(slug, { repository: r.repository, number: r.subjectNumber }))} title="Pull request">{r.repository}#{r.subjectNumber}</a>
+                      {:else if r.subjectNumber}
+                        <span title="Issue">{r.repository}#{r.subjectNumber}</span>
+                      {:else}
+                        <a href={href(repoRoute(slug, r.repository))}>{r.repository}</a>
+                      {/if}
+                    </td>
+                    <td class="mono small">{r.trigger || '—'}</td>
+                    <td>{r.mode}</td>
+                    <td class="small">
+                      {#if r.error}<span class="error-text">{r.error}</span>
+                      {:else if r.reason}<span class="muted">{r.reason}</span>
+                      {:else if r.droppedCount}<span>{r.droppedCount} dropped</span>
+                      {:else}—{/if}
+                    </td>
+                    <td class="num"><Time iso={r.createdAt} /></td>
+                    <td class="num">{r.durationMs !== null ? duration(r.durationMs) : '…'}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+          <LoadMore {paged} />
+        {/if}
       {/snippet}
     </StateView>
+    <p class="muted small key-hints"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>⏎</kbd> open · <kbd>/</kbd> search</p>
   </div>
 </main>

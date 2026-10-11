@@ -22,12 +22,15 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
+	"github.com/perfectra1n/kritique/internal/adapter"
 	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/configfile/configfiletest"
 	"github.com/perfectra1n/kritique/internal/forge"
 	"github.com/perfectra1n/kritique/internal/ingest"
 	"github.com/perfectra1n/kritique/internal/jobs"
 	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/store/storetest"
 	"github.com/perfectra1n/kritique/internal/tasks"
 	"github.com/perfectra1n/kritique/internal/webhook"
 )
@@ -38,36 +41,30 @@ providers:
     type: openai
     baseUrl: http://unused.invalid/v1
     apiKey: { env: TEST_SECRET }
-defaults:
-  models:
-    review: test/reviewer
-  limits:
-    concurrency: 1
-  allow:
-    tasks: { enabled: true }
-  tasks:
-    - name: triage
-      mode: single
-      on: [{ issue: [opened] }]
-      promptInline: "Triage issue #{{ .Subject.Number }}: {{ .Subject.Title }}"
-      context: { thread: { comments: 5 } }
-      fields:
-        priority: { type: string, enum: [low, high] }
-      actions:
-        labels: { propose: { add: [bug, enhancement], remove: [needs-triage] } }
-        comment: { mode: sticky }
-tenants:
-  - slug: onedr0p
-    installations:
-      - name: bot-ross
-        forge: github
-        account: onedr0p
-        app:
-          clientId: Iv1.x
-          privateKey: { env: TEST_PEM }
-          webhookSecret: { env: TEST_SECRET }
-    repositories:
-      - name: onedr0p/home-ops
+review:
+  model: test/reviewer
+limits:
+  concurrency: 1
+taskBounds: { enabled: true }
+tasks:
+  - name: triage
+    mode: single
+    on: [{ issue: [opened] }]
+    promptInline: "Triage issue #{{ .Subject.Number }}: {{ .Subject.Title }}"
+    context: { thread: { comments: 5 } }
+    fields:
+      priority: { type: string, enum: [low, high] }
+    actions:
+      labels: { propose: { add: [bug, enhancement], remove: [needs-triage] } }
+      comment: { mode: sticky }
+apps:
+  bot-ross:
+    accounts: [onedr0p]
+    clientId: Iv1.x
+    privateKey: { env: TEST_PEM }
+    webhookSecret: { env: TEST_SECRET }
+repositories:
+  onedr0p/home-ops: {}
 `
 
 // taskForge is a forge holding one issue, its labels and its comments.
@@ -193,11 +190,11 @@ type failingForges struct {
 	fail atomic.Bool
 }
 
-func (f *failingForges) For(ctx context.Context, in *configfile.Installation, id int64, repo string) (forge.Client, error) {
+func (f *failingForges) For(ctx context.Context, in *configfile.Connection, repo string) (forge.Client, error) {
 	if f.fail.Load() {
 		return nil, errors.New("forge down")
 	}
-	return f.forges.For(ctx, in, id, repo)
+	return f.forges.For(ctx, in, repo)
 }
 
 // taskHarness runs the task queue over a store, a taskForge and a
@@ -205,38 +202,28 @@ func (f *failingForges) For(ctx context.Context, in *configfile.Installation, id
 // The task worker's forges fail on demand; its runs are those created
 // since the harness started.
 type taskHarness struct {
-	t      *testing.T
-	client *river.Client[pgx.Tx]
-	taskFg *failingForges
-	since  time.Time
-	st     *store.Store
-	file   *configfile.File
-	svc    *ingest.Service
-	tenant *configfile.Tenant
-	in     *configfile.Installation
-	tf     *taskForge
-	tm     *taskModel
+	t       *testing.T
+	client  *river.Client[pgx.Tx]
+	taskFg  *failingForges
+	since   time.Time
+	st      *store.Store
+	file    *configfile.File
+	svc     *ingest.Service
+	account *configfile.Account
+	in      *configfile.Connection
+	tf      *taskForge
+	tm      *taskModel
 }
 
 func newTaskHarness(t *testing.T, timeout time.Duration) *taskHarness {
 	t.Helper()
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	st, err := store.Open(ctx, store.Options{AppURL: env(t, "KRITIQUE_TEST_APP_URL"), OwnerURL: env(t, "KRITIQUE_TEST_OWNER_URL"), Logger: logger})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx, "kritique_app", "kritique_runner"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	st := storetest.Open(t)
 	t.Setenv("TEST_PEM", "pem")
 	t.Setenv("TEST_SECRET", "test-provider-key")
-	file, err := configfile.Parse([]byte(taskConfigYAML))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.ApplyConfig(ctx, file, "test"); err != nil {
+	file := configfiletest.Load(t, taskConfigYAML)
+	if err := st.ApplyConfig(ctx, file); err != nil {
 		t.Fatal(err)
 	}
 	insertOnly, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{})
@@ -245,7 +232,8 @@ func newTaskHarness(t *testing.T, timeout time.Duration) *taskHarness {
 	}
 	h := &taskHarness{t: t, st: st, file: file, svc: ingest.NewService(st, insertOnly), tf: &taskForge{labels: []string{"needs-triage"}},
 		tm: &taskModel{}}
-	h.in, h.tenant, _ = file.Installation("bot-ross")
+	h.in, _ = file.Connection("bot-ross")
+	h.account, _ = file.Account(configfile.ForgeGitHub, "onedr0p")
 	workers := river.NewWorkers()
 	base := Base{Store: st, Current: configfile.NewCurrent(file), Forges: &forges{f: h.tf}, Logger: logger}
 	river.AddWorker(workers, &TaskDispatch{Base: base})
@@ -253,7 +241,8 @@ func newTaskHarness(t *testing.T, timeout time.Duration) *taskHarness {
 	h.taskFg.f = h.tf
 	taskBase := base
 	taskBase.Forges = h.taskFg
-	river.AddWorker(workers, &Task{Base: taskBase, Completers: &completers{c: h.tm}, timeout: timeout})
+	steppers := &adapter.Steppers{Build: func(configfile.Provider) (model.Stepper, error) { return h.tm, nil }}
+	river.AddWorker(workers, &Task{Base: taskBase, Steppers: steppers, timeout: timeout})
 	client, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{
 		Queues: map[string]river.QueueConfig{jobs.QueueTask: {MaxWorkers: 2}}, Workers: workers,
 		FetchCooldown: 50 * time.Millisecond, FetchPollInterval: 100 * time.Millisecond,
@@ -275,7 +264,7 @@ func newTaskHarness(t *testing.T, timeout time.Duration) *taskHarness {
 // dispatch delivers issue #7's opening as delivery, sent by sender.
 func (h *taskHarness) dispatch(delivery, sender string) ingest.Outcome {
 	h.t.Helper()
-	out, err := h.svc.Dispatch(context.Background(), ingest.Request{File: h.file, Tenant: h.tenant, Installation: h.in, Event: webhook.Event{
+	out, err := h.svc.Dispatch(context.Background(), ingest.Request{File: h.file, Account: h.account, Connection: h.in, Event: webhook.Event{
 		Kind: webhook.KindIssue, Action: "opened", Delivery: delivery, Account: "onedr0p", Forge: configfile.ForgeGitHub,
 		RawEvent: "issues", Sender: sender, Raw: json.RawMessage(`{"action":"opened","issue":{"number":7}}`),
 		Repository: &webhook.Repository{FullName: "onedr0p/home-ops", DefaultBranch: "main"},
@@ -299,7 +288,7 @@ func (h *taskHarness) runs() []taskRunRow {
 	h.t.Helper()
 	ctx := context.Background()
 	var out []taskRunRow
-	err := h.st.WithTenant(ctx, h.tenant.ID(), func(tx pgx.Tx) error {
+	err := h.st.WithAccount(ctx, h.account.ID(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT status, reason, model, error, coalesce(fields, 'null'), coalesce(applied, 'null'),
 			coalesce(dropped, 'null'), comment_id FROM task_runs WHERE task = 'triage' AND created_at >= $1 ORDER BY created_at`, h.since)
 		if err != nil {
@@ -331,12 +320,12 @@ func (h *taskHarness) waitRuns(n int) taskRunRow {
 	return h.runs()[n-1]
 }
 
-// count counts the rows query finds in the tenant.
+// count counts the rows query finds in the account.
 func (h *taskHarness) count(query string) int {
 	h.t.Helper()
 	ctx := context.Background()
 	var n int
-	if err := h.st.WithTenant(ctx, h.tenant.ID(), func(tx pgx.Tx) error { return tx.QueryRow(ctx, query).Scan(&n) }); err != nil {
+	if err := h.st.WithAccount(ctx, h.account.ID(), func(tx pgx.Tx) error { return tx.QueryRow(ctx, query).Scan(&n) }); err != nil {
 		h.t.Fatal(err)
 	}
 	return n
@@ -445,7 +434,7 @@ func checkRetryAfterAnswer(t *testing.T, h *taskHarness) {
 	ctx := context.Background()
 	calls, usage := h.tm.calls(), h.count(`SELECT count(*) FROM usage WHERE role = 'task'`)
 	labels, comments, creates := h.tf.state()
-	if err := h.st.WithTenant(ctx, h.tenant.ID(), func(tx pgx.Tx) error {
+	if err := h.st.WithAccount(ctx, h.account.ID(), func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE task_runs SET status = 'running', finished_at = NULL
 			WHERE id = (SELECT id FROM task_runs WHERE answered_at IS NOT NULL ORDER BY created_at DESC LIMIT 1)`)
 		return err
@@ -482,21 +471,21 @@ func checkFinalAttemptFails(t *testing.T, h *taskHarness) {
 	h.taskFg.fail.Store(true)
 	defer h.taskFg.fail.Store(false)
 	var args jobs.TaskArgs
-	err := h.st.WithTenant(ctx, h.tenant.ID(), func(tx pgx.Tx) error {
+	err := h.st.WithAccount(ctx, h.account.ID(), func(tx pgx.Tx) error {
 		var ev store.TaskEvent
-		if err := tx.QueryRow(ctx, `SELECT installation_id, repository_id FROM task_events LIMIT 1`).
-			Scan(&ev.InstallationID, &ev.RepositoryID); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT connection_id, repository_id FROM task_events LIMIT 1`).
+			Scan(&ev.ConnectionID, &ev.RepositoryID); err != nil {
 			return err
 		}
-		ev.TenantID, ev.Forge, ev.Event, ev.RawEvent, ev.Action = h.tenant.ID(), "github", tasks.EventIssue, "issues", "opened"
+		ev.AccountID, ev.Forge, ev.Event, ev.RawEvent, ev.Action = h.account.ID(), "github", tasks.EventIssue, "issues", "opened"
 		ev.Delivery, ev.SubjectKind, ev.SubjectNumber = "d-fail", "issue", 7
 		id, err := store.InsertTaskEvent(ctx, tx, ev)
 		if err != nil {
 			return err
 		}
-		args = jobs.TaskArgs{TenantID: h.tenant.ID(), RepositoryID: ev.RepositoryID, EventID: id, Task: "triage", ConfigSHA: "c0ffee"}
+		args = jobs.TaskArgs{AccountID: h.account.ID(), RepositoryID: ev.RepositoryID, EventID: id, Task: "triage", ConfigSHA: "c0ffee"}
 		_, err = store.QueueTaskRun(ctx, tx, store.TaskRun{
-			TenantID: h.tenant.ID(), RepositoryID: ev.RepositoryID, Task: "triage", EventID: id, SubjectKind: "issue", SubjectNumber: 7,
+			AccountID: h.account.ID(), RepositoryID: ev.RepositoryID, Task: "triage", EventID: id, SubjectKind: "issue", SubjectNumber: 7,
 			Mode: "single", ConfigSHA: "c0ffee",
 		})
 		return err

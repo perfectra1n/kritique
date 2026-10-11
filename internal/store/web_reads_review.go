@@ -22,6 +22,7 @@ type FindingRow struct {
 	Line           int
 	EndLine        int
 	Severity       review.Severity
+	Category       review.Category
 	Title          string
 	Explanation    string
 	SuggestedFix   string
@@ -31,23 +32,43 @@ type FindingRow struct {
 	PostedInline   bool
 	ForgeCommentID *int64
 	CreatedAt      time.Time
+	ReactionsUp    int
+	ReactionsDown  int
+	// Rules are the ids of the review rules it enforces.
+	Rules []string
+	// Status is what became of it on its pull request, and DismissReason
+	// the reason a dismissed one was dismissed with.
+	Status        FindingStatus
+	DismissReason string
 }
 
-// ListFindings returns a review's findings, most serious first.
+// ListFindings returns a review's findings, most serious first, each with
+// what became of it since: its status is that of the pull request's
+// finding of its fingerprint, as ListAccountFindings reports it.
 func ListFindings(ctx context.Context, tx pgx.Tx, reviewID string) ([]FindingRow, error) {
-	rows, err := tx.Query(ctx, `SELECT id, path, line, end_line, severity, title, explanation, suggested_fix, replacement,
-		agent_prompt, fingerprint, posted_inline, forge_comment_id, created_at
-		FROM findings WHERE review_id = $1
-		ORDER BY CASE severity WHEN 'blocking' THEN 0 WHEN 'important' THEN 1 ELSE 2 END, path, line, id`, reviewID)
+	// The pull request's issues, as the account's list has them, joined to
+	// this review's findings by fingerprint: a finding of a review that did
+	// not complete has no issue, and is open.
+	rows, err := tx.Query(ctx, `WITH `+findingIssuesOf(` AND v.pull_request_id = (SELECT pull_request_id FROM reviews WHERE id = $1)`)+`
+		SELECT f.id, f.path, f.line, f.end_line, f.severity, f.title, f.explanation, f.suggested_fix,
+			f.replacement, f.agent_prompt, f.fingerprint, f.posted_inline, f.forge_comment_id, f.created_at, f.reactions_up,
+			f.reactions_down, f.rules, f.category, coalesce(l.dismissed, false), coalesce(l.dismiss_reason, ''),
+			coalesce(l.addressed, false)
+		FROM findings f LEFT JOIN latest l
+			ON coalesce(nullif(l.fingerprint, ''), l.id::text) = coalesce(nullif(f.fingerprint, ''), f.id::text)
+		WHERE f.review_id = $1
+		ORDER BY CASE f.severity WHEN 'blocking' THEN 0 WHEN 'important' THEN 1 ELSE 2 END, f.path, f.line, f.id`, reviewID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list findings: %w", err)
 	}
 	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (FindingRow, error) {
 		var f FindingRow
-		var sev string
+		var sev, cat string
+		var dismissed, addressed bool
 		err := row.Scan(&f.ID, &f.Path, &f.Line, &f.EndLine, &sev, &f.Title, &f.Explanation, &f.SuggestedFix, &f.Replacement,
-			&f.AgentPrompt, &f.Fingerprint, &f.PostedInline, &f.ForgeCommentID, &f.CreatedAt)
-		f.Severity = review.Severity(sev)
+			&f.AgentPrompt, &f.Fingerprint, &f.PostedInline, &f.ForgeCommentID, &f.CreatedAt, &f.ReactionsUp, &f.ReactionsDown, &f.Rules, &cat,
+			&dismissed, &f.DismissReason, &addressed)
+		f.Severity, f.Category, f.Status = review.Severity(sev), review.Category(cat), findingStatus(dismissed, addressed)
 		return f, err
 	})
 	if err != nil {
@@ -96,7 +117,10 @@ func LatestRunnerRun(ctx context.Context, tx pgx.Tx, reviewID string) (RunnerRun
 
 // TimelineStep is one agent step as agent_runs.timeline records it.
 type TimelineStep struct {
-	Index        int      `json:"index"`
+	Index int `json:"index"`
+	// Part is the part of a split review the step was for, from 1; 0 when
+	// the review was not split.
+	Part         int      `json:"part,omitempty"`
 	Tools        []string `json:"tools"`
 	DurationMS   int64    `json:"duration_ms"`
 	OutputBytes  int      `json:"output_bytes"`
@@ -113,21 +137,49 @@ type AgentRunRow struct {
 	ToolCalls map[string]int
 	Timeline  []TimelineStep
 	Sources   []string
-	Usage     model.Usage
-	CostUSD   float64
-	Model     string
-	Error     string
-	CreatedAt time.Time
+	// SkillsOffered are the repository skills the agent could load, and
+	// SkillsOpened the ones it did; CommandsOffered and CommandsRun the
+	// same for the run tool's commands.
+	SkillsOffered, SkillsOpened  []string
+	CommandsOffered, CommandsRun []string
+	Usage                        model.Usage
+	CostUSD                      float64
+	Model                        string
+	Error                        string
+	CreatedAt                    time.Time
+	// CarriedReviewID is the review whose run's conversation the agent
+	// carried on, nil when it started afresh.
+	CarriedReviewID *string
+	// Parts are how the parts of a split review ended, in part order;
+	// empty when the review was not split.
+	Parts []AgentPart
+	// Notes say what a task run's context left out, empty for any other
+	// run.
+	Notes []string
+}
+
+// AgentPart is how the agent of one part of a split review ended: the
+// files it reviewed, why it stopped and, once it submitted, the summary it
+// wrote.
+type AgentPart struct {
+	Paths   []string        `json:"paths"`
+	Stop    string          `json:"stop"`
+	Error   string          `json:"error,omitempty"`
+	Steps   int             `json:"steps"`
+	Summary json.RawMessage `json:"summary,omitempty"`
 }
 
 // FindAgentRun returns the agent run of a runner run, or ErrNotFound.
 func FindAgentRun(ctx context.Context, tx pgx.Tx, runnerRunID string) (AgentRunRow, error) {
 	var a AgentRunRow
-	var result, calls, timeline, sources []byte
-	err := tx.QueryRow(ctx, `SELECT stop_reason, result, steps, tool_calls, timeline, sources, input_tokens, cache_read_tokens,
-		cache_write_tokens, output_tokens, cost_usd::float8, model, error, created_at FROM agent_runs WHERE runner_run_id = $1`, runnerRunID).
+	var result, calls, timeline, sources, parts []byte
+	err := tx.QueryRow(ctx, `SELECT a.stop_reason, a.result, a.steps, a.tool_calls, a.timeline, a.sources, a.input_tokens,
+		a.cache_read_tokens, a.cache_write_tokens, a.output_tokens, a.cost_usd::float8, a.model, a.error, a.created_at,
+		a.skills_offered, a.skills_opened, a.commands_offered, a.commands_run, c.review_id::text, a.parts, a.notes
+		FROM agent_runs a LEFT JOIN runner_runs c ON c.id = a.continued_from WHERE a.runner_run_id = $1`, runnerRunID).
 		Scan(&a.StopReason, &result, &a.Steps, &calls, &timeline, &sources, &a.Usage.Input, &a.Usage.CacheRead,
-			&a.Usage.CacheWrite, &a.Usage.Output, &a.CostUSD, &a.Model, &a.Error, &a.CreatedAt)
+			&a.Usage.CacheWrite, &a.Usage.Output, &a.CostUSD, &a.Model, &a.Error, &a.CreatedAt, &a.SkillsOffered, &a.SkillsOpened,
+			&a.CommandsOffered, &a.CommandsRun, &a.CarriedReviewID, &parts, &a.Notes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return a, ErrNotFound
 	}
@@ -141,7 +193,7 @@ func FindAgentRun(ctx context.Context, tx pgx.Tx, runnerRunID string) (AgentRunR
 	for _, d := range []struct {
 		raw []byte
 		v   any
-	}{{calls, &a.ToolCalls}, {timeline, &a.Timeline}, {sources, &a.Sources}} {
+	}{{calls, &a.ToolCalls}, {timeline, &a.Timeline}, {sources, &a.Sources}, {parts, &a.Parts}} {
 		if err := json.Unmarshal(d.raw, d.v); err != nil {
 			return a, fmt.Errorf("store: decode agent run: %w", err)
 		}
@@ -188,6 +240,8 @@ type ContextPackMeta struct {
 	DeltaPaths   []string
 	PriorHeadSHA *string
 	RepoNotes    []string
+	// RuleIDs are the ids of the rules the review's prompt was given.
+	RuleIDs []string
 	// Stages are the context chunks with Text empty; StageBytes[i] is the
 	// size of Stages[i]'s text.
 	Stages     []contextpack.Chunk
@@ -208,12 +262,13 @@ type stageMeta struct {
 func FindContextPackMeta(ctx context.Context, tx pgx.Tx, runnerRunID string) (ContextPackMeta, error) {
 	var m ContextPackMeta
 	var stages, files []byte
-	err := tx.QueryRow(ctx, `SELECT head_sha, base_sha, patch_id, changed_paths, delta_paths, prior_head_sha, repo_notes,
+	err := tx.QueryRow(ctx, `SELECT head_sha, base_sha, patch_id, changed_paths, delta_paths, prior_head_sha, repo_notes, rule_ids,
 		(SELECT coalesce(jsonb_agg((e - 'text') || jsonb_build_object('bytes', octet_length(e->>'text')) ORDER BY n), '[]')
 			FROM jsonb_array_elements(stages) WITH ORDINALITY AS s(e, n)),
 		(SELECT coalesce(jsonb_object_agg(k, octet_length(v)), '{}') FROM jsonb_each_text(repo_files) AS f(k, v)),
 		created_at FROM context_packs WHERE runner_run_id = $1`, runnerRunID).
-		Scan(&m.HeadSHA, &m.BaseSHA, &m.PatchID, &m.ChangedPaths, &m.DeltaPaths, &m.PriorHeadSHA, &m.RepoNotes, &stages, &files, &m.CreatedAt)
+		Scan(&m.HeadSHA, &m.BaseSHA, &m.PatchID, &m.ChangedPaths, &m.DeltaPaths, &m.PriorHeadSHA, &m.RepoNotes, &m.RuleIDs,
+			&stages, &files, &m.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -235,16 +290,18 @@ func FindContextPackMeta(ctx context.Context, tx pgx.Tx, runnerRunID string) (Co
 }
 
 // ContextPackDiffs returns the diff and delta diff of the context pack a
-// runner run wrote, or ErrNotFound.
-func ContextPackDiffs(ctx context.Context, tx pgx.Tx, runnerRunID string) (diff, delta string, err error) {
-	err = tx.QueryRow(ctx, `SELECT diff, delta_diff FROM context_packs WHERE runner_run_id = $1`, runnerRunID).Scan(&diff, &delta)
+// runner run wrote, and whether the retention sweep has emptied them, or
+// ErrNotFound.
+func ContextPackDiffs(ctx context.Context, tx pgx.Tx, runnerRunID string) (diff, delta string, swept bool, err error) {
+	err = tx.QueryRow(ctx, `SELECT diff, delta_diff, swept_at IS NOT NULL FROM context_packs WHERE runner_run_id = $1`, runnerRunID).
+		Scan(&diff, &delta, &swept)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", ErrNotFound
+		return "", "", false, ErrNotFound
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("store: context pack diffs: %w", err)
+		return "", "", false, fmt.Errorf("store: context pack diffs: %w", err)
 	}
-	return diff, delta, nil
+	return diff, delta, swept, nil
 }
 
 // ContextPackInputs returns the context chunks and repository files of the
@@ -268,30 +325,34 @@ func ContextPackInputs(ctx context.Context, tx pgx.Tx, runnerRunID string) ([]co
 	return chunks, repoFiles, nil
 }
 
-// ReviewModelCalls returns a review's own model calls, in the order they
-// were recorded: its agent steps, plain review and fallback calls, not the
-// follow-ups later answered against it.
+// ReviewModelCalls returns a review's own model calls, its agent's steps,
+// the call that wrote a split review's summary and the one that scored its
+// confidence, in the order they were recorded, not the follow-ups later
+// answered against it.
 func ReviewModelCalls(ctx context.Context, tx pgx.Tx, reviewID string) ([]transcript.StoredRow, error) {
-	return modelCallsWhere(ctx, tx, `review_id = $1::uuid AND kind IN ('agent_step', 'review', 'fallback')`, reviewID)
+	return modelCallsWhere(ctx, tx, `review_id = $1::uuid AND kind IN ('agent_step', 'merge', 'confidence') AND followup_comment_id IS NULL`,
+		reviewID)
 }
 
 // FollowupModelCalls returns the model calls that answered a follow-up
-// comment on one pull request. A comment id is only unique per forge, so
-// the pull request pins which comment is meant: a call recorded against a
+// comment on one pull request: its agent's steps. GitHub numbers conversation and inline
+// comments apart, so a comment id alone may name two comments, and the pull
+// request pins which one is meant: a call recorded against a
 // review must belong to one of its reviews, and one recorded against no
-// review is kept only when no other pull request of the tenant has a
+// review is kept only when no other pull request of the account has a
 // follow-up with that comment id.
 func FollowupModelCalls(ctx context.Context, tx pgx.Tx, pullRequestID string, commentID int64) ([]transcript.StoredRow, error) {
-	return modelCallsWhere(ctx, tx, `kind = 'followup' AND followup_comment_id = $2 AND (
+	return modelCallsWhere(ctx, tx, `kind IN ('followup', 'agent_step') AND followup_comment_id = $2 AND (
 		review_id IN (SELECT id FROM reviews WHERE pull_request_id = $1::uuid)
 		OR (review_id IS NULL AND NOT EXISTS (SELECT 1 FROM followups
 			WHERE comment_id = $2 AND pull_request_id <> $1::uuid)))`, pullRequestID, commentID)
 }
 
 func modelCallsWhere(ctx context.Context, tx pgx.Tx, where string, args ...any) ([]transcript.StoredRow, error) {
-	rows, err := tx.Query(ctx, `SELECT id, kind, step, coalesce(review_id::text, ''), coalesce(runner_run_id::text, ''),
+	rows, err := tx.Query(ctx, `SELECT id, kind, step, part, coalesce(review_id::text, ''), coalesce(runner_run_id::text, ''),
 		coalesce(followup_comment_id, 0), model, upstream, system, tools, messages_from, messages, response,
-		input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, cost_usd::float8, duration_ms, error, truncated, created_at
+		input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, cost_usd::float8, duration_ms, error, truncated, created_at,
+		coalesce((SELECT r.review_id::text FROM runner_runs r WHERE r.id = model_calls.carried_from), '')
 		FROM model_calls WHERE `+where+` ORDER BY created_at, step, id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list model calls: %w", err)

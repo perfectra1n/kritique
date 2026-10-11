@@ -5,10 +5,17 @@
   import Icon from '../../Icon.svelte';
   import { mdiChevronDown, mdiChevronRight } from '../../icons';
   import FindingCard from './FindingCard.svelte';
+  import Tokens from '../../components/Tokens.svelte';
+  import { highlightDiff, languageOf } from '../../highlight';
+  import { Highlighted } from '../../tokens.svelte';
 
-  let { file, findings, initiallyOpen = true }: { file: DiffFile; findings: Finding[]; initiallyOpen?: boolean } = $props();
+  let {
+    file,
+    findings,
+    initiallyOpen = true,
+  }: { file: DiffFile; findings: Finding[]; initiallyOpen?: boolean } = $props();
   let open = $state(untrack(() => initiallyOpen));
-  const id = `df${Math.random().toString(36).slice(2, 9)}`;
+  const id = $props.id();
 
   // Findings keyed by the new-side line they point at; anything that points
   // outside the hunks shown is listed under the file header instead.
@@ -19,6 +26,15 @@
   });
   const shownLines = $derived(new Set(file.lines.map((l) => l.newNo).filter((n) => n !== null)));
   const orphans = $derived(findings.filter((f) => !shownLines.has(f.line)));
+
+  // The lines' tokens, once the file is open and its language has loaded;
+  // plain text until then, and for a language that is not highlighted.
+  const tokens = new Highlighted(
+    () => file,
+    (f) => highlightDiff(f.lines, languageOf(f.path)),
+    () => open,
+  );
+  const highlighted = $derived(tokens.value);
 </script>
 
 <section class="diff-file">
@@ -41,15 +57,16 @@
           <table class="diff">
             <tbody>
               {#each file.lines as l, i (i)}
-                <tr class="dl dl-{l.kind}">
+                {@const anchored = l.newNo !== null && l.kind !== 'del' ? byLine.get(l.newNo) : undefined}
+                <tr class="dl dl-{l.kind}" class:dl-marked={anchored}>
                   <td class="ln" aria-hidden="true">{l.oldNo ?? ''}</td>
                   <td class="ln" aria-hidden="true">{l.newNo ?? ''}</td>
-                  <td class="code"><span class="sign" aria-hidden="true">{l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' '}</span>{l.text}</td>
+                  <td class="code"><span class="sign" aria-hidden="true">{l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' '}</span>{#if highlighted?.[i]}<Tokens line={highlighted[i]} />{:else}{l.text}{/if}</td>
                 </tr>
-                {#if l.newNo !== null && l.kind !== 'del' && byLine.has(l.newNo)}
+                {#if anchored}
                   <tr class="dl-finding">
                     <td colspan="3">
-                      {#each byLine.get(l.newNo) ?? [] as f (f.id)}<div class="diff-finding"><FindingCard {f} compact /></div>{/each}
+                      {#each anchored as f (f.id)}<div class="diff-finding"><FindingCard {f} compact /></div>{/each}
                     </td>
                   </tr>
                 {/if}

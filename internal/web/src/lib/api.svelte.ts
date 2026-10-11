@@ -7,33 +7,18 @@
 import { basePath } from './base';
 import { parse, replace } from './router.svelte';
 import { session } from './session.svelte';
+import type { ErrorBody } from './types';
 
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
-  readonly details?: unknown;
 
-  constructor(status: number, code: string, message: string, details?: unknown) {
+  constructor(status: number, code: string, message: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
-    this.details = details;
   }
-}
-
-// ambiguousInstallations returns the installations a 409 "ambiguous"
-// repository error offers to choose from, or undefined for any other error.
-export function ambiguousInstallations(err: unknown): string[] | undefined {
-  if (!(err instanceof ApiError) || err.code !== 'ambiguous') return undefined;
-  const list = (err.details as { installations?: unknown } | undefined)?.installations;
-  return Array.isArray(list) && list.every((x) => typeof x === 'string') ? list : undefined;
-}
-
-interface ErrorBody {
-  code?: string;
-  message?: string;
-  details?: unknown;
 }
 
 const commonHeaders: HeadersInit = { 'X-Kritique': '1' };
@@ -46,13 +31,13 @@ const commonHeaders: HeadersInit = { 'X-Kritique': '1' };
 export const signinState = $state<{ returnTo: string }>({ returnTo: '' });
 
 async function toApiError(res: Response): Promise<ApiError> {
-  let body: ErrorBody = {};
+  let body: Partial<ErrorBody> = {};
   try {
-    body = (await res.json()) as ErrorBody;
+    body = (await res.json()) as Partial<ErrorBody>;
   } catch {
     // No JSON body (e.g. a proxy error page) — fall back to the status text.
   }
-  return new ApiError(res.status, body.code ?? 'unknown', body.message ?? res.statusText, body.details);
+  return new ApiError(res.status, body.code ?? 'unknown', body.message ?? res.statusText);
 }
 
 // toSignIn sends the tab to sign-in, remembering where it was, unless it
@@ -91,7 +76,7 @@ export async function getJSON<T>(path: string): Promise<T> {
   return handle<T>(res);
 }
 
-export type WriteMethod = 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+export type WriteMethod = 'POST' | 'PUT' | 'DELETE';
 
 export async function sendJSON<T>(method: WriteMethod, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${basePath}${path}`, {

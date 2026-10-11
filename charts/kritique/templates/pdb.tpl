@@ -1,22 +1,20 @@
-{{- if .Values.podDisruptionBudget.enabled }}
-{{- range $role := splitList "," (include "kritique.enabledRoles" .) }}
-{{- $spec := index $.Values.roles $role }}
-{{- if gt (int $spec.replicas) 1 }}
----
+{{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicas) 1) }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "kritique.roleName" (dict "root" $ "role" $role) }}
-  namespace: {{ $.Release.Namespace }}
+  name: {{ include "kritique.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "kritique.labels" $ | nindent 4 }}
-    app.kubernetes.io/component: {{ $role }}
+    {{- include "kritique.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
 spec:
-  maxUnavailable: {{ $.Values.podDisruptionBudget.maxUnavailable }}
+  {{- if .Values.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- end }}
   selector:
     matchLabels:
-      {{- include "kritique.selectorLabels" $ | nindent 6 }}
-      app.kubernetes.io/component: {{ $role }}
-{{- end }}
-{{- end }}
+      {{- include "kritique.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
 {{- end }}

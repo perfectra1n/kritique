@@ -68,7 +68,7 @@ func contextRunner(t *testing.T, doc string, f *contextForge) *taskRunner {
 func TestPromptDataContext(t *testing.T) {
 	f := &contextForge{
 		files: map[string]string{"CONTRIBUTING.md": "Be kind.", "big.md": strings.Repeat("x", taskSourceBytes+10)},
-		found: []forge.Issue{{Number: 7, Title: "self"}, {Number: 3, Title: "Crash on boot", State: "open", IsPull: true, URL: "u"}},
+		found: []forge.Issue{{Number: 7, Title: "self"}, {Number: 3, Title: "Crash on boot", State: "open", PullRequest: true, URL: "u"}},
 	}
 	tests := []struct {
 		name      string

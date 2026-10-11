@@ -1,6 +1,7 @@
 package configfile
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -11,33 +12,34 @@ func minimalEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("TEST_OPENROUTER_API_KEY", "sk-or-test")
 	t.Setenv("TEST_WEBHOOK_SECRET", "whsec")
-	t.Setenv("TEST_FORGEJO_TOKEN", "fj-token")
+	t.Setenv("TEST_PRIVATE_KEY", "key")
 	t.Setenv("TEST_CLIENT_ID", "Iv1.fromenv")
 }
 
 func TestEgressRules(t *testing.T) {
+	minimalEnv(t)
 	t.Setenv("TEST_GH_TOKEN", "ghp_x\n")
-	f, err := Load(fixture(t))
+	f, err := load(t, fixture(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The fixture names a GitHub installation, whose forge must be allowed
+	// The fixture names a GitHub connection, whose forge must be allowed
 	// without being listed, and an OpenRouter provider, which runners reach
 	// only through the gateway's model endpoint.
 	rules := f.EgressRules()
-	if !rules.Allows("github.com") {
-		t.Errorf("implicit host github.com not allowed; hosts = %v", rules.Hosts)
+	if !rules.Allows("github.com") || !rules.Allows("api.github.com") {
+		t.Errorf("implicit GitHub hosts not allowed; allow = %v", rules.Allow.Hosts)
 	}
 	if rules.Allows("openrouter.ai") {
-		t.Errorf("a provider's host must not be allowed; hosts = %v", rules.Hosts)
+		t.Errorf("a provider's host must not be allowed; allow = %v", rules.Allow.Hosts)
 	}
 	if rules.Allows("ghcr.io") {
 		t.Fatal("ghcr.io must not be allowed until configured")
 	}
 
-	raw := "egress:\n  allowHosts: [ghcr.io, \"*.githubusercontent.com\", api.github.com]\n" +
+	raw := "egress:\n  allow: [ghcr.io, \"*.githubusercontent.com\", api.github.com]\n" +
 		"  credentials:\n    api.github.com: { env: TEST_GH_TOKEN }\n"
-	g, err := Parse([]byte(raw + minimal))
+	g, err := loadBytes(t, []byte(raw+minimal))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,17 +52,28 @@ func TestEgressRules(t *testing.T) {
 	if rules.Credentials["api.github.com"] != "Bearer ghp_x" {
 		t.Fatalf("credentials = %v", rules.Credentials)
 	}
-	// A Forgejo installation's host is allowed implicitly, a provider's
-	// baseUrl is not, and a credential's value never leaks into the host
-	// list.
-	h, err := Parse([]byte("providers:\n  p:\n    type: openai\n    baseUrl: https://llm.example:8443/v1\n    apiKey: { env: TEST_GH_TOKEN }\n" +
-		strings.Replace(minimal, "account: acme", "host: git.example.org\n        account: acme", 1)))
+	// "*" allows every host but the denied ones, and a credential may name
+	// any host under it. Addresses and CIDRs are prefixes, not hosts.
+	any, err := loadBytes(t, []byte("egress:\n  allow: [\"*\", 10.0.0.0/8, \"2001:db8::1\", \"::ffff:198.51.100.0/120\"]\n  deny: [\"*.pastebin.com\", 10.0.5.0/24, 10.0.0.9, \"::ffff:203.0.113.7\"]\n  credentials:\n    registry.example.com: { env: TEST_GH_TOKEN }\n"+minimal))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hosts := h.EgressRules().Hosts; !slices.Contains(hosts, "git.example.org") || slices.Contains(hosts, "llm.example") ||
-		slices.Contains(hosts, "api.openai.com") || slices.ContainsFunc(hosts, func(h string) bool { return strings.Contains(h, "ghp_") }) {
-		t.Fatalf("hosts = %v", hosts)
+	rules = any.EgressRules()
+	if !rules.Allows("evil.example") || rules.Allows("paste.pastebin.com") || rules.Credentials["registry.example.com"] != "Bearer ghp_x" {
+		t.Fatalf("any host: allow = %v, deny = %v, credentials = %v", rules.Allow, rules.Deny, rules.Credentials)
+	}
+	if got := fmt.Sprint(rules.Allow.Prefixes, rules.Deny.Prefixes, rules.Deny.Hosts); got != "[10.0.0.0/8 2001:db8::1/128 198.51.100.0/24] [10.0.5.0/24 10.0.0.9/32 203.0.113.7/32] [*.pastebin.com]" {
+		t.Fatalf("prefixes and hosts = %s", got)
+	}
+	// A connection's forge is allowed implicitly, a provider's baseUrl
+	// is not, and a credential's value never leaks into the host list.
+	h, err := loadBytes(t, []byte("providers:\n  p:\n    type: openai\n    baseUrl: https://llm.example:8443/v1\n    apiKey: { env: TEST_GH_TOKEN }\n"+minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allow := h.EgressRules().Allow.Hosts; !slices.Contains(allow, GitHubHost) || slices.Contains(allow, "llm.example") ||
+		slices.Contains(allow, "api.openai.com") || slices.ContainsFunc(allow, func(h string) bool { return strings.Contains(h, "ghp_") }) {
+		t.Fatalf("allow = %v", allow)
 	}
 }
 
@@ -69,14 +82,23 @@ func TestEgressRejects(t *testing.T) {
 	t.Setenv("TEST_GH_TOKEN", "ghp_x")
 	t.Setenv("TEST_EMPTY", "")
 	for name, tt := range map[string]struct{ yaml, want string }{
-		"scheme in host":         {"egress:\n  allowHosts: [\"https://ghcr.io\"]\n", "lowercase hostname"},
-		"port in host":           {"egress:\n  allowHosts: [\"ghcr.io:443\"]\n", "lowercase hostname"},
-		"uppercase host":         {"egress:\n  allowHosts: [GHCR.io]\n", "lowercase hostname"},
-		"credential not allowed": {"egress:\n  credentials:\n    api.github.com: { env: TEST_GH_TOKEN }\n", "not in egress.allowHosts"},
-		"empty credential":       {"egress:\n  allowHosts: [api.github.com]\n  credentials:\n    api.github.com: { env: TEST_EMPTY }\n", "empty value"},
+		"scheme in host":         {"egress:\n  allow: [\"https://ghcr.io\"]\n", "egress.allow[0]"},
+		"port in host":           {"egress:\n  allow: [\"ghcr.io:443\"]\n", "lowercase hostname"},
+		"uppercase host":         {"egress:\n  allow: [GHCR.io]\n", "lowercase hostname"},
+		"scheme in deny":         {"egress:\n  deny: [\"https://ghcr.io\"]\n", "egress.deny[0]"},
+		"trailing dot in deny":   {"egress:\n  deny: [\"transfer.sh.\"]\n", "egress.deny[0]"},
+		"address with port":      {"egress:\n  allow: [\"10.0.0.5:443\"]\n", "egress.allow[0]"},
+		"bad prefix":             {"egress:\n  allow: [10.0.0.0/33]\n", "egress.allow[0]"},
+		"dot after wildcard":     {"egress:\n  allow: [\"*..example.com\"]\n", "egress.allow[0]"},
+		"forge denied":           {"egress:\n  deny: [\"*.github.com\"]\n", "api.github.com is denied"},
+		"credential not allowed": {"egress:\n  credentials:\n    registry.example.com: { env: TEST_GH_TOKEN }\n", "not allowed by egress.allow and egress.deny"},
+		"credential denied":      {"egress:\n  allow: [\"*\"]\n  deny: [registry.example.com]\n  credentials:\n    registry.example.com: { env: TEST_GH_TOKEN }\n", "not allowed by egress.allow and egress.deny"},
+		"credential pattern":     {"egress:\n  allow: [\"*\"]\n  credentials:\n    \"*\": { env: TEST_GH_TOKEN }\n", "one host, not a pattern"},
+		"credential suffix":      {"egress:\n  allow: [\"*.example.com\"]\n  credentials:\n    \"*.example.com\": { env: TEST_GH_TOKEN }\n", "one host, not a pattern"},
+		"empty credential":       {"egress:\n  allow: [api.github.com]\n  credentials:\n    api.github.com: { env: TEST_EMPTY }\n", "empty value"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := Parse([]byte(tt.yaml + minimal))
+			_, err := loadBytes(t, []byte(tt.yaml+minimal))
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want %q", err, tt.want)
 			}

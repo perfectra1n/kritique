@@ -3,41 +3,44 @@ package webapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/riverqueue/river/rivertype"
 
 	"github.com/perfectra1n/kritique/internal/jobs"
+	"github.com/perfectra1n/kritique/internal/store"
 )
 
 // Actions queues the work an admin can ask for from the dashboard, each in
-// the caller's tenant transaction so the job and its audit row commit
+// the caller's account transaction so the job and its audit row commit
 // together.
 type Actions interface {
 	// Rerun queues a manual review of the pull request's current head,
 	// jobs.ErrNoHead when none is known, jobs.ErrRerunQueued when one is
 	// already queued or running.
-	Rerun(ctx context.Context, tx pgx.Tx, tenantID, repositoryID string, number int) (int64, error)
-	// Cancel asks a running review to stop, recording by as the account
-	// that asked; jobs.ErrNotCancelable when it is not running.
-	Cancel(ctx context.Context, tx pgx.Tx, reviewID, by string) error
+	Rerun(ctx context.Context, tx pgx.Tx, accountID, repositoryID string, number int) (int64, error)
+	// Cancel asks a running review to stop; jobs.ErrNotCancelable when it
+	// is not running.
+	Cancel(ctx context.Context, tx pgx.Tx, reviewID string) error
 	// Reindex queues a full reindex of the repository;
 	// jobs.ErrRepositoryNotFound when it no longer exists (findRepo already
 	// resolved it in the same transaction, so this is defense in depth),
 	// jobs.ErrReindexQueued when a forced reindex is already queued or
 	// running.
-	Reindex(ctx context.Context, tx pgx.Tx, tenantID, repositoryID string) (int64, error)
+	Reindex(ctx context.Context, tx pgx.Tx, accountID, repositoryID string) (int64, error)
 }
 
-var errActionsDisabled = errStatus(http.StatusServiceUnavailable, CodeActionsDisabled, "this process does not queue dashboard actions", nil)
-
-// registerActions mounts re-run, cancel and reindex.
+// registerActions mounts re-run, cancel and reindex, and turning a
+// repository on or off.
 func (s *Server) registerActions(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/tenants/{slug}/pulls/{owner}/{repo}/{number}/rerun", s.admin(s.rerun))
-	mux.HandleFunc("POST /api/v1/tenants/{slug}/reviews/{id}/cancel", s.admin(s.cancel))
-	mux.HandleFunc("POST /api/v1/tenants/{slug}/repos/{owner}/{repo}/reindex", s.admin(s.reindex))
+	mux.HandleFunc("POST /api/v1/accounts/{forge}/{name}/pulls/{owner}/{repo}/{number}/rerun", s.accountAdmin(s.rerun))
+	mux.HandleFunc("POST /api/v1/accounts/{forge}/{name}/reviews/{id}/cancel", s.accountAdmin(s.cancel))
+	mux.HandleFunc("POST /api/v1/accounts/{forge}/{name}/repos/{owner}/{repo}/reindex", s.accountAdmin(s.reindex))
+	mux.HandleFunc("PUT /api/v1/accounts/{forge}/{name}/repos/{owner}/{repo}/turned-on", s.accountAdmin(s.turnOn))
 }
 
 // jobAudit is a queued action's audit detail.
@@ -45,11 +48,8 @@ type jobAudit struct {
 	JobID int64 `json:"jobId,omitempty"`
 }
 
-func (s *Server) rerun(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
-	if s.actions == nil {
-		return errActionsDisabled
-	}
-	ctx, tid := r.Context(), t.tenant.ID()
+func (s *Server) rerun(w http.ResponseWriter, r *http.Request, t *accountScope) error {
+	ctx, tid := r.Context(), t.account.ID()
 	var job int64
 	err := s.read(ctx, t, func(tx pgx.Tx) error {
 		p, err := findPull(r, tx)
@@ -59,14 +59,18 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request, t *tenantScope) e
 		job, err = s.actions.Rerun(ctx, tx, tid, p.RepositoryID, p.Number)
 		switch {
 		case errors.Is(err, jobs.ErrNoHead):
-			return errStatus(http.StatusConflict, CodeNoHead, "the pull request has no known head to review", nil)
+			return errStatus(http.StatusConflict, CodeNoHead, "the pull request has no head to review")
 		case errors.Is(err, jobs.ErrRerunQueued):
-			return errStatus(http.StatusConflict, CodeAlreadyQueued, "a review of this head is already queued or running", nil)
+			live, err := store.FindLiveReviewJob(ctx, tx, p.RepositoryID, p.Number)
+			if err != nil {
+				return err
+			}
+			return errStatus(http.StatusConflict, CodeAlreadyQueued, queuedMessage(live))
 		case err != nil:
 			return err
 		}
 		target := p.Repository + "#" + strconv.Itoa(p.Number)
-		return record(ctx, tx, t.principal, &tid, AuditReviewRerun, target, jobAudit{JobID: job})
+		return record(ctx, tx, t.principal, tid, AuditReviewRerun, target, jobAudit{JobID: job})
 	})
 	if err != nil {
 		return err
@@ -75,23 +79,44 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request, t *tenantScope) e
 	return nil
 }
 
-func (s *Server) cancel(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
-	if s.actions == nil {
-		return errActionsDisabled
+// queuedMessage says what the review job that stands in a re-run's way is
+// doing, so whoever asked again learns why no review has shown up. j is nil
+// when a running review has no unfinished job to name.
+func queuedMessage(j *store.JobRow) string {
+	if j == nil {
+		return "a review of this head is already queued or running"
 	}
-	ctx, tid, id := r.Context(), t.tenant.ID(), r.PathValue("id")
+	running := j.State == rivertype.JobStateRunning
+	if j.LastError == "" {
+		if running {
+			return fmt.Sprintf("review job #%d is running", j.ID)
+		}
+		return fmt.Sprintf("review job #%d is queued", j.ID)
+	}
+	why := j.LastError
+	if jobCause(j.LastError) == CauseForgeUnavailable {
+		why = "the forge did not answer"
+	}
+	if running {
+		return fmt.Sprintf("review job #%d is on attempt %d of %d, the one before failed: %s", j.ID, j.Attempt, j.MaxAttempts, why)
+	}
+	return fmt.Sprintf("review job #%d failed attempt %d of %d and will run again: %s", j.ID, j.Attempt, j.MaxAttempts, why)
+}
+
+func (s *Server) cancel(w http.ResponseWriter, r *http.Request, t *accountScope) error {
+	ctx, tid, id := r.Context(), t.account.ID(), r.PathValue("id")
 	if uuid.Validate(id) != nil {
 		return errNotFound("review")
 	}
 	err := s.read(ctx, t, func(tx pgx.Tx) error {
-		err := s.actions.Cancel(ctx, tx, id, t.principal.Account.ID)
+		err := s.actions.Cancel(ctx, tx, id)
 		if errors.Is(err, jobs.ErrNotCancelable) {
-			return errStatus(http.StatusConflict, CodeNotCancelable, "the review is not running", nil)
+			return errStatus(http.StatusConflict, CodeNotCancelable, "the review is not running")
 		}
 		if err != nil {
 			return err
 		}
-		return record(ctx, tx, t.principal, &tid, AuditReviewCancel, id, jobAudit{})
+		return record(ctx, tx, t.principal, tid, AuditReviewCancel, id, jobAudit{})
 	})
 	if err != nil {
 		return err
@@ -100,11 +125,8 @@ func (s *Server) cancel(w http.ResponseWriter, r *http.Request, t *tenantScope) 
 	return nil
 }
 
-func (s *Server) reindex(w http.ResponseWriter, r *http.Request, t *tenantScope) error {
-	if s.actions == nil {
-		return errActionsDisabled
-	}
-	ctx, tid := r.Context(), t.tenant.ID()
+func (s *Server) reindex(w http.ResponseWriter, r *http.Request, t *accountScope) error {
+	ctx, tid := r.Context(), t.account.ID()
 	var job int64
 	err := s.read(ctx, t, func(tx pgx.Tx) error {
 		repo, err := findRepo(ctx, tx, r)
@@ -116,16 +138,46 @@ func (s *Server) reindex(w http.ResponseWriter, r *http.Request, t *tenantScope)
 			return errNotFound("repository")
 		}
 		if errors.Is(err, jobs.ErrReindexQueued) {
-			return errStatus(http.StatusConflict, CodeAlreadyQueued, "a reindex is already queued for this repository", nil)
+			return errStatus(http.StatusConflict, CodeAlreadyQueued, "a reindex is already queued for this repository")
 		}
 		if err != nil {
 			return err
 		}
-		return record(ctx, tx, t.principal, &tid, AuditRepoReindex, repo.FullName, jobAudit{JobID: job})
+		return record(ctx, tx, t.principal, tid, AuditRepoReindex, repo.FullName, jobAudit{JobID: job})
 	})
 	if err != nil {
 		return err
 	}
 	writeJSON(w, http.StatusAccepted, Accepted{JobID: job})
+	return nil
+}
+
+// turnOn records an admin's choice to review a repository or not, which the
+// dashboard owns. It queues nothing: the repository runs, or stops, from
+// its next event on.
+func (s *Server) turnOn(w http.ResponseWriter, r *http.Request, t *accountScope) error {
+	var req TurnOnRequest
+	if err := readBody(r, &req); err != nil {
+		return err
+	}
+	ctx, tid := r.Context(), t.account.ID()
+	err := s.read(ctx, t, func(tx pgx.Tx) error {
+		repo, err := findRepo(ctx, tx, r)
+		if err != nil {
+			return err
+		}
+		if err := store.TurnOn(ctx, tx, repo.ID, req.On); err != nil {
+			return err
+		}
+		action := AuditRepoTurnOff
+		if req.On {
+			action = AuditRepoTurnOn
+		}
+		return record(ctx, tx, t.principal, tid, action, repo.FullName, struct{}{})
+	})
+	if err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
 	return nil
 }

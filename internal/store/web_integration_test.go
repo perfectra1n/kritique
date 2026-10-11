@@ -5,7 +5,6 @@ package store
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"testing"
 	"time"
@@ -17,22 +16,22 @@ import (
 // insertReview creates a pull_requests row (with a randomised, collision-safe
 // number, matching the convention TestGatewayTokens already established for
 // this UNIQUE(repository_id, number) constraint) and a reviews row on top of
-// it, both owned by tenant. It returns the review's id.
-func insertReview(t *testing.T, ctx context.Context, s *Store, tenant string) string {
+// it, both owned by account. It returns the review's id.
+func insertReview(t *testing.T, ctx context.Context, s *Store, account string) string {
 	t.Helper()
 	var reviewID string
-	err := s.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+	err := s.WithAccount(ctx, account, func(tx pgx.Tx) error {
 		var repoID string
-		if err := tx.QueryRow(ctx, `SELECT id FROM repositories WHERE tenant_id = $1 LIMIT 1`, tenant).Scan(&repoID); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT id FROM repositories WHERE account_id = $1 LIMIT 1`, account).Scan(&repoID); err != nil {
 			return err
 		}
 		var prID string
-		if err := tx.QueryRow(ctx, `INSERT INTO pull_requests (tenant_id, repository_id, number, head_sha)
-			VALUES ($1, $2, (random() * 1e6)::int, 'abc') RETURNING id`, tenant, repoID).Scan(&prID); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO pull_requests (account_id, repository_id, number, head_sha)
+			VALUES ($1, $2, (random() * 1e6)::int, 'abc') RETURNING id`, account, repoID).Scan(&prID); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `INSERT INTO reviews (tenant_id, pull_request_id, head_sha, status)
-			VALUES ($1, $2, 'abc', 'running') RETURNING id`, tenant, prID).Scan(&reviewID)
+		return tx.QueryRow(ctx, `INSERT INTO reviews (account_id, pull_request_id, head_sha, status)
+			VALUES ($1, $2, 'abc', 'running') RETURNING id`, account, prID).Scan(&reviewID)
 	})
 	if err != nil {
 		t.Fatalf("insert review: %v", err)
@@ -40,16 +39,16 @@ func insertReview(t *testing.T, ctx context.Context, s *Store, tenant string) st
 	return reviewID
 }
 
-// TestListenPublishesReviewEvents exercises the notify.go/0004_web.sql
+// TestListenPublishesReviewEvents exercises the notify.go/0001_init.sql
 // contract end to end: a reviews.status change must produce an Event on the
 // kritique_events channel that Listen decodes and hands to onEvent.
 func TestListenPublishesReviewEvents(t *testing.T) {
 	s := openStore(t)
-	ctx := context.Background()
-	if err := s.ApplyConfig(ctx, parse(t, twoTenants), "test"); err != nil {
+	ctx := t.Context()
+	if err := s.ApplyConfig(ctx, parse(t, twoAccounts)); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
-	alpha := tenantID(t, s, "alpha")
+	alpha := accountID(t, s, "alpha")
 	reviewID := insertReview(t, ctx, s, alpha)
 
 	events := make(chan Event, 10)
@@ -59,7 +58,7 @@ func TestListenPublishesReviewEvents(t *testing.T) {
 	// time; give Listen's connection a moment to register before the write.
 	time.Sleep(250 * time.Millisecond)
 
-	if err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
+	if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE reviews SET status = 'completed' WHERE id = $1`, reviewID)
 		return err
 	}); err != nil {
@@ -68,8 +67,8 @@ func TestListenPublishesReviewEvents(t *testing.T) {
 
 	select {
 	case e := <-events:
-		if e.Kind != EventReview || e.ID != reviewID || e.TenantID != alpha {
-			t.Fatalf("event = %+v, want kind=review id=%s tenant=%s", e, reviewID, alpha)
+		if e.Kind != EventReview || e.ID != reviewID || e.AccountID != alpha {
+			t.Fatalf("event = %+v, want kind=review id=%s account=%s", e, reviewID, alpha)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no review event received for the status change")
@@ -82,14 +81,14 @@ func TestListenPublishesReviewEvents(t *testing.T) {
 // must, and must not fire more than once for it.
 func TestListenSkipsRunnerRunHeartbeatOnlyUpdates(t *testing.T) {
 	s := openStore(t)
-	ctx := context.Background()
-	if err := s.ApplyConfig(ctx, parse(t, twoTenants), "test"); err != nil {
+	ctx := t.Context()
+	if err := s.ApplyConfig(ctx, parse(t, twoAccounts)); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
-	alpha := tenantID(t, s, "alpha")
+	alpha := accountID(t, s, "alpha")
 	var runID string
-	if err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `INSERT INTO runner_runs (tenant_id, kind) VALUES ($1, 'index') RETURNING id`, alpha).Scan(&runID)
+	if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `INSERT INTO runner_runs (account_id, kind) VALUES ($1, 'index') RETURNING id`, alpha).Scan(&runID)
 	}); err != nil {
 		t.Fatalf("insert runner_runs: %v", err)
 	}
@@ -99,7 +98,7 @@ func TestListenSkipsRunnerRunHeartbeatOnlyUpdates(t *testing.T) {
 	go s.Listen(listenCtx, ListenHandlers{OnEvent: func(e Event) { events <- e }})
 	time.Sleep(250 * time.Millisecond)
 
-	if err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
+	if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE runner_runs SET heartbeat_at = now() WHERE id = $1`, runID)
 		return err
 	}); err != nil {
@@ -111,7 +110,7 @@ func TestListenSkipsRunnerRunHeartbeatOnlyUpdates(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	if err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
+	if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE runner_runs SET phase = 'fetching' WHERE id = $1`, runID)
 		return err
 	}); err != nil {
@@ -134,66 +133,28 @@ func TestListenSkipsRunnerRunHeartbeatOnlyUpdates(t *testing.T) {
 	}
 }
 
-// TestListenPublishesConfigEvents checks kritique_notify_config: an insert or
-// update on dashboard_tenants must call onConfig with the row's slug.
-func TestListenPublishesConfigEvents(t *testing.T) {
-	s := openStore(t)
-	ctx := context.Background()
-
-	configs := make(chan string, 10)
-	listenCtx := t.Context()
-	go s.Listen(listenCtx, ListenHandlers{OnConfig: func(slug string) { configs <- slug }})
-	time.Sleep(250 * time.Millisecond)
-
-	// dashboard_tenants carries no RLS (read before the tenant it describes
-	// exists), so the owner pool can write it directly.
-	if _, err := s.owner.Exec(ctx, `INSERT INTO dashboard_tenants (slug, spec) VALUES ('gamma', '{}'::jsonb)`); err != nil {
-		t.Fatalf("insert dashboard_tenants: %v", err)
-	}
-	select {
-	case slug := <-configs:
-		if slug != "gamma" {
-			t.Fatalf("config slug = %q, want gamma", slug)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no config event received for the insert")
-	}
-
-	if _, err := s.owner.Exec(ctx, `UPDATE dashboard_tenants SET revision = revision + 1 WHERE slug = 'gamma'`); err != nil {
-		t.Fatalf("update dashboard_tenants: %v", err)
-	}
-	select {
-	case slug := <-configs:
-		if slug != "gamma" {
-			t.Fatalf("config slug = %q, want gamma", slug)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no config event received for the update")
-	}
-}
-
 // TestModelCallsRowLevelSecurity checks that model_calls, the one new web
-// table that is tenant content, gets the same tenant_isolation treatment as
-// every other tenant-scoped table.
+// table that is account content, gets the same account_isolation treatment as
+// every other account-scoped table.
 func TestModelCallsRowLevelSecurity(t *testing.T) {
 	s := openStore(t)
-	ctx := context.Background()
-	if err := s.ApplyConfig(ctx, parse(t, twoTenants), "test"); err != nil {
+	ctx := t.Context()
+	if err := s.ApplyConfig(ctx, parse(t, twoAccounts)); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
-	alpha, beta := tenantID(t, s, "alpha"), tenantID(t, s, "beta")
+	alpha, beta := accountID(t, s, "alpha"), accountID(t, s, "beta")
 
-	if err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO model_calls (tenant_id, kind, model) VALUES ($1, 'review', 'acme/large')`, alpha)
+	if err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO model_calls (account_id, kind, model) VALUES ($1, 'followup', 'acme/large')`, alpha)
 		return err
 	}); err != nil {
 		t.Fatalf("insert model_calls: %v", err)
 	}
 
-	count := func(tenant string) int {
+	count := func(account string) int {
 		t.Helper()
 		var n int
-		if err := s.WithTenant(ctx, tenant, func(tx pgx.Tx) error {
+		if err := s.WithAccount(ctx, account, func(tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT count(*) FROM model_calls`).Scan(&n)
 		}); err != nil {
 			t.Fatalf("count model_calls: %v", err)
@@ -207,29 +168,28 @@ func TestModelCallsRowLevelSecurity(t *testing.T) {
 		t.Fatalf("beta sees %d model_calls rows, want 0 (RLS leak)", n)
 	}
 
-	// A foreign tenant_id must fail the WITH CHECK policy, same as every
-	// other tenant-scoped table.
-	err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO model_calls (tenant_id, kind, model) VALUES ($1, 'review', 'acme/large')`, beta)
+	// A foreign account_id must fail the WITH CHECK policy, same as every
+	// other account-scoped table.
+	err := s.WithAccount(ctx, alpha, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO model_calls (account_id, kind, model) VALUES ($1, 'followup', 'acme/large')`, beta)
 		return err
 	})
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
-		t.Fatalf("insert into model_calls with a foreign tenant_id: err = %v, want a 42501 permission-denied error", err)
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "42501" {
+		t.Fatalf("insert into model_calls with a foreign account_id: err = %v, want a 42501 permission-denied error", err)
 	}
 }
 
 // TestRunnerRoleCannotTouchWebTables checks that the web dashboard's
 // instance-level tables (no RLS; access control lives in web code) are not
 // among the tables grant() gives the runner role, since a compromised
-// runner container should never be able to read or write accounts,
+// runner container should never be able to read or write users,
 // sessions, or any other dashboard table.
 func TestRunnerRoleCannotTouchWebTables(t *testing.T) {
 	openStore(t) // ensures Migrate/grant() have run against this schema
-	ctx := context.Background()
+	ctx := t.Context()
 	runner, err := Open(ctx, Options{
 		AppURL: testEnv(t, "KRITIQUE_TEST_RUNNER_URL"),
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
 		t.Fatalf("open runner store: %v", err)
@@ -237,145 +197,15 @@ func TestRunnerRoleCannotTouchWebTables(t *testing.T) {
 	t.Cleanup(runner.Close)
 
 	tables := []string{
-		"accounts", "identities", "sessions", "login_states",
-		"memberships", "invites", "audit_events", "dashboard_tenants", "model_calls",
+		"users", "identities", "sessions", "login_states", "audit_events", "model_calls",
 	}
 	for _, table := range tables {
 		t.Run(table, func(t *testing.T) {
 			var n int
 			err := runner.app.QueryRow(ctx, `SELECT count(*) FROM `+pgx.Identifier{table}.Sanitize()).Scan(&n)
-			var pgErr *pgconn.PgError
-			if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+			if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "42501" {
 				t.Fatalf("runner querying %s: err = %v, want a 42501 permission-denied error", table, err)
 			}
 		})
-	}
-}
-
-// TestListenPublishesTaskRunEvents checks 0012_task_run_events.sql: a new
-// task run and each status change notify, while an update that leaves the
-// status alone does not.
-func TestListenPublishesTaskRunEvents(t *testing.T) {
-	s := openStore(t)
-	ctx := context.Background()
-	if err := s.ApplyConfig(ctx, parse(t, twoTenants), "test"); err != nil {
-		t.Fatalf("ApplyConfig: %v", err)
-	}
-	alpha := tenantID(t, s, "alpha")
-	events := make(chan Event, 10)
-	go s.Listen(t.Context(), ListenHandlers{OnEvent: func(e Event) { events <- e }})
-	time.Sleep(250 * time.Millisecond)
-
-	var runID string
-	write := func(sql string) {
-		t.Helper()
-		if err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
-			if runID != "" {
-				_, err := tx.Exec(ctx, sql, runID)
-				return err
-			}
-			return tx.QueryRow(ctx, sql, alpha).Scan(&runID)
-		}); err != nil {
-			t.Fatalf("%s: %v", sql, err)
-		}
-	}
-	steps := []struct {
-		name   string
-		sql    string
-		notify bool
-	}{
-		{"insert", `INSERT INTO task_runs (tenant_id, repository_id, task, mode, status)
-			SELECT $1, id, 'triage', 'single', 'queued' FROM repositories WHERE tenant_id = $1 LIMIT 1 RETURNING id`, true},
-		{"status change", `UPDATE task_runs SET status = 'running' WHERE id = $1`, true},
-		{"same status", `UPDATE task_runs SET model = 'acme/large' WHERE id = $1`, false},
-		{"finish", `UPDATE task_runs SET status = 'succeeded', finished_at = now() WHERE id = $1`, true},
-	}
-	t.Cleanup(func() {
-		if _, err := s.owner.Exec(context.Background(), `DELETE FROM task_runs WHERE id = $1`, runID); err != nil {
-			t.Errorf("delete task run: %v", err)
-		}
-	})
-	for _, st := range steps {
-		write(st.sql)
-		wait := 500 * time.Millisecond
-		if st.notify {
-			wait = 5 * time.Second
-		}
-		select {
-		case e := <-events:
-			if !st.notify {
-				t.Fatalf("%s: unexpected event %+v", st.name, e)
-			}
-			if e.Kind != EventTaskRun || e.ID != runID || e.TenantID != alpha || e.ReviewID != nil {
-				t.Fatalf("%s: event = %+v, want kind=task_run id=%s tenant=%s", st.name, e, runID, alpha)
-			}
-		case <-time.After(wait):
-			if st.notify {
-				t.Fatalf("%s: no task_run event", st.name)
-			}
-		}
-	}
-}
-
-// TestRepoTaskConfig checks the default branch tip's .kritique.yaml a task
-// dispatch records: none before the first, then the latest commit's file,
-// nil when the tip has none.
-func TestRepoTaskConfig(t *testing.T) {
-	s := openStore(t)
-	ctx := context.Background()
-	if err := s.ApplyConfig(ctx, parse(t, twoTenants), "test"); err != nil {
-		t.Fatalf("ApplyConfig: %v", err)
-	}
-	alpha := tenantID(t, s, "alpha")
-	var repoID string
-	if err := s.owner.QueryRow(ctx, `SELECT id FROM repositories WHERE name = 'alpha/one'`).Scan(&repoID); err != nil {
-		t.Fatal(err)
-	}
-	doc := "tasks: []\n"
-	steps := []struct {
-		name    string
-		save    bool
-		commit  string
-		doc     []byte
-		want    string
-		wantDoc *string
-		wantErr error
-	}{
-		{name: "none recorded yet", wantErr: ErrNotFound},
-		{name: "a tip with a file", save: true, commit: "a1", doc: []byte(doc), want: "a1", wantDoc: &doc},
-		{name: "the same tip again", save: true, commit: "a1", doc: nil, want: "a1", wantDoc: &doc},
-		{name: "a tip without one", save: true, commit: "b2", want: "b2"},
-	}
-	for _, st := range steps {
-		t.Run(st.name, func(t *testing.T) {
-			var got TaskConfigRow
-			err := s.WithTenant(ctx, alpha, func(tx pgx.Tx) error {
-				if st.save {
-					if err := SaveRepoTaskConfig(ctx, tx, repoID, st.commit, st.doc); err != nil {
-						return err
-					}
-				}
-				var err error
-				got, err = RepoTaskConfig(ctx, tx, repoID)
-				return err
-			})
-			if !errors.Is(err, st.wantErr) {
-				t.Fatalf("err = %v, want %v", err, st.wantErr)
-			}
-			if err != nil {
-				return
-			}
-			if got.Commit != st.want || (got.Doc == nil) != (st.wantDoc == nil) || (got.Doc != nil && *got.Doc != *st.wantDoc) ||
-				got.ResolvedAt.IsZero() {
-				t.Errorf("RepoTaskConfig = %+v (doc %v), want commit %s, doc %v", got, got.Doc, st.want, st.wantDoc)
-			}
-		})
-	}
-	// Row-level security keeps it from another tenant.
-	if err := s.WithTenant(ctx, tenantID(t, s, "beta"), func(tx pgx.Tx) error {
-		_, err := RepoTaskConfig(ctx, tx, repoID)
-		return err
-	}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("beta reading alpha's task config: %v", err)
 	}
 }

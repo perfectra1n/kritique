@@ -10,118 +10,186 @@
       "type": "boolean",
       "description": "false stops reviews, follow-ups and indexing; true cannot turn a disabled repository on."
     },
-    "mode": {
-      "enum": ["single", "agentic"],
-      "description": "How the repository is reviewed, one of the operator's allow.modes."
-    },
-    "models": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "review": { "$ref": "#/$defs/model" },
-        "fallback": { "$ref": "#/$defs/model" }
-      }
-    },
-    "agent": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "An agentic review's limits, each at most the operator's allow.agent bound.",
-      "properties": {
-        "maxSteps": { "type": "integer", "minimum": 1 },
-        "maxToolOutputBytes": { "type": "integer", "minimum": 1 },
-        "maxTokens": { "type": "integer", "minimum": 1 },
-        "timeout": { "$ref": "#/$defs/duration" },
-        "commands": {
-          "type": "array",
-          "description": "Commands the agent may run, a subset of the operator's allow.commands.",
-          "items": { "type": "string", "pattern": "^[^/]+$" }
-        }
-      }
-    },
-    "settle": {
-      "$ref": "#/$defs/duration",
-      "description": "How long a new head waits before its review starts, at most the operator's allow.settle."
-    },
-    "filter": {
-      "type": "string",
-      "description": "A CEL expression over pr, ANDed with the operator's filter."
-    },
-    "ignore": {
-      "type": "array",
-      "description": "Path globs added to the operator's ignore list.",
-      "items": { "$ref": "#/$defs/glob" }
-    },
-    "skip": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "onlyPaths": {
-          "type": "array",
-          "description": "Skip a pull request only when every changed path matches one of these.",
-          "items": { "$ref": "#/$defs/glob" }
-        }
-      }
-    },
     "review": {
       "type": "object",
       "additionalProperties": false,
+      "description": "How a review is done.",
       "properties": {
-        "instructions": {
-          "type": "array",
-          "description": "Files appended to the reviewer's instructions, after the operator's.",
-          "items": {
-            "oneOf": [
-              { "$ref": "#/$defs/path" },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["path"],
-                "properties": {
-                  "path": { "$ref": "#/$defs/path" },
-                  "paths": {
-                    "type": "array",
-                    "description": "Include the file only when a changed path matches one of these.",
-                    "items": { "$ref": "#/$defs/glob" }
-                  }
-                }
-              }
-            ]
-          }
+        "model": { "$ref": "#/$defs/model" },
+        "fallback": { "$ref": "#/$defs/model" },
+        "effort": {
+          "$ref": "#/$defs/effort",
+          "description": "How hard the review model, and the fallback that takes its step, reasons; replaces the admin's."
         },
-        "requireSuggestedFix": {
+        "fixes": {
           "type": "boolean",
-          "description": "true requires a suggested fix on every finding; false cannot lift the operator's requirement."
+          "description": "true requires a suggested fix on every finding; false cannot lift the admin's requirement."
         },
-        "templates": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "summary": { "$ref": "#/$defs/path" },
-            "inline": { "$ref": "#/$defs/path" }
-          }
+        "approve": {
+          "type": "boolean",
+          "description": "true approves a pull request whose review finds nothing blocking or important, or, with a confidence score, whose score reaches the threshold and whose risk is within confidence.risk; a later review that no longer allows it dismisses the approval; replaces the admin's."
         },
-        "minSeverity": {
-          "enum": ["nit", "important"],
-          "description": "The least severe finding posted inline; blocking findings always are."
+        "diagram": {
+          "type": "boolean",
+          "description": "true has the summary draw the flow the change adds or alters as a Mermaid diagram; replaces the admin's."
+        }
+      }
+    },
+    "confidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How a review is judged: a second model scores the reviewed pull request from 0 to 5.",
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/model",
+          "description": "The model that scores a reviewed pull request, replacing the admin's."
         },
-        "inlineComments": {
+        "fallback": {
+          "$ref": "#/$defs/model",
+          "description": "The model that takes the scorer's call when the confidence model fails, replacing the admin's."
+        },
+        "effort": {
+          "$ref": "#/$defs/effort",
+          "description": "How hard the confidence model, and the fallback that takes its call, reasons; replaces the admin's."
+        },
+        "threshold": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5,
+          "description": "The score a pull request must reach to be approved and, with gate, for its commit status to pass, replacing the admin's."
+        },
+        "gate": {
+          "type": "boolean",
+          "description": "true fails the commit status under the threshold, so it can be a required check; replaces the admin's."
+        },
+        "risk": {
+          "enum": ["low", "medium", "high", "critical"],
+          "description": "The highest risk a change may be rated and still be approved; it may only lower the admin's."
+        }
+      }
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Which pull requests get a review.",
+      "properties": {
+        "include": {
+          "type": "array",
+          "description": "Conditions that let a pull request in: it is reviewed when any of them holds, or the list is empty, and no exclude condition does. It must pass the admin's lists as well.",
+          "items": { "$ref": "#/$defs/condition" }
+        },
+        "exclude": {
+          "type": "array",
+          "description": "Conditions that keep a pull request out: it is skipped when any of them holds, whatever include says. A skip names the condition that held when it has a name.",
+          "items": { "$ref": "#/$defs/condition" }
+        }
+      }
+    },
+    "ignore": {
+      "type": "array",
+      "description": "Globs of paths kritique leaves out of a review's context and of the index, added to the admin's; a pull request that changes only ignored paths is skipped.",
+      "items": { "$ref": "#/$defs/glob" }
+    },
+    "comments": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How a review comments.",
+      "properties": {
+        "inline": {
           "type": "boolean",
           "description": "false posts the summary alone."
         },
-        "context": {
+        "summary": {
+          "$ref": "#/$defs/path",
+          "description": "A repository file, read from the merge base, that replaces the summary comment's template."
+        },
+        "finding": {
+          "$ref": "#/$defs/path",
+          "description": "A repository file, read from the merge base, that replaces an inline finding's template."
+        }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "description": "Checks the review makes, added after the admin's. A rule may not reuse the id of an admin's.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "oneOf": [{ "required": ["rule"] }, { "required": ["file"] }],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+            "description": "Names the rule to the findings that cite it."
+          },
+          "rule": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "What to check, and why."
+          },
+          "file": {
+            "$ref": "#/$defs/path",
+            "description": "A repository file, read from the merge base, whose content is the check."
+          },
+          "paths": {
+            "type": "array",
+            "description": "Apply the rule only when a changed path matches one of these.",
+            "items": { "$ref": "#/$defs/glob" }
+          },
+          "when": {
+            "type": "array",
+            "description": "Conditions on the pull request: the rule applies only when one of them holds.",
+            "items": { "$ref": "#/$defs/when" }
+          }
+        }
+      }
+    },
+    "context": {
+      "type": "array",
+      "description": "Files that explain the code, added after the admin's.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "description"],
+        "properties": {
+          "path": { "$ref": "#/$defs/path" },
+          "description": { "type": "string", "minLength": 1 },
+          "paths": {
+            "type": "array",
+            "description": "Name the file only when a changed path matches one of these.",
+            "items": { "$ref": "#/$defs/glob" }
+          }
+        }
+      }
+    },
+    "skills": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The repository's Agent Skills: folders holding a SKILL.md, read from the merge base. A review is offered each one's name and description and reads the skill when it fits.",
+      "properties": {
+        "paths": {
           "type": "array",
-          "description": "Files that explain the code, added after the operator's.",
-          "items": {
+          "description": "The directories whose folders each hold a skill, replacing the admin's; .agents/skills and .claude/skills when no one sets them, and an empty list turns skills off.",
+          "items": { "$ref": "#/$defs/path" }
+        },
+        "scope": {
+          "type": "object",
+          "description": "Narrows when a skill is offered, by the skill's name; added to the admin's, a skill named in both taking this file's.",
+          "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["path", "description"],
             "properties": {
-              "path": { "$ref": "#/$defs/path" },
-              "description": { "type": "string", "minLength": 1 },
               "paths": {
                 "type": "array",
-                "description": "Name the file only when a changed path matches one of these.",
+                "description": "Offer the skill only when a changed path matches one of these.",
                 "items": { "$ref": "#/$defs/glob" }
+              },
+              "when": {
+                "type": "array",
+                "description": "Conditions on the pull request: the skill is offered only when one of them holds.",
+                "items": { "$ref": "#/$defs/when" }
               }
             }
           }
@@ -130,20 +198,56 @@
     },
     "tasks": {
       "type": "array",
-      "description": "Tasks run on forge events, after the operator's; each is clipped to the operator's allow.tasks. See docs/repository-config.md.",
+      "description": "Event tasks run after the admin's; each is clipped to the admin's taskBounds. See docs/tasks.md.",
       "items": { "$ref": "#/$defs/task" }
     }
   },
   "$defs": {
-    "duration": {
-      "type": "string",
-      "pattern": "^(0|([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)$",
-      "description": "A Go duration, such as 30s, 5m or 1h30m."
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "anyOf": [{ "required": ["expr"] }, { "required": ["paths"] }],
+      "description": "One condition on a pull request, in trigger.include or trigger.exclude: expr, paths, or both, when both must hold. One with paths, or whose expr reads pr.lines, is judged once the pull request's diff is fetched.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "What the condition is called where a skip names it, unique in its list; it may not be one an admin's condition has."
+        },
+        "expr": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "A CEL expression over pr that says whether the condition holds. pr.lines is the lines the diff adds and removes, ignored paths left out."
+        },
+        "paths": {
+          "type": "array",
+          "description": "The condition holds only when a changed path matches one of these.",
+          "items": { "$ref": "#/$defs/glob" }
+        }
+      }
+    },
+    "when": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expr"],
+      "description": "One condition on a pull request, in a rule's or a skill scope's when.",
+      "properties": {
+        "name": { "type": "string", "description": "What the condition is for." },
+        "expr": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "A CEL expression over pr, as a trigger.include or trigger.exclude expression sees it, without pr.lines."
+        }
+      }
     },
     "model": {
       "type": "string",
       "pattern": "^[^/]+/.+$",
-      "description": "A <provider>/<model> reference the operator allows."
+      "description": "A <provider>/<model> reference, of a provider the instance or the account declares."
+    },
+    "effort": {
+      "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max", ""],
+      "description": "A reasoning effort, lowest first, or \"\" to leave it to the provider. Every provider takes low to max; the Anthropic Messages API has no level under low and gets none and minimal as low."
     },
     "path": {
       "type": "string",
@@ -155,6 +259,11 @@
       "type": "string",
       "minLength": 1,
       "description": "A doublestar glob, such as docs/** or **/*.sql."
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^(0|([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)$",
+      "description": "A Go duration, such as 30s, 5m or 1h30m."
     },
     "task": {
       "type": "object",
@@ -172,15 +281,7 @@
           "type": "boolean",
           "description": "false switches the task off; a task switched off needs only its name."
         },
-        "on": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/$defs/trigger" }
-        },
-        "if": {
-          "type": "string",
-          "description": "A CEL guard over event, subject and raw; empty always runs."
-        },
+        "on": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/trigger" } },
         "mode": {
           "enum": ["agentic", "single"],
           "description": "agentic, the default, runs in a runner pod; single is one call."
@@ -196,20 +297,17 @@
         "agent": {
           "type": "object",
           "additionalProperties": false,
-          "description": "An agentic task's limits, tools and commands, each within the operator's allow bounds.",
+          "description": "An agentic task's limits, tools and commands; a repository's are held to the admin's agent settings and taskBounds.tools.",
           "properties": {
-            "maxSteps": { "type": "integer", "minimum": 1 },
-            "maxToolOutputBytes": { "type": "integer", "minimum": 1 },
-            "maxTokens": { "type": "integer", "minimum": 1 },
+            "steps": { "type": "integer", "minimum": 1 },
+            "output": { "type": "integer", "minimum": 1 },
+            "tokens": { "type": "integer", "minimum": 1 },
             "timeout": { "$ref": "#/$defs/duration" },
             "tools": {
               "type": "array",
               "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" }
             },
-            "commands": {
-              "type": "array",
-              "items": { "type": "string", "pattern": "^[^/]+$" }
-            }
+            "commands": { "type": "array", "items": { "type": "string", "pattern": "^[^/]+$" } }
           }
         },
         "context": {
@@ -221,9 +319,7 @@
               "type": "object",
               "additionalProperties": false,
               "description": "The subject and its last comments.",
-              "properties": {
-                "comments": { "type": "integer", "minimum": 0, "maximum": 200 }
-              }
+              "properties": { "comments": { "type": "integer", "minimum": 0, "maximum": 200 } }
             },
             "files": {
               "type": "array",
@@ -233,9 +329,7 @@
                     "type": "object",
                     "additionalProperties": false,
                     "required": ["path"],
-                    "properties": {
-                      "path": { "$ref": "#/$defs/path" }
-                    }
+                    "properties": { "path": { "$ref": "#/$defs/path" } }
                   },
                   {
                     "type": "object",
@@ -305,9 +399,10 @@
               "properties": {
                 "mode": { "enum": ["sticky", "append", "none"] },
                 "template": { "$ref": "#/$defs/path" },
-                "if": {
-                  "type": "string",
-                  "description": "A CEL expression over event, subject, raw and, in an action, answer."
+                "when": {
+                  "type": "array",
+                  "description": "CEL conditions over event, subject, raw and answer, one of which must hold.",
+                  "items": { "$ref": "#/$defs/taskCondition" }
                 }
               }
             },
@@ -320,14 +415,8 @@
                   "additionalProperties": false,
                   "description": "Globs of labels the model may add and remove. * does not cross /: use ** or area/* to offer area/api.",
                   "properties": {
-                    "add": {
-                      "type": "array",
-                      "items": { "$ref": "#/$defs/glob" }
-                    },
-                    "remove": {
-                      "type": "array",
-                      "items": { "$ref": "#/$defs/glob" }
-                    }
+                    "add": { "type": "array", "items": { "$ref": "#/$defs/glob" } },
+                    "remove": { "type": "array", "items": { "$ref": "#/$defs/glob" } }
                   }
                 },
                 "rules": {
@@ -352,16 +441,18 @@
                           "description": "A Go template over the event and the answer."
                         }
                       },
-                      "if": {
-                        "type": "string",
-                        "description": "A CEL expression over event, subject, raw and, in an action, answer."
+                      "when": {
+                        "type": "array",
+                        "description": "CEL conditions over event, subject, raw and answer, one of which must hold.",
+                        "items": { "$ref": "#/$defs/taskCondition" }
                       }
                     }
                   }
                 },
-                "if": {
-                  "type": "string",
-                  "description": "A CEL expression over event, subject, raw and, in an action, answer."
+                "when": {
+                  "type": "array",
+                  "description": "CEL conditions over event, subject, raw and answer, one of which must hold.",
+                  "items": { "$ref": "#/$defs/taskCondition" }
                 }
               }
             },
@@ -372,10 +463,7 @@
                 "propose": {
                   "type": "object",
                   "additionalProperties": false,
-                  "properties": {
-                    "close": { "type": "boolean" },
-                    "reopen": { "type": "boolean" }
-                  }
+                  "properties": { "close": { "type": "boolean" }, "reopen": { "type": "boolean" } }
                 },
                 "rules": {
                   "type": "array",
@@ -385,16 +473,18 @@
                     "properties": {
                       "close": { "type": "boolean" },
                       "reopen": { "type": "boolean" },
-                      "if": {
-                        "type": "string",
-                        "description": "A CEL expression over event, subject, raw and, in an action, answer."
+                      "when": {
+                        "type": "array",
+                        "description": "CEL conditions over event, subject, raw and answer, one of which must hold.",
+                        "items": { "$ref": "#/$defs/taskCondition" }
                       }
                     }
                   }
                 },
-                "if": {
-                  "type": "string",
-                  "description": "A CEL expression over event, subject, raw and, in an action, answer."
+                "when": {
+                  "type": "array",
+                  "description": "CEL conditions over event, subject, raw and answer, one of which must hold.",
+                  "items": { "$ref": "#/$defs/taskCondition" }
                 }
               }
             },
@@ -406,13 +496,19 @@
               "description": "Comments on a pull request's lines.",
               "properties": {
                 "propose": { "type": "boolean" },
-                "if": {
-                  "type": "string",
-                  "description": "A CEL expression over event, subject, raw and, in an action, answer."
+                "when": {
+                  "type": "array",
+                  "description": "CEL conditions over event, subject, raw and answer, one of which must hold.",
+                  "items": { "$ref": "#/$defs/taskCondition" }
                 }
               }
             }
           }
+        },
+        "when": {
+          "type": "array",
+          "description": "CEL conditions over event, subject and raw, one of which must hold; empty always runs.",
+          "items": { "$ref": "#/$defs/taskCondition" }
         }
       }
     },
@@ -466,10 +562,7 @@
               "required": ["event"],
               "properties": {
                 "event": { "$ref": "#/$defs/glob" },
-                "actions": {
-                  "type": "array",
-                  "items": { "$ref": "#/$defs/glob" }
-                }
+                "actions": { "type": "array", "items": { "$ref": "#/$defs/glob" } }
               }
             }
           }
@@ -482,24 +575,16 @@
       "description": "An answer field: a restricted JSON Schema.",
       "required": ["type"],
       "properties": {
-        "type": {
-          "enum": ["string", "number", "integer", "boolean", "array", "object"]
-        },
+        "type": { "enum": ["string", "number", "integer", "boolean", "array", "object"] },
         "description": { "type": "string" },
-        "enum": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 }
-        },
+        "enum": { "type": "array", "items": { "type": "string", "minLength": 1 } },
         "maxLength": { "type": "integer", "minimum": 1, "maximum": 10000 },
         "pattern": { "type": "string" },
         "minimum": { "type": "number" },
         "maximum": { "type": "number" },
         "items": { "$ref": "#/$defs/field" },
         "maxItems": { "type": "integer", "minimum": 1, "maximum": 100 },
-        "properties": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/field" }
-        }
+        "properties": { "type": "object", "additionalProperties": { "$ref": "#/$defs/field" } }
       }
     },
     "query": {
@@ -546,19 +631,35 @@
                   "description": "A Go template over the event and the answer."
                 }
               },
-              "if": {
-                "type": "string",
-                "description": "A CEL expression over event, subject, raw and, in an action, answer."
+              "when": {
+                "type": "array",
+                "description": "CEL conditions over event, subject, raw and answer, one of which must hold.",
+                "items": { "$ref": "#/$defs/taskCondition" }
               }
             }
           }
         },
-        "if": {
-          "type": "string",
-          "description": "A CEL expression over event, subject, raw and, in an action, answer."
+        "when": {
+          "type": "array",
+          "description": "CEL conditions over event, subject, raw and answer, one of which must hold.",
+          "items": { "$ref": "#/$defs/taskCondition" }
         }
       }
     },
-    "identifier": { "type": "string", "pattern": "^[a-z][a-zA-Z0-9_]*$" }
+    "identifier": { "type": "string", "pattern": "^[a-z][a-zA-Z0-9_]*$" },
+    "taskCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expr"],
+      "description": "One condition in a task's when, or an action's.",
+      "properties": {
+        "name": { "type": "string", "description": "What the condition is for." },
+        "expr": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "A CEL expression over event, subject and raw, and in an action's when also answer."
+        }
+      }
+    }
   }
 }

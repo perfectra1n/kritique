@@ -1,4 +1,4 @@
-import { test, expect, DEFAULT_ME } from './fixtures';
+import { test, expect, DEFAULT_ME, DEFAULT_PROVIDERS } from './fixtures';
 
 test.describe('signed-out shell', () => {
   // The dashboard has no public content: a 401 from /api/v1/me on the bare
@@ -30,12 +30,12 @@ test.describe('signed-out shell', () => {
         body: JSON.stringify({ code: 'unauthorized', message: 'no session' }),
       }),
     );
-    await page.goto('/#/t/acme/repos');
+    await page.goto('/#/a/github/acme/repos');
     await expect(page).toHaveURL(/#\/signin$/);
     await expect(page.locator('.signin-card h1')).toHaveText('kritique');
 
     const link = page.locator('.signin-provider');
-    await expect(link).toHaveAttribute('href', /return_to=%23%2Ft%2Facme%2Frepos/);
+    await expect(link).toHaveAttribute('href', /return_to=%23%2Fa%2Fgithub%2Facme%2Frepos/);
   });
 
   // "#/signin/" parses as the sign-in route, so a 401 there must neither
@@ -72,6 +72,45 @@ test.describe('sign-in page', () => {
     await expect(page.locator('.signin-empty')).toHaveText('No sign-in providers configured.');
   });
 
+  test('the admin signs in with a password and returns to where they were', async ({ page, mockProviders }) => {
+    await mockProviders([{ name: 'local', type: 'local', displayName: 'Admin' }, ...DEFAULT_PROVIDERS]);
+    let signedIn = false;
+    await page.route('**/api/v1/me', (route) =>
+      signedIn
+        ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...DEFAULT_ME, admin: true }) })
+        : route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ code: 'unauthenticated' }) }),
+    );
+    let sent: unknown;
+    await page.route('**/auth/local', async (route) => {
+      sent = route.request().postDataJSON();
+      expect(route.request().headers()['x-kritique']).toBe('1');
+      signedIn = true;
+      await route.fulfill({ status: 204 });
+    });
+    await page.goto('/#/admin');
+    await expect(page).toHaveURL(/#\/signin$/);
+    const form = page.getByRole('form', { name: 'Admin sign-in' });
+    await form.getByLabel('Username').fill('admin');
+    await form.getByLabel('Password').fill('hunter2');
+    await form.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page).toHaveURL(/#\/admin$/);
+    expect(sent).toEqual({ user: 'admin', password: 'hunter2' });
+  });
+
+  test('a wrong password says so and clears the field', async ({ page, mockProviders }) => {
+    await mockProviders([{ name: 'local', type: 'local', displayName: 'Admin' }]);
+    await page.route('**/auth/local', (route) =>
+      route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ code: 'invalid_credentials' }) }),
+    );
+    await page.goto('/#/signin');
+    await page.getByLabel('Username').fill('admin');
+    await page.getByLabel('Password').fill('wrong');
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page.getByRole('alert')).toHaveText('Wrong username or password.');
+    await expect(page.getByLabel('Password')).toHaveValue('');
+    await expect(page.locator('a.signin-provider')).toHaveCount(0);
+  });
+
   test('shows an error state when the providers request fails', async ({ page }) => {
     await page.route('**/auth/providers', (route) =>
       route.fulfill({ status: 500, contentType: 'application/json', body: '{}' }),
@@ -82,47 +121,99 @@ test.describe('sign-in page', () => {
 });
 
 test.describe('signed-in shell', () => {
-  test('shows tenant nav, the admin link, and the account menu for an admin', async ({ page, signIn }) => {
-    await signIn();
+  test('shows the scope switcher, the scope\'s tabs and the user menu', async ({ page, signIn }) => {
+    await signIn({ ...DEFAULT_ME, admin: true });
     await page.goto('/');
 
-    await expect(page.locator('.tenant-switch option')).toHaveText(['acme']);
-    await expect(page.locator('.nav a')).toHaveCount(9); // All tenants, then Overview/Repos/Pulls/Queue/Usage/Follow-ups/Task runs/Admin
-    // The sections are a sidebar left of the page, not part of the topbar.
-    await expect(page.locator('.topbar .nav')).toHaveCount(0);
-    const side = await page.locator('aside.sidebar').boundingBox();
+    await expect(page.locator('.account-button')).toHaveText('All accounts');
+    await page.locator('.account-button').click();
+    const scopes = page.getByRole('navigation', { name: 'Scope' });
+    await expect(scopes.getByRole('link')).toHaveText(['All accounts', 'github/acme']);
+    await expect(scopes.getByRole('link', { name: 'All accounts' })).toHaveAttribute('aria-current', 'true');
+    await page.keyboard.press('Escape');
+    await expect(scopes).toBeHidden();
+
+    // The instance's tabs are under the topbar's first row, above the page,
+    // and none of them leads into an account.
+    const instance = page.locator('.topbar').getByRole('navigation', { name: 'Instance' }).getByRole('link');
+    await expect(instance).toHaveText(['Overview', 'Configuration']);
+    await expect(instance.first()).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('.topbar').getByRole('navigation', { name: 'Sections' })).toHaveCount(0);
+    for (const href of await instance.evaluateAll((els) => els.map((e) => e.getAttribute('href')))) expect(href).not.toContain('/a/');
+
+    // An account's sections replace them once the scope is that account.
+    await page.locator('.account-button').click();
+    await scopes.getByRole('link', { name: 'github/acme' }).click();
+    const tabs = page.locator('.topbar').getByRole('navigation', { name: 'Sections' }).getByRole('link');
+    await expect(tabs).toHaveText(['Analytics', 'Pull requests', 'Tasks', 'Rules', 'Settings']);
+    await expect(tabs.first()).toHaveAttribute('href', '#/a/github/acme');
+    await expect(page.locator('.topbar').getByRole('navigation', { name: 'Instance' })).toHaveCount(0);
+    await page.goto('/');
+    await expect(page.locator('.account-button')).toHaveText('All accounts');
+    const bar = await page.locator('.topbar').boundingBox();
     const main = await page.locator('main.page').boundingBox();
-    expect(side && main && side.x + side.width <= main.x).toBe(true);
-    await expect(page.locator('.account-menu summary')).toHaveAttribute('title', DEFAULT_ME.account.displayName);
+    expect(bar && main && bar.y + bar.height <= main.y).toBe(true);
+    await expect(page.locator('.user-button')).toHaveAttribute('title', DEFAULT_ME.user.displayName);
 
-    await page.locator('.account-menu summary').click();
-    await expect(page.locator('.account-name')).toHaveText(DEFAULT_ME.account.displayName);
-    await expect(page.locator('.account-email')).toHaveText(DEFAULT_ME.account.email);
+    await page.locator('.user-button').click();
+    await expect(page.locator('.user-name')).toHaveText(DEFAULT_ME.user.displayName);
+    await expect(page.locator('.user-email')).toHaveText(DEFAULT_ME.user.email);
   });
 
-  test('hides the admin link for a non-admin member', async ({ page, signIn }) => {
-    await signIn({ ...DEFAULT_ME, tenants: [{ slug: 'acme', role: 'member', managedBy: 'file' }] });
+  test("settings lists a member only the account's repositories", async ({ page, signIn }) => {
+    await signIn(DEFAULT_ME);
+    await page.goto('/#/a/github/acme/repos');
+    const nav = page.getByRole('navigation', { name: 'Settings' });
+    await expect(nav.getByRole('link')).toHaveText(['Repositories']);
+    await expect(page.locator('.sections .section-tab.active')).toHaveText('Settings');
+  });
+
+  test("settings lists an admin the account's audit log, and the instance's configuration is the instance's", async ({ page, signIn }) => {
+    await signIn({ ...DEFAULT_ME, admin: true });
+    await page.goto('/#/a/github/acme/repos');
+    const nav = page.getByRole('navigation', { name: 'Settings' });
+    await expect(nav.getByRole('link')).toHaveText(['Repositories', 'Audit log']);
+
+    await page.goto('/#/admin');
+    await expect(page.locator('.account-button')).toHaveText('All accounts');
+    await expect(page.locator('.sections .section-tab.active')).toHaveText('Configuration');
+    // Beside the page are its own parts, and no account's pages.
+    await expect(nav.getByRole('link', { name: 'Configuration', exact: true })).toHaveAttribute('aria-current', 'page');
+    await expect(nav.getByRole('link', { name: 'Repositories' })).toHaveCount(0);
+  });
+
+  test('a member has no Configuration tab, and the Queue tab comes with a second account', async ({ page, signIn }) => {
+    const tabs = page.locator('.topbar').getByRole('navigation', { name: 'Instance' }).getByRole('link');
+    await signIn(DEFAULT_ME);
     await page.goto('/');
-    await expect(page.locator('.nav a')).toHaveCount(8);
+    await expect(tabs).toHaveText(['Overview']);
+    await signIn({ ...DEFAULT_ME, accounts: ['github/acme', 'github/globex'] });
+    await page.reload();
+    await expect(tabs).toHaveText(['Overview', 'Queue']);
+    await expect(tabs.nth(1)).toHaveAttribute('href', '#/queue');
   });
 
-  test('shows the operator console link for an operator account', async ({ page, signIn }) => {
-    await signIn({ ...DEFAULT_ME, operator: true });
-    await page.goto('/');
-    await expect(page.getByRole('navigation', { name: 'Instance' }).getByRole('link', { name: 'Operator console' })).toBeVisible();
-  });
-
-  test('switching tenants in the dropdown navigates to that tenant', async ({ page, signIn }) => {
+  test('switching scope in the menu keeps the page', async ({ page, signIn }) => {
     await signIn({
       ...DEFAULT_ME,
-      tenants: [
-        { slug: 'acme', role: 'admin', managedBy: 'file' },
-        { slug: 'globex', role: 'member', managedBy: 'file' },
-      ],
+      accounts: ['github/acme', 'github/globex'],
     });
-    await page.goto('/');
-    await page.locator('.tenant-switch').selectOption('globex');
-    await expect(page).toHaveURL(/#\/t\/globex$/);
+    await page.goto('/#/a/github/acme/pulls');
+    await expect(page.locator('.account-button')).toHaveText('github/acme');
+    await page.locator('.account-button').click();
+    await page.getByRole('navigation', { name: 'Scope' }).getByRole('link', { name: 'github/globex' }).click();
+    await expect(page).toHaveURL(/#\/a\/github\/globex\/pulls$/);
+    await expect(page.getByRole('navigation', { name: 'Scope' })).toBeHidden();
+    await expect(page.locator('.account-button')).toHaveText('github/globex');
+
+    // An account's queue leads to the instance's, and back to an account's.
+    await page.goto('/#/a/github/globex/queue');
+    await page.locator('.account-button').click();
+    await page.getByRole('navigation', { name: 'Scope' }).getByRole('link', { name: 'All accounts' }).click();
+    await expect(page).toHaveURL(/#\/queue$/);
+    await page.locator('.account-button').click();
+    await page.getByRole('navigation', { name: 'Scope' }).getByRole('link', { name: 'github/acme' }).click();
+    await expect(page).toHaveURL(/#\/a\/github\/acme\/queue$/);
   });
 
   test('a signed-in visit to #/signin redirects to the overview', async ({ page, signIn, mockProviders }) => {
@@ -131,7 +222,7 @@ test.describe('signed-in shell', () => {
     await page.goto('/#/signin');
     await expect(page).toHaveURL(/#\/$/);
     await expect(page.locator('.signin-card')).toHaveCount(0);
-    await expect(page.locator('.tenant-switch')).toBeVisible();
+    await expect(page.locator('.account-button')).toBeVisible();
   });
 
   test('signing out clears the shell and returns to sign-in', async ({ page, signIn }) => {
@@ -139,11 +230,11 @@ test.describe('signed-in shell', () => {
     await page.route('**/auth/logout', (route) => route.fulfill({ status: 204 }));
     await page.goto('/');
 
-    await page.locator('.account-menu summary').click();
+    await page.locator('.user-button').click();
     await page.getByRole('button', { name: 'Sign out' }).click();
 
     await expect(page).toHaveURL(/#\/signin$/);
-    await expect(page.locator('.tenant-switch')).toHaveCount(0);
+    await expect(page.locator('.account-button')).toHaveCount(0);
   });
 });
 
@@ -168,6 +259,20 @@ test.describe('theme toggle', () => {
     await button.click();
     await expect.poll(stored).toBe('auto');
   });
+
+  // The bundle runs after the first paint may have happened, so the class
+  // must not depend on it.
+  test('applies the OS or stored theme without the bundle', async ({ page }) => {
+    await page.route('**/assets/*.js', (route) => route.abort());
+    const currentClass = () => page.evaluate(() => document.documentElement.className);
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await page.goto('/');
+    expect(await currentClass()).toBe('dark');
+
+    await page.addInitScript(() => localStorage.setItem('kritique-theme', 'light'));
+    await page.reload();
+    expect(await currentClass()).toBe('light');
+  });
 });
 
 test.describe('keyboard shortcuts', () => {
@@ -175,23 +280,24 @@ test.describe('keyboard shortcuts', () => {
     await page.goto('/');
     await page.keyboard.press('?');
     await expect(page.locator('.help-card h2')).toHaveText('Keyboard shortcuts');
+    await expect(page.locator('.help-keys dd')).toContainText(['go to a page', 'toggle this help', 'move down or up a list', 'open the row', 'search the list', 'select a pull request']);
     await page.keyboard.press('Escape');
-    await expect(page.locator('.help-overlay')).toHaveCount(0);
+    await expect(page.locator('.help-card')).toHaveCount(0);
   });
 
   test('Ctrl/Cmd+K opens the command palette; typing filters; Enter navigates', async ({ page, signIn }) => {
-    await signIn({ ...DEFAULT_ME, operator: true });
+    await signIn({ ...DEFAULT_ME, admin: true });
     await page.goto('/');
     await page.keyboard.press('ControlOrMeta+k');
     await expect(page.locator('.palette-input input')).toBeFocused();
 
-    await page.keyboard.type('operator');
-    await expect(page.locator('.palette-row')).toHaveCount(1);
-    await expect(page.locator('.row-title')).toHaveText('Operator console');
+    await page.keyboard.type('console');
+    // The Configuration page's sections match too, after the page itself.
+    await expect(page.locator('.row-title').first()).toHaveText('Configuration');
 
     await page.keyboard.press('Enter');
-    await expect(page).toHaveURL(/#\/operator$/);
-    await expect(page.locator('.palette-overlay')).toHaveCount(0);
+    await expect(page).toHaveURL(/#\/admin$/);
+    await expect(page.locator('.palette')).toHaveCount(0);
   });
 
   test('the palette shows an empty state when nothing matches', async ({ page }) => {
@@ -216,23 +322,40 @@ test('a stream the server refuses for a dead session sends the tab to sign-in', 
     streams++;
     return route.fulfill({ status: 401, contentType: 'application/json', body: '{"code":"unauthenticated"}' });
   });
-  await page.goto('/#/t/acme/repos');
+  await page.goto('/#/a/github/acme/repos');
   await expect(page).toHaveURL(/#\/signin$/, { timeout: 10_000 });
-  await expect(page.locator('.signin-provider')).toHaveAttribute('href', /return_to=%23%2Ft%2Facme%2Frepos/);
+  await expect(page.locator('.signin-provider')).toHaveAttribute('href', /return_to=%23%2Fa%2Fgithub%2Facme%2Frepos/);
   const after = streams;
   await page.waitForTimeout(2_500);
   expect(streams).toBe(after);
 });
 
+test('the topbar says when live updates are down, and when they are back', async ({ page, signIn }) => {
+  await signIn();
+  let up = false;
+  await page.route('**/api/events', (route) =>
+    up ? route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' }) : route.fulfill({ status: 503, body: '' }),
+  );
+  await page.goto('/');
+  const live = page.locator('.topbar .live');
+  await expect(live).toHaveText('Live updates on');
+  await expect(live).toHaveText('Reconnecting…');
+  await expect(live).toHaveAttribute('title', /^Live updates stopped at .+; this page may be out of date\.$/);
+
+  up = true;
+  // The next attempt waits out the reconnect backoff, a few seconds by now.
+  await expect(live).toHaveText('Live updates on', { timeout: 10_000 });
+});
+
 test('a 401 from a page while signed in stays on sign-in', async ({ page, signIn, mockProviders }) => {
   await signIn();
   await mockProviders();
-  await page.route('**/api/v1/tenants/acme/repos**', (route) =>
+  await page.route('**/api/v1/accounts/github/acme/repos**', (route) =>
     route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ code: 'unauthenticated', message: 'no session' }) }),
   );
-  await page.goto('/#/t/acme/repos');
+  await page.goto('/#/a/github/acme/repos');
   await expect(page).toHaveURL(/#\/signin$/);
   await page.waitForTimeout(500);
   await expect(page).toHaveURL(/#\/signin$/);
-  await expect(page.locator('.tenant-switch')).toHaveCount(0);
+  await expect(page.locator('.account-button')).toHaveCount(0);
 });

@@ -26,77 +26,77 @@ test.describe('router: parse()', () => {
     await expectRoute(page, '#/nonsense', { name: 'overview' });
   });
 
-  test('#/operator', async ({ page }) => {
-    await expectRoute(page, '#/operator', { name: 'operator' });
+  test('#/admin', async ({ page }) => {
+    await expectRoute(page, '#/admin', { name: 'console' });
   });
 
-  test('#/t/acme is the tenant overview', async ({ page }) => {
-    await expectRoute(page, '#/t/acme', { name: 'tenant', slug: 'acme' });
+  test('#/a/github/acme is the account overview', async ({ page }) => {
+    await expectRoute(page, '#/a/github/acme', { name: 'account', slug: 'github/acme' });
   });
 
-  test('#/t/acme/repos', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/repos', { name: 'repos', slug: 'acme' });
+  test('#/a/github/acme/repos', async ({ page }) => {
+    await expectRoute(page, '#/a/github/acme/repos', { name: 'repos', slug: 'github/acme' });
   });
 
-  test('#/t/acme/repos/<owner>/<repo>', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/repos/kritique/kritique', {
+  test('#/a/github/acme/repos/<owner>/<repo>', async ({ page }) => {
+    await expectRoute(page, '#/a/github/acme/repos/kritique/kritique', {
       name: 'repo',
-      slug: 'acme',
+      slug: 'github/acme',
       owner: 'kritique',
       repo: 'kritique',
     });
   });
 
-  test('a malformed repos sub-path falls back to the tenant overview, not global', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/repos/only-owner', { name: 'tenant', slug: 'acme' });
+  test('a malformed repos sub-path falls back to the account overview, not global', async ({ page }) => {
+    await expectRoute(page, '#/a/github/acme/repos/only-owner', { name: 'account', slug: 'github/acme' });
   });
 
-  test('#/t/acme/pulls/<owner>/<repo>/<n> parses the number as a JS number', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/pulls/kritique/kritique/42', {
+  test('#/a/github/acme/pulls/<owner>/<repo>/<n> parses the number as a JS number', async ({ page }) => {
+    await expectRoute(page, '#/a/github/acme/pulls/kritique/kritique/42', {
       name: 'pull',
-      slug: 'acme',
+      slug: 'github/acme',
       owner: 'kritique',
       repo: 'kritique',
       number: 42,
     });
   });
 
-  test('a non-numeric pull number falls back to the tenant overview', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/pulls/kritique/kritique/abc', { name: 'tenant', slug: 'acme' });
+  test('a non-numeric pull number falls back to the account overview', async ({ page }) => {
+    await expectRoute(page, '#/a/github/acme/pulls/kritique/kritique/abc', { name: 'account', slug: 'github/acme' });
   });
 
-  test('#/t/acme/reviews/<id> with no tab', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/reviews/r1', { name: 'review', slug: 'acme', id: 'r1' });
+  test('#/a/github/acme/reviews/<id> with no tab', async ({ page }) => {
+    await expectRoute(page, '#/a/github/acme/reviews/r1', { name: 'review', slug: 'github/acme', id: 'r1' });
   });
 
-  test('#/t/acme/reviews/<id>/<tab> with a valid tab', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/reviews/r1/diff', {
+  test('#/a/github/acme/reviews/<id>/<tab> with a valid tab', async ({ page }) => {
+    await expectRoute(page, '#/a/github/acme/reviews/r1/diff', {
       name: 'review',
-      slug: 'acme',
+      slug: 'github/acme',
       id: 'r1',
       tab: 'diff',
     });
   });
 
   test('an unknown review tab is dropped, not rejected', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/reviews/r1/bogus', { name: 'review', slug: 'acme', id: 'r1' });
+    await expectRoute(page, '#/a/github/acme/reviews/r1/bogus', { name: 'review', slug: 'github/acme', id: 'r1' });
   });
 
-  test('#/t/acme/admin with no section', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/admin', { name: 'admin', slug: 'acme' });
+  test('#/a/github/acme/admin with no section', async ({ page }) => {
+    await expectRoute(page, '#/a/github/acme/admin', { name: 'admin', slug: 'github/acme' });
   });
 
-  test('#/t/acme/admin/<section>', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/admin/tokens', {
+  test('#/a/github/acme/admin/<section>', async ({ page }) => {
+    await expectRoute(page, '#/a/github/acme/admin/tokens', {
       name: 'admin',
-      slug: 'acme',
+      slug: 'github/acme',
       section: 'tokens',
     });
   });
 
-  test('#/t/acme/queue, /usage and /followups', async ({ page }) => {
-    await expectRoute(page, '#/t/acme/queue', { name: 'queue', slug: 'acme' });
-    await expectRoute(page, '#/t/acme/usage', { name: 'usage', slug: 'acme' });
-    await expectRoute(page, '#/t/acme/followups', { name: 'followups', slug: 'acme' });
+  test('#/a/github/acme/queue, /usage and /followups', async ({ page }) => {
+    await expectRoute(page, '#/a/github/acme/queue', { name: 'queue', slug: 'github/acme' });
+    await expectRoute(page, '#/a/github/acme/usage', { name: 'usage', slug: 'github/acme' });
+    await expectRoute(page, '#/a/github/acme/followups', { name: 'followups', slug: 'github/acme' });
   });
 });

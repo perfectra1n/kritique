@@ -1,9 +1,10 @@
 // Package transcript records model calls for the dashboard's transcript
-// view (ADR-0009 §2.8). An agentic run's request is the whole conversation
-// so far, so each step is stored as a delta against what the run has
-// already recorded; a single-shot call is a delta against nothing. Rows are
-// masked and size-capped before they are encoded, and Rebuild turns stored
-// rows back into one turn per call.
+// view. An agent run's request is the whole conversation so far, so each
+// step is stored as a delta against what the run has already recorded,
+// and the first step of a run that carries on another's conversation as a
+// delta against what that run recorded; a follow-up's call is a delta
+// against nothing. Rows are masked and size-capped before they are
+// encoded, and Rebuild turns stored rows back into one turn per call.
 package transcript
 
 import (
@@ -20,17 +21,20 @@ type Kind string
 
 // Model call kinds.
 const (
-	KindAgentStep Kind = "agent_step"
-	KindReview    Kind = "review"
-	KindFallback  Kind = "fallback"
-	KindFollowUp  Kind = "followup"
-	KindTask      Kind = "task"
+	KindAgentStep  Kind = "agent_step"
+	KindFollowUp   Kind = "followup"
+	KindConfidence Kind = "confidence"
+	// KindMerge writes a split review's summary from its parts'.
+	KindMerge Kind = "merge"
+	// KindTask is a single-mode task's structured call; an agentic task's
+	// steps are agent steps of its task run.
+	KindTask Kind = "task"
 )
 
 // Valid reports whether k is a model call kind.
 func (k Kind) Valid() bool {
 	switch k {
-	case KindAgentStep, KindReview, KindFallback, KindFollowUp, KindTask:
+	case KindAgentStep, KindFollowUp, KindConfidence, KindMerge, KindTask:
 		return true
 	}
 	return false

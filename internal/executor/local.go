@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -25,11 +26,8 @@ func (l *Local) Run(ctx context.Context, spec Spec) Result {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	started := time.Now()
-	if spec.Deadline > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, spec.Deadline)
-		defer cancel()
-	}
+	ctx, cancel := context.WithTimeout(ctx, spec.Deadline)
+	defer cancel()
 	// The spec goes through the same encoding and strict decoding as a
 	// Job's mounted document, size limit included.
 	job, err := specRoundTrip(spec.Job)
@@ -44,7 +42,7 @@ func (l *Local) Run(ctx context.Context, spec Spec) Result {
 		res.Err = maskedError{msg: spec.Secrets.Mask(err.Error()), err: err}
 		res.ExitCode = 1
 		res.TerminationReason = "Error"
-		if ctx.Err() == context.DeadlineExceeded {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			res.DeadlineExceeded = true
 			res.TerminationReason = "DeadlineExceeded"
 		}

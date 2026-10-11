@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/riverqueue/river"
 
+	"github.com/perfectra1n/kritique/internal/adapter"
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/forge"
 	"github.com/perfectra1n/kritique/internal/metrics"
@@ -20,30 +22,45 @@ import (
 type Base struct {
 	Store   *store.Store
 	Current *configfile.Current
-	Forges  Forges
+	Forges  forge.Clients
 	Logger  *slog.Logger
 	// Metrics may be nil.
 	Metrics *metrics.Metrics
 }
 
-// tenant finds the job's tenant in the current file. A tenant that has
+// account finds the job's account in the current file. An account that has
 // been removed cancels the job: it will not come back by retrying.
-func (b *Base) tenant(file *configfile.File, id string) (*configfile.Tenant, error) {
-	if t := tenantByID(file, id); t != nil {
+func (b *Base) account(file *configfile.File, id string) (*configfile.Account, error) {
+	if t, ok := file.AccountByID(id); ok {
 		return t, nil
 	}
-	return nil, river.JobCancel(fmt.Errorf("worker: tenant %s is not in the configuration", id))
+	return nil, river.JobCancel(fmt.Errorf("worker: account %s is not in the configuration", id))
 }
 
-// client resolves an installation by name to its forge client.
-func (b *Base) client(
-	ctx context.Context, file *configfile.File, installation string, externalID int64, repo string,
-) (forge.Client, error) {
-	in, _, ok := file.Installation(installation)
-	if !ok {
-		return nil, river.JobCancel(fmt.Errorf("worker: installation %s is not in the configuration", installation))
+// client resolves the connection serving account to its forge client for
+// repo.
+func (b *Base) client(ctx context.Context, file *configfile.File, account *configfile.Account, repo string) (forge.Client, error) {
+	in := file.ConnectionFor(account)
+	if in == nil {
+		return nil, river.JobCancel(fmt.Errorf("worker: no connection serves account %s", account.Key()))
 	}
-	return b.Forges.For(ctx, in, externalID, repo)
+	return b.Forges.For(ctx, in, repo)
+}
+
+// runnerLabels are put on a runner Job for kubectl and Grafana; pr is 0
+// for a run that is of no pull request.
+func runnerLabels(account, repository, kind string, pr int) map[string]string {
+	labels := map[string]string{"account": account, "repository": repository, "kind": kind}
+	if pr != 0 {
+		labels["pr"] = strconv.Itoa(pr)
+	}
+	return labels
+}
+
+// runnerAnnotations name the River job that started a runner Job and the
+// commit it works on.
+func runnerAnnotations(jobID int64, sha string) map[string]string {
+	return map[string]string{"river-job-id": strconv.FormatInt(jobID, 10), "head-sha": sha}
 }
 
 // releaseTimeout bounds the lease release after the job's context is gone.
@@ -60,18 +77,18 @@ func detach(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), detachTimeout)
 }
 
-// withLease runs fn while holding one of the tenant's slots on key,
+// withLease runs fn while holding one of the account's slots on key,
 // records the wait, and releases the slot afterwards even when the job's
 // context has been cancelled.
 func (b *Base) withLease(
-	ctx context.Context, tenant *configfile.Tenant, key string, slots int, jobID int64, fn func(ctx context.Context) error,
+	ctx context.Context, account *configfile.Account, key string, slots int, jobID int64, fn func(ctx context.Context) error,
 ) error {
 	waited := time.Now()
-	l, err := acquireLease(ctx, b.Store, tenant.ID(), key, slots, jobID)
+	l, err := b.Store.AcquireLease(ctx, account.ID(), key, slots, jobID)
 	if err != nil {
 		return err
 	}
-	b.Metrics.LeaseWait(tenant.Slug, key, time.Since(waited))
+	b.Metrics.LeaseWait(account.Key(), key, time.Since(waited))
 	defer b.releaseLease(ctx, b.Logger, l, key)
 	return fn(ctx)
 }
@@ -79,10 +96,15 @@ func (b *Base) withLease(
 // releaseLease releases l on a context of its own, since the job's has
 // usually ended by the time a lease is let go, and logs a failure to
 // logger, which carries whatever the caller knows of the job.
-func (b *Base) releaseLease(ctx context.Context, logger *slog.Logger, l *lease, key string) {
+func (b *Base) releaseLease(ctx context.Context, logger *slog.Logger, l *store.Lease, key string) {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
 	defer cancel()
-	if err := l.release(rctx); err != nil {
+	if err := l.Release(rctx); err != nil {
 		logger.Warn("lease not released", "key", key, "error", err)
 	}
+}
+
+// recorder writes model calls to the transcript view.
+func (b *Base) recorder() adapter.Recorder {
+	return adapter.Recorder{Store: b.Store, Metrics: b.Metrics}
 }

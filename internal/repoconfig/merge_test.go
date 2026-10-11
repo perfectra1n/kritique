@@ -9,115 +9,212 @@ import (
 	"time"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/model"
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
-func operator() configfile.Settings {
+func adminSettings() configfile.Settings {
 	return configfile.Settings{
-		Enabled: true, Ignore: []string{"vendor/**"}, Mode: configfile.ReviewSingle, Settle: 2 * time.Minute,
-		Models: configfile.Models{Review: "p/big"},
-		Agent:  configfile.AgentSettings{MaxSteps: 30, MaxToolOutputBytes: 1000, MaxTokens: 5000, Timeout: 10 * time.Minute, Commands: []string{"rg"}},
-		Review: configfile.Review{
-			Instructions: []string{"docs/rules.md"}, RequireSuggestedFix: true,
-			Templates: configfile.ReviewTemplates{Summary: "docs/summary.tmpl"}, InlineComments: true,
+		Enabled: true, Ignore: []string{"vendor/**"}, Settle: 2 * time.Minute,
+		Models:     configfile.Models{Review: "p/big", Effort: model.EffortHigh},
+		Confidence: configfile.Confidence{Effort: model.EffortHigh, Threshold: 5, Risk: review.RiskMedium},
+		Filters: configfile.Filters{
+			Include: []configfile.Filter{{Name: "wanted", Expr: `pr.labels.exists(l, l.name == "needs-review")`}},
+			Exclude: []configfile.Filter{{Name: "drafts", Expr: "pr.draft"}},
 		},
+		Agent: configfile.AgentSettings{MaxSteps: 30, MaxToolOutputBytes: 1000, MaxTokens: 5000, Timeout: 10 * time.Minute, Commands: []string{"rg"}},
+		Review: configfile.Review{
+			RequireSuggestedFix: true,
+			Templates:           configfile.ReviewTemplates{Summary: "docs/summary.tmpl"}, InlineComments: true,
+			Rules: []configfile.Rule{{ID: "wrap-errors", Rule: "Wrap errors."}, {ID: "house-style", File: "docs/rules.md"}},
+		},
+		Skills: configfile.Skills{
+			Paths: []string{".agents/skills", ".claude/skills"},
+			Scope: map[string]configfile.SkillScope{"db": {Paths: []string{"db/**"}}, "go": {Paths: []string{"**/*.go"}}},
+		},
+		Providers: []string{"own", "p"},
 	}
 }
 
 func TestMerge(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		doc     string
-		allow   configfile.Allow
-		want    func(*configfile.Settings)
-		filter  bool
-		skip    []string
-		scoped  map[string][]string
+		name string
+		doc  string
+		want func(*configfile.Settings)
+		// include and exclude are the labels of the file's own conditions.
+		include []string
+		exclude []string
 		dropped []string
 		wantErr string
 	}{
 		{name: "no file"},
 		{
-			name: "the file narrows, appends instructions and replaces presentation",
-			doc: "enabled: false\nfilter: '!pr.draft'\nignore: [gen/**, vendor/**]\nskip:\n  onlyPaths: [docs/**]\n" +
-				"review:\n  instructions: [.kritique/rules.md, docs/rules.md, { path: .kritique/sql.md, paths: ['**/*.sql'] }]\n" +
-				"  templates:\n    inline: .kritique/inline.tmpl\n",
+			name: "the file narrows, appends file rules and replaces presentation",
+			doc: "enabled: false\ntrigger: { exclude: [{ expr: pr.draft }] }\nignore: [gen/**, vendor/**]\n" +
+				"rules: [{ id: repo-style, file: .kritique/rules.md }, { id: sql, file: .kritique/sql.md, paths: ['**/*.sql'] }]\n" +
+				"comments:\n  finding: .kritique/inline.tmpl\n",
 			want: func(s *configfile.Settings) {
 				s.Enabled, s.Ignore = false, []string{"vendor/**", "gen/**"}
-				s.Review.Instructions = []string{"docs/rules.md", ".kritique/rules.md", ".kritique/sql.md"}
+				s.Review.Rules = append(s.Review.Rules, configfile.Rule{ID: "repo-style", File: ".kritique/rules.md"},
+					configfile.Rule{ID: "sql", File: ".kritique/sql.md", Paths: []string{"**/*.sql"}})
 				s.Review.Templates.Inline = ".kritique/inline.tmpl"
 			},
-			filter: true, skip: []string{"docs/**"}, scoped: map[string][]string{".kritique/sql.md": {"**/*.sql"}},
+			exclude: []string{"pr.draft"},
 		},
 		{
-			name: "an operator's instruction stays unscoped", doc: "review:\n  instructions: [{ path: docs/rules.md, paths: ['**/*.sql'] }]\n",
+			name: "an admin's file rule stays as the admin wrote it", doc: "rules: [{ id: house-style, file: docs/rules.md, paths: ['**/*.sql'] }]\n",
+			dropped: []string{".kritique.yaml: rules house-style was dropped: an admin's rule has that id"},
 		},
 		{
-			name: "context files follow the operator's", doc: "review:\n  context: [{ path: db/schema.sql, description: the schema, paths: ['**/*.sql'] }]\n",
+			name: "context files follow the admin's", doc: "context: [{ path: db/schema.sql, description: the schema, paths: ['**/*.sql'] }]\n",
 			want: func(s *configfile.Settings) {
 				s.Review.Context = append(s.Review.Context, configfile.ContextFile{Path: "db/schema.sql", Description: "the schema", Paths: []string{"**/*.sql"}})
 			},
 		},
-		{name: "a context file without a description", doc: "review:\n  context: [{ path: db/schema.sql }]\n", wantErr: "description is required"},
+		{name: "a context file without a description", doc: "context: [{ path: db/schema.sql }]\n", wantErr: "description is required"},
+		{
+			name: "rules follow the admin's, and one with an admin's id is dropped",
+			doc:  "rules:\n  - { id: wrap-errors, rule: Anything goes. }\n  - { id: no-tokens, rule: Never log a token., paths: ['**/*.go'] }\n",
+			want: func(s *configfile.Settings) {
+				s.Review.Rules = append(s.Review.Rules, configfile.Rule{ID: "no-tokens", Rule: "Never log a token.", Paths: []string{"**/*.go"}})
+			},
+			dropped: []string{".kritique.yaml: rules wrap-errors was dropped: an admin's rule has that id"},
+		},
+		{name: "a rule without an id", doc: "rules: [{ rule: Never log a token. }]\n", wantErr: `rules[0].id "" must be`},
+		{
+			name: "a rule may say when it applies",
+			doc:  "rules: [{ id: renovate, rule: Say what breaks., when: [{ expr: 'pr.headRef.startsWith(\"renovate/\")' }] }]\n",
+			want: func(s *configfile.Settings) {
+				s.Review.Rules = append(s.Review.Rules, configfile.Rule{
+					ID: "renovate", Rule: "Say what breaks.", When: []configfile.When{{Expr: `pr.headRef.startsWith("renovate/")`}},
+				})
+			},
+		},
+		{name: "a rule whose condition fails the smoke test", doc: "rules: [{ id: a, rule: x, when: [{ expr: 'pr.labels[5].name == \"x\"' }] }]\n", wantErr: "rules[0].when[0]: smoke test"},
 		{name: "enabled true cannot widen", doc: "enabled: true\n"},
 		{
-			name: "presentation replaces the operator's", doc: "review: { minSeverity: important, inlineComments: false }\n",
+			name: "presentation replaces the admin's", doc: "comments: { inline: false, summary: .kritique/summary.tmpl }\n",
 			want: func(s *configfile.Settings) {
-				s.Review.MinSeverity, s.Review.InlineComments = configfile.SeverityImportant, false
+				s.Review.InlineComments, s.Review.Templates.Summary = false, ".kritique/summary.tmpl"
 			},
 		},
 		{
-			name: "an unknown severity floor is dropped", doc: "review: { minSeverity: blocking }\n",
-			dropped: []string{`.kritique.yaml: review.minSeverity "blocking" was dropped; allowed: nit, important`},
+			name: "approve replaces the admin's", doc: "review: { approve: true }\n",
+			want: func(s *configfile.Settings) { s.Review.Approve = true },
 		},
 		{
-			name: "requireSuggestedFix may only turn on", doc: "review:\n  requireSuggestedFix: false\n",
-			dropped: []string{".kritique.yaml: review.requireSuggestedFix false was dropped; allowed: true, since the operator requires a suggested fix"},
+			name: "diagram replaces the admin's", doc: "review: { diagram: true }\n",
+			want: func(s *configfile.Settings) { s.Review.Diagram = true },
 		},
 		{
-			name: "with no bounds set, the operator's own values or lower",
-			doc:  "mode: single\nmodels: { review: p/big }\nagent: { maxSteps: 20, maxTokens: 5000, commands: [] }\nsettle: 30s\n",
+			name: "review.fixes may only turn on", doc: "review: { fixes: false }\n",
+			dropped: []string{".kritique.yaml: review.fixes false was dropped; allowed: true, since an admin requires a suggested fix"},
+		},
+		{
+			name: "a model of a provider the account may use",
+			doc:  "review: { model: own/small, fallback: p/big }\n",
 			want: func(s *configfile.Settings) {
-				s.Agent.MaxSteps, s.Agent.Commands, s.Settle = 20, []string{}, 30*time.Second
+				s.Models = configfile.Models{Review: "own/small", Fallback: "p/big", Effort: model.EffortHigh}
 			},
 		},
 		{
-			name: "with no bounds set, anything else is dropped",
-			doc:  "mode: agentic\nmodels: { review: p/small, fallback: p/big }\nagent: { maxSteps: 31, timeout: 0s, commands: [rg, curl] }\nsettle: 3m\n",
+			name: "a model of another provider, or no model, is dropped", doc: "review: { model: q/big, fallback: p }\n",
 			dropped: []string{
-				`.kritique.yaml: mode "agentic" was dropped; allowed: single`,
-				`.kritique.yaml: models.review "p/small" was dropped; allowed: p/big`,
-				`.kritique.yaml: models.fallback "p/big" was dropped; allowed: none`,
-				`.kritique.yaml: agent.commands "curl" was dropped; allowed: rg`,
-				".kritique.yaml: agent.maxSteps 31 was dropped; allowed: above 0, at most 30",
-				".kritique.yaml: agent.timeout 0s was dropped; allowed: above 0, at most 10m0s",
-				".kritique.yaml: settle 3m0s was dropped; allowed: 0s to 2m0s",
+				`.kritique.yaml: review.model "q/big" was dropped; allowed: a model of own, p`,
+				`.kritique.yaml: review.fallback "p" was dropped; allowed: a model of own, p`,
 			},
 		},
 		{
-			name: "the bounds open choices past the operator's own",
-			doc:  "mode: agentic\nmodels: { review: p/small, fallback: p/big }\nagent: { maxSteps: 60, timeout: 20m, commands: [fd, curl] }\nsettle: 30m\n",
-			allow: configfile.Allow{
-				Modes: []configfile.ReviewMode{configfile.ReviewSingle, configfile.ReviewAgentic}, Models: []configfile.ModelRef{"p/big", "p/small"},
-				Commands: []string{"rg", "fd", "curl"}, Agent: configfile.AllowAgent{MaxSteps: new(60), Timeout: new(20 * time.Minute)},
-				Settle: new(30 * time.Minute),
-			},
+			name: "an effort replaces the admin's", doc: "review: { effort: xhigh }\nconfidence: { effort: minimal }\n",
 			want: func(s *configfile.Settings) {
-				s.Mode, s.Models = configfile.ReviewAgentic, configfile.Models{Review: "p/small", Fallback: "p/big"}
-				s.Agent.MaxSteps, s.Agent.Timeout, s.Agent.Commands = 60, 20*time.Minute, []string{"fd", "curl"}
-				s.Settle = 30 * time.Minute
+				s.Models.Effort, s.Confidence.Effort = model.EffortXHigh, model.EffortMinimal
 			},
 		},
 		{
-			name: "a value past its bound is dropped, not clamped", doc: "agent: { maxTokens: 9000 }\nsettle: 31m\n",
-			allow: configfile.Allow{Agent: configfile.AllowAgent{MaxTokens: new(int64(8000))}, Settle: new(30 * time.Minute)},
-			dropped: []string{
-				".kritique.yaml: agent.maxTokens 9000 was dropped; allowed: above 0, at most 8000",
-				".kritique.yaml: settle 31m0s was dropped; allowed: 0s to 30m0s",
+			name: "an effort written empty leaves it to the provider", doc: "review: { effort: '' }\n",
+			want: func(s *configfile.Settings) { s.Models.Effort = "" },
+		},
+		{
+			name: "an effort that is no level is dropped", doc: "review: { effort: turbo }\n",
+			dropped: []string{`.kritique.yaml: review.effort "turbo" was dropped; allowed: none, minimal, low, medium, high, xhigh or max`},
+		},
+		{
+			name: "confidence replaces the admin's", doc: "confidence: { model: own/judge, fallback: p/judge, threshold: 0, gate: true }\n",
+			want: func(s *configfile.Settings) {
+				s.Confidence.Model, s.Confidence.Fallback, s.Confidence.Threshold, s.Confidence.Gate = "own/judge", "p/judge", 0, true
 			},
 		},
-		{name: "a secret reference does not decode", doc: "models: { review: { env: KEY } }\n", wantErr: "cannot unmarshal"},
-		{name: "a file that does not parse leaves the operator's settings", doc: "unknown: 1\n", wantErr: "unknown"},
+		{
+			name: "a confidence model or fallback of another provider and a threshold off the scale are dropped",
+			doc:  "confidence: { model: q/judge, fallback: q/small, threshold: 6 }\n",
+			dropped: []string{
+				`.kritique.yaml: confidence.threshold 6 was dropped; allowed: 0 to 5`,
+				`.kritique.yaml: confidence.model "q/judge" was dropped; allowed: a model of own, p`,
+				`.kritique.yaml: confidence.fallback "q/small" was dropped; allowed: a model of own, p`,
+			},
+		},
+		{
+			name: "confidence.risk may only lower the admin's", doc: "confidence: { risk: low }\n",
+			want: func(s *configfile.Settings) { s.Confidence.Risk = review.RiskLow },
+		},
+		{
+			name: "a confidence.risk above the admin's, or no level, is dropped", doc: "confidence: { risk: critical }\n",
+			dropped: []string{
+				`.kritique.yaml: confidence.risk "critical" was dropped; allowed: medium or lower`,
+			},
+		},
+		{name: "the risk instructions are the admin's alone", doc: "confidence: { instructions: all low }\n", wantErr: "field instructions not found"},
+		{
+			name: "an inclusion under an admin's name is dropped", include: []string{"mine", "pr.open"},
+			doc:     "trigger: { include: [{ name: wanted, expr: 'true' }, { name: mine, expr: 'true' }, { expr: pr.open }] }\n",
+			dropped: []string{`.kritique.yaml: trigger.include wanted was dropped: an admin's condition has that name`},
+		},
+		{
+			name: "an exclusion under an admin's name is dropped", exclude: []string{"mine", "pr.fork"},
+			doc:     "trigger: { exclude: [{ name: drafts, expr: 'false' }, { name: mine, expr: 'false' }, { expr: pr.fork }] }\n",
+			dropped: []string{`.kritique.yaml: trigger.exclude drafts was dropped: an admin's condition has that name`},
+		},
+		{
+			name: "a name of the admin's other list is dropped too", include: []string{"mine"}, exclude: []string{"mine"},
+			doc: "trigger: { include: [{ name: drafts, expr: 'true' }, { name: mine, expr: 'true' }], " +
+				"exclude: [{ name: mine, expr: 'false' }, { name: wanted, expr: 'false' }] }\n",
+			dropped: []string{
+				`.kritique.yaml: trigger.include drafts was dropped: an admin's condition has that name`,
+				`.kritique.yaml: trigger.exclude wanted was dropped: an admin's condition has that name`,
+			},
+		},
+		{
+			name: "skill paths replace the admin's", doc: "skills: { paths: [docs/skills] }\n",
+			want: func(s *configfile.Settings) { s.Skills.Paths = []string{"docs/skills"} },
+		},
+		{
+			name: "empty skill paths turn skills off", doc: "skills: { paths: [] }\n",
+			want: func(s *configfile.Settings) { s.Skills.Paths = []string{} },
+		},
+		{
+			name: "skill scopes add to the admin's, the file's taking a name both give",
+			doc:  "skills: { scope: { db: { paths: ['migrations/**'] }, renovate: { when: [{ expr: 'pr.headRef.startsWith(\"renovate/\")' }] } } }\n",
+			want: func(s *configfile.Settings) {
+				s.Skills.Scope["db"] = configfile.SkillScope{Paths: []string{"migrations/**"}}
+				s.Skills.Scope["renovate"] = configfile.SkillScope{When: []configfile.When{{Expr: `pr.headRef.startsWith("renovate/")`}}}
+			},
+		},
+		{name: "an absolute skill path", doc: "skills: { paths: [/x] }\n", wantErr: `repoconfig: skills.paths[0]: path "/x" must be relative`},
+		{name: "a skill path outside the repository", doc: "skills: { paths: [a, ../x] }\n", wantErr: `skills.paths[1]: path "../x" escapes the repository`},
+		{name: "a skill scope with a bad glob", doc: "skills: { scope: { db: { paths: ['['] } } }\n", wantErr: `repoconfig: skills.scope.db.paths[0] "[" is not a valid glob`},
+		{name: "a skill scope whose condition does not compile", doc: "skills: { scope: { db: { when: [{ expr: 'pr.draft &&' }] } } }\n", wantErr: "skills.scope.db.when[0]"},
+		{
+			name: "a skill scope whose condition reads pr.lines", doc: "skills: { scope: { db: { when: [{ expr: pr.lines > 10 }] } } }\n",
+			wantErr: "skills.scope.db.when[0]: pr.lines is known to a trigger condition alone",
+		},
+		{name: "a skill scope takes no other key", doc: "skills: { scope: { db: { allowed-tools: [x] } } }\n", wantErr: "field allowed-tools not found"},
+		{name: "a mode is no longer a key", doc: "mode: agentic\n", wantErr: "field mode not found"},
+		{name: "agent limits are the admin's alone", doc: "agent: { steps: 5 }\n", wantErr: "field agent not found"},
+		{name: "settle is the admin's alone", doc: "trigger: { settle: 1m }\n", wantErr: "field settle not found"},
+		{name: "a secret reference does not decode", doc: "review: { model: { env: KEY } }\n", wantErr: "cannot construct"},
+		{name: "a file that does not parse leaves the admin's settings", doc: "unknown: 1\n", wantErr: "unknown"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -126,10 +223,7 @@ func TestMerge(t *testing.T) {
 			if tt.doc != "" {
 				doc = []byte(tt.doc)
 			}
-			op := operator()
-			op.Allow = tt.allow
-			want := operator()
-			want.Allow = tt.allow
+			op, want := adminSettings(), adminSettings()
 			if tt.want != nil {
 				tt.want(&want)
 			}
@@ -140,15 +234,24 @@ func TestMerge(t *testing.T) {
 			if !reflect.DeepEqual(m.Settings, want) {
 				t.Fatalf("settings = %+v\nwant       %+v", m.Settings, want)
 			}
-			if (m.InRepoFilter != nil) != tt.filter || !slices.Equal(m.Skip.OnlyPaths, tt.skip) || !slices.Equal(m.Dropped, tt.dropped) ||
-				!reflect.DeepEqual(m.Scoped, tt.scoped) {
-				t.Fatalf("filter=%v skip=%v scoped=%v dropped=%q", m.InRepoFilter != nil, m.Skip.OnlyPaths, m.Scoped, m.Dropped)
+			if !slices.Equal(labels(m.InRepoFilters.Include), tt.include) || !slices.Equal(labels(m.InRepoFilters.Exclude), tt.exclude) ||
+				!slices.Equal(m.Dropped, tt.dropped) {
+				t.Fatalf("filters=%v dropped=%q", m.InRepoFilters, m.Dropped)
 			}
-			if !reflect.DeepEqual(op, func() configfile.Settings { o := operator(); o.Allow = tt.allow; return o }()) {
-				t.Fatal("Merge changed the operator's settings")
+			if !reflect.DeepEqual(op, adminSettings()) {
+				t.Fatal("Merge changed the admin's settings")
 			}
 		})
 	}
+}
+
+// labels lists what the conditions fs are called.
+func labels(fs []configfile.Filter) []string {
+	out := make([]string, 0, len(fs))
+	for _, f := range fs {
+		out = append(out, f.Label())
+	}
+	return out
 }
 
 func TestMergedCheck(t *testing.T) {
@@ -164,13 +267,22 @@ func TestMergedCheck(t *testing.T) {
 		changed []string
 		want    SkipReason
 		wantErr bool
+		// filter is the label of the exclusion that held, or of a condition
+		// that failed to evaluate.
+		filter string
 	}{
-		{"nothing to skip", "", []string{"main.go"}, "", false},
-		{"disabled", "enabled: false\n", []string{"main.go"}, SkipDisabled, false},
-		{"filtered", "filter: '!pr.body.contains(\"[skip-review]\")'\n", []string{"main.go"}, SkipFiltered, false},
-		{"filter allows", "filter: 'pr.number == 3 && pr.open && pr.labels[0].name == \"deps\"'\n", []string{"main.go"}, "", false},
-		{"filter that fails to evaluate skips", "filter: 'pr.number == 1 || pr.labels[9].name == \"x\"'\n", []string{"main.go"}, SkipFiltered, true},
-		{"only skipped paths", "skip:\n  onlyPaths: [docs/**]\n", []string{"docs/a.md"}, SkipOnlyPaths, false},
+		{"nothing to skip", "", []string{"main.go"}, "", false, ""},
+		{"disabled", "enabled: false\n", []string{"main.go"}, SkipDisabled, false, ""},
+		{"the exclusion that holds is named", "trigger:\n  exclude: [{ expr: 'false' }, { name: marker, expr: 'pr.body.contains(\"[skip-review]\")' }]\n",
+			[]string{"main.go"}, SkipFiltered, false, "marker"},
+		{"an exclusion without a name", "trigger:\n  exclude: [{ expr: 'pr.body.contains(\"[skip-review]\")' }]\n", []string{"main.go"}, SkipFiltered, false, `pr.body.contains("[skip-review]")`},
+		{"no exclusion holds", "trigger:\n  exclude: [{ name: drafts, expr: pr.draft }]\n", []string{"main.go"}, "", false, ""},
+		{"no inclusion holds", "trigger:\n  include: [{ name: drafts, expr: pr.draft }, { expr: 'pr.number == 4' }]\n", []string{"main.go"}, SkipFiltered, false, ""},
+		{"an inclusion holds", "trigger:\n  include: [{ expr: pr.draft }, { expr: 'pr.number == 3 && pr.open && pr.labels[0].name == \"deps\"' }]\n", []string{"main.go"}, "", false, ""},
+		{"an exclusion wins over an inclusion", "trigger:\n  include: [{ expr: pr.open }]\n  exclude: [{ name: deps, expr: 'pr.labels.exists(l, l.name == \"deps\")' }]\n",
+			[]string{"main.go"}, SkipFiltered, false, "deps"},
+		{"filter that fails to evaluate skips", "trigger:\n  include: [{ expr: 'pr.number == 1 || pr.labels[9].name == \"x\"' }]\n", []string{"main.go"}, SkipFiltered, true, `pr.number == 1 || pr.labels[9].name == "x"`},
+		{"only ignored paths", "ignore: [docs/**]\n", []string{"docs/a.md"}, SkipOnlyPaths, false, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -179,14 +291,18 @@ func TestMergedCheck(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := m.Check(vars, tt.changed)
-			if got != tt.want || (err != nil) != tt.wantErr {
-				t.Fatalf("Check = %q, %v; want %q", got, err, tt.want)
+			got, by, err := m.Check(vars, tt.changed)
+			var filter string
+			if by != nil {
+				filter = by.Label()
+			}
+			if got != tt.want || (err != nil) != tt.wantErr || filter != tt.filter {
+				t.Fatalf("Check = %q, %q, %v; want %q, %q", got, filter, err, tt.want, tt.filter)
 			}
 		})
 	}
 	for r, want := range map[SkipReason]string{
-		SkipDisabled: "disabled in .kritique.yaml", SkipFiltered: "filtered by .kritique.yaml", SkipOnlyPaths: "only skipped paths changed",
+		SkipDisabled: "disabled in .kritique.yaml", SkipFiltered: "filtered", SkipOnlyPaths: "only ignored paths changed",
 	} {
 		if !r.Valid() || r.Description() != want {
 			t.Fatalf("%q.Description() = %q, want %q", r, r.Description(), want)
@@ -231,4 +347,31 @@ func jsonRoundTrip(in, out any) error {
 		return err
 	}
 	return json.Unmarshal(b, out)
+}
+
+// TestVarsMatchFilterVars: a filter sees the same pr variable when ingest
+// judges a webhook's pull request as when the worker judges its stored row.
+func TestVarsMatchFilterVars(t *testing.T) {
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	hook := webhook.PullRequest{
+		Number: 7, Title: "t", Author: "a", State: "open", Merged: true, Draft: true, Fork: true,
+		HeadRef: "f", HeadSHA: "abc", BaseRef: "main", URL: "https://x", Body: "b", CreatedAt: at,
+		Labels: []webhook.Label{{Name: "bug", Color: "f00"}},
+	}
+	labels, err := json.Marshal(hook.LabelVars())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := PullRequest{
+		Number: 7, Title: "t", Author: "a", State: "open", Merged: true, Draft: true, Fork: true,
+		HeadRef: "f", HeadSHA: "abc", BaseRef: "main", URL: "https://x", Body: "b", CreatedAt: at,
+		Labels: labels, Event: "opened",
+	}
+	got, err := stored.Vars()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := hook.FilterVars("opened"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Vars = %v\nFilterVars = %v", got, want)
+	}
 }

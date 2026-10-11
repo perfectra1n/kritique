@@ -1,10 +1,11 @@
 // Package config loads kritique's process configuration from environment
-// variables. Everything the service manages (tenants, installations,
-// repositories, models) lives in the declarative configuration file, not
-// here; this package covers only what the process itself needs to start.
+// variables: what the process itself needs to start. What kritique reviews
+// and how lives in the configuration file and its KRITIQUE_* overlay
+// (internal/configfile).
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -17,64 +18,75 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/perfectra1n/kritique/internal/egress"
-	"github.com/perfectra1n/kritique/internal/sealbox"
 )
 
-// Role selects which part of kritique a process runs. One image serves every
-// role; a homelab runs "all" in one pod while a larger deployment runs
-// "ingest" and "worker" as separate Deployments and lets the worker spawn
-// "runner" Jobs.
-type Role string
+// Command selects what a kritique process runs: the service, or one review or
+// index run in a runner Job.
+type Command string
 
-// Roles a kritique process can run as.
+// Commands a kritique process can run.
 const (
-	RoleAll    Role = "all"
-	RoleIngest Role = "ingest"
-	RoleWorker Role = "worker"
-	RoleRunner Role = "runner"
-	// RoleWeb serves the operator dashboard (ADR-0009): sign-in, sessions
-	// and the tenant/config surfaces a dashboard-managed installation uses.
-	// "all" also serves it once WebURL is configured; see [Config.WebEnabled].
-	RoleWeb Role = "web"
+	// CommandServe is the service: webhooks, the dashboard, the job
+	// queues, runner Jobs, the gateway and, on the leader, the leader
+	// duties.
+	CommandServe Command = "serve"
+	// CommandRun is one run in a runner Job, which the service creates.
+	CommandRun Command = "run"
 )
 
-// ParseRole validates a role name from the command line.
-func ParseRole(s string) (Role, error) {
-	switch r := Role(strings.ToLower(strings.TrimSpace(s))); r {
-	case RoleAll, RoleIngest, RoleWorker, RoleRunner, RoleWeb:
-		return r, nil
-	default:
-		return "", fmt.Errorf("config: unknown role %q (want all, ingest, worker, runner or web)", s)
+// ParseCommand reads the command from a process's arguments, without the
+// program name: serve when there are none.
+func ParseCommand(args []string) (Command, error) {
+	if len(args) == 0 {
+		return CommandServe, nil
 	}
+	if len(args) == 1 {
+		switch c := Command(args[0]); c {
+		case CommandServe, CommandRun:
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("config: unknown arguments %q: usage: kritique [serve | run]", args)
 }
+
+// Executor selects how runners run.
+type Executor string
+
+// Executors a kritique process can run runners with.
+const (
+	// ExecutorKubernetes creates a Job per run in the pod's own namespace.
+	ExecutorKubernetes Executor = "kubernetes"
+	// ExecutorLocal runs the runner in-process and is for development and
+	// tests only, because it gives the checkout the worker's credentials.
+	ExecutorLocal Executor = "local"
+)
 
 // Config holds the process configuration for kritique. All fields are populated
 // from environment variables via caarlos0/env. Call [Load] to parse and
 // validate; do not construct directly.
 type Config struct {
-	// Addr is the listen address for the HTTP surface the ingest role serves:
-	// /hooks/{installation} and nothing else. Port 8080 matches the container
-	// image's EXPOSE and the other services in the fleet.
+	// Addr is the listen address of serve's one public listener: the
+	// webhooks, /hooks/{connection}, and the dashboard. Port 8080 matches
+	// the container image's EXPOSE and the other services in the fleet.
 	Addr string `env:"KRITIQUE_ADDR" envDefault:":8080"`
 
 	// MetricsAddr is the listen address for /healthz, /readyz and /metrics.
-	// Kept on a separate port from the hook surface, as konflate does, so the
-	// management endpoints are never reachable through the ingress that fronts
-	// the webhooks.
+	// Kept on a separate port from the public listener, as konflate does, so
+	// the management endpoints are never reachable through the ingress that
+	// fronts it.
 	MetricsAddr string `env:"KRITIQUE_METRICS_ADDR" envDefault:":8081"`
 
-	// GatewayAddr is the listen address of the gateway the worker and all
-	// roles serve: the forward proxy runner pods reach the outside through
-	// (ADR-0008), and the model endpoint an agentic runner calls with its
-	// run token (ADR-0004). Its own port, so the runner network policy can
-	// name it without opening the hook or management surfaces.
+	// GatewayAddr is the listen address of the gateway serve runs: the
+	// forward proxy runner pods reach the outside through, and the model
+	// and similar-code endpoints a runner calls with its run token. Its own
+	// port, so the runner network policy can name it without opening the
+	// public or management listeners.
 	GatewayAddr string `env:"KRITIQUE_GATEWAY_ADDR" envDefault:":8082"`
 
 	// GatewayURL is the gateway's in-cluster address, http://host:port:
-	// runner Jobs are handed it as HTTPS_PROXY and HTTP_PROXY, and an
-	// agentic runner's job document names it as its model endpoint. Empty
-	// hands runners no proxy, which leaves them the direct egress an older
-	// network policy allowed, and refuses agentic reviews.
+	// runner Jobs are handed it as HTTPS_PROXY and HTTP_PROXY, and a
+	// review's job document names it as its model endpoint. serve needs it,
+	// since every review reaches its model through it.
 	GatewayURL string `env:"KRITIQUE_GATEWAY_URL"`
 
 	// GatewayTokenTTL is how long a run token outlives its runner Job's
@@ -82,36 +94,24 @@ type Config struct {
 	// minted it dies before revoking it.
 	GatewayTokenTTL time.Duration `env:"KRITIQUE_GATEWAY_TOKEN_TTL" envDefault:"1h"`
 
-	// WebAddr is the listen address for the operator dashboard the web role
-	// serves. Its own port, matching the pattern of Addr/MetricsAddr/
-	// GatewayAddr, so the dashboard can be exposed without opening the
-	// other surfaces.
-	WebAddr string `env:"KRITIQUE_WEB_ADDR" envDefault:":8083"`
-
 	// WebURL is the dashboard's externally reachable origin: an absolute
 	// http(s) URL with a host and no query or fragment. It is how the
 	// dashboard builds absolute links (OIDC redirect URIs, session cookie
-	// scope) back to itself, so it must be required for the web role and
-	// must match how the ingress/HTTPRoute actually exposes it. A trailing
-	// slash is trimmed. Empty means no role serves the dashboard; see
-	// [Config.WebEnabled]. Parsed once into an unexported *url.URL, read
-	// back with [Config.WebURLParsed].
+	// scope) back to itself, and how a review's summary comment links its
+	// re-run badge to the pull request's page, so it must match how the
+	// ingress/HTTPRoute actually exposes it. A trailing slash is trimmed. Required to serve.
+	// Parsed once into an unexported *url.URL, read back with
+	// [Config.WebURLParsed].
 	WebURL string `env:"KRITIQUE_WEB_URL"`
 
-	// ConfigFile is the path of the declarative configuration file (tenants,
-	// installations, repositories, models). Every role except runner loads it
-	// at startup and watches it for changes. The default is where the Helm
-	// chart mounts it.
-	ConfigFile string `env:"KRITIQUE_CONFIG_FILE" envDefault:"/etc/kritique/config.yaml"`
+	// ConfigFile is the path of the optional configuration file: sign-in
+	// and the connections an admin keeps in git. serve loads it at startup,
+	// and a change takes a restart. Empty means no file, and the
+	// environment alone declares them.
+	ConfigFile string `env:"KRITIQUE_CONFIG_FILE"`
 
-	// ConfigReloadInterval is how often the configuration file is re-read
-	// for changes. Polling, because a ConfigMap mount updates by swapping a
-	// symlink that inotify on the file misses; ten seconds keeps a Flux
-	// reconcile visible without hammering the disk.
-	ConfigReloadInterval time.Duration `env:"KRITIQUE_CONFIG_RELOAD_INTERVAL" envDefault:"10s"`
-
-	// DatabaseURL is the DSN every role connects with for request and job
-	// work. It must be the application role: not a superuser, no BYPASSRLS,
+	// DatabaseURL is the DSN every process connects with for request and
+	// job work. It must be the application role: not a superuser, no BYPASSRLS,
 	// owning nothing, so row-level security applies to it. Runner pods get
 	// the runner role's DSN under the same variable name. Checked at
 	// startup; a DSN that bypasses row-level security refuses to start.
@@ -119,8 +119,8 @@ type Config struct {
 
 	// DatabaseOwnerURL is the DSN of the role that owns the schema. It runs
 	// migrations, the configuration loader and the chunks DDL, all of which
-	// write across tenants. Only the roles that can become leader (all and
-	// worker) need it; ingest and runner must not have it.
+	// write across accounts. serve needs it to become leader; a runner
+	// must not have it.
 	DatabaseOwnerURL string `env:"KRITIQUE_DATABASE_OWNER_URL,unset"`
 
 	// DatabaseAppRole and DatabaseRunnerRole are the Postgres role names the
@@ -133,31 +133,6 @@ type Config struct {
 	// leader lock and how often the holder verifies it still has it.
 	LeaderRetryInterval time.Duration `env:"KRITIQUE_LEADER_RETRY_INTERVAL" envDefault:"15s"`
 
-	// EmbedBaseURL, EmbedAPIKey, EmbedModel and EmbedDims configure the
-	// deployment-wide embedder, always OpenAI-compatible. They live here
-	// rather than in the configuration file because changing the model
-	// reindexes every repository, so it should take a deploy, not a config
-	// reload. All four are set together or not at all; unset means indexing
-	// is off and reviews run without vector retrieval.
-	EmbedBaseURL string `env:"KRITIQUE_EMBED_BASE_URL"`
-	EmbedAPIKey  string `env:"KRITIQUE_EMBED_API_KEY,unset"`
-	EmbedModel   string `env:"KRITIQUE_EMBED_MODEL"`
-	EmbedDims    int    `env:"KRITIQUE_EMBED_DIMS"`
-
-	// EmbedMaxBatch, EmbedMaxBatchChars and EmbedMaxItemChars bound one
-	// embedding request. OpenAI-compatible servers differ widely in what
-	// they accept; these defaults are conservative enough for the common
-	// ones and can be raised per deployment.
-	EmbedMaxBatch      int `env:"KRITIQUE_EMBED_MAX_BATCH" envDefault:"64"`
-	EmbedMaxBatchChars int `env:"KRITIQUE_EMBED_MAX_BATCH_CHARS" envDefault:"200000"`
-	EmbedMaxItemChars  int `env:"KRITIQUE_EMBED_MAX_ITEM_CHARS" envDefault:"16000"`
-
-	// ReindexOnModelChange lets a worker start when EmbedModel differs from
-	// the model recorded in the store at the same dimension, and enqueues a
-	// reindex of every repository. Off by default so a mistyped model name
-	// cannot trigger a fleet-wide re-embed.
-	ReindexOnModelChange bool `env:"KRITIQUE_REINDEX_ON_MODEL_CHANGE" envDefault:"false"`
-
 	// ReviewWorkers is how many review jobs one worker replica runs at once.
 	// Each one holds a runner pod open for the length of a fetch and diff,
 	// so this bounds pods per replica, not model calls.
@@ -168,15 +143,17 @@ type Config struct {
 	// runs at most ReviewWorkers + IndexWorkers runner pods.
 	IndexWorkers int `env:"KRITIQUE_INDEX_WORKERS" envDefault:"1"`
 
-	// Executor selects how runners run: "kubernetes" creates a Job per run
-	// in the pod's own namespace; "local" runs the runner in-process and is
-	// for development and tests only, because it gives the checkout the
-	// worker's credentials.
-	Executor string `env:"KRITIQUE_EXECUTOR" envDefault:"kubernetes"`
+	// Executor selects how runners run; see the Executor type.
+	Executor Executor `env:"KRITIQUE_EXECUTOR" envDefault:"kubernetes"`
 
-	// RunnerImage is the image runner Jobs use, normally the worker's own.
-	// Required for the worker and all roles with the kubernetes executor.
+	// RunnerImage is the image runner Jobs use, normally the release's
+	// -tools image. Required to serve with the kubernetes executor.
 	RunnerImage string `env:"KRITIQUE_RUNNER_IMAGE"`
+
+	// RunnerImagePullPolicy is the runner container's imagePullPolicy:
+	// Always, IfNotPresent or Never. Empty leaves Kubernetes' default for
+	// the image reference.
+	RunnerImagePullPolicy string `env:"KRITIQUE_RUNNER_IMAGE_PULL_POLICY"`
 
 	// RunnerServiceAccount is the permissionless service account runner pods
 	// run as. RunnerDatabaseSecret and RunnerDatabaseSecretKey locate the
@@ -192,14 +169,14 @@ type Config struct {
 	// RunnerRuntimeClass is the RuntimeClass runner pods run under, such as
 	// a gVisor or Kata class, so a pod that parses untrusted repository
 	// content is kept from the node's kernel. Empty uses the cluster's
-	// default runtime. Advised, not required (ADR-0008 §2.4).
+	// default runtime. Advised, not required.
 	RunnerRuntimeClass string `env:"KRITIQUE_RUNNER_RUNTIME_CLASS"`
 
-	// RunnerDatabaseURL is the runner role's DSN, needed only by the local
-	// executor, which runs the runner inside the worker process.
+	// RunnerDatabaseURL is the runner database role's DSN, needed only by
+	// the local executor, which runs the runner inside the serve process.
 	RunnerDatabaseURL string `env:"KRITIQUE_RUNNER_DATABASE_URL,unset"`
 
-	// RunSpecFile is the path of the runner role's job document, a
+	// RunSpecFile is the path of a runner's job document, a
 	// versioned JSON runner spec the worker mounts into the Job from the
 	// run's Secret. A file rather than a variable: a spec can outgrow the
 	// kernel's 128 KiB limit on one environment string.
@@ -210,18 +187,6 @@ type Config struct {
 	GitToken     string `env:"KRITIQUE_GIT_TOKEN,unset"`
 	GatewayToken string `env:"KRITIQUE_GATEWAY_TOKEN,unset"`
 
-	// DashboardKey is the base64 32-byte key that seals and opens the
-	// credentials a dashboard-managed tenant stores (ADR-0009 §2.5). Empty
-	// is valid while no dashboard tenant exists; startup fails once one
-	// does. Passed like every other secret here, from the environment and
-	// unset once read.
-	DashboardKey string `env:"KRITIQUE_DASHBOARD_KEY,unset"`
-	// DashboardOldKeys are earlier DashboardKey values, comma-separated,
-	// still able to open what they sealed so a key can be rotated without
-	// resealing every tenant first. Empty by default: there is nothing to
-	// rotate from until a key has been replaced.
-	DashboardOldKeys []string `env:"KRITIQUE_DASHBOARD_OLD_KEYS,unset" envSeparator:","`
-
 	// LogLevel is the minimum slog level emitted: debug, info, warn or error.
 	LogLevel string `env:"KRITIQUE_LOG_LEVEL" envDefault:"info"`
 
@@ -229,47 +194,54 @@ type Config struct {
 	// or "text" for local runs.
 	LogFormat string `env:"KRITIQUE_LOG_FORMAT" envDefault:"json"`
 
-	keyring *sealbox.Keyring
-	webURL  *url.URL
+	webURL *url.URL
 }
 
-// ValidateWorker checks what the worker role needs beyond the common set.
-func (c *Config) ValidateWorker() error {
-	if c.Executor == "kubernetes" && c.RunnerImage == "" {
-		return fmt.Errorf("config: KRITIQUE_RUNNER_IMAGE is required with the kubernetes executor")
+// ValidateServe checks what serve needs beyond the common set.
+func (c *Config) ValidateServe() error {
+	var errs []error
+	if c.Executor == ExecutorKubernetes && c.RunnerImage == "" {
+		errs = append(errs, errors.New("config: KRITIQUE_RUNNER_IMAGE is required with the kubernetes executor"))
 	}
-	if c.Executor == "local" && c.RunnerDatabaseURL == "" {
-		return fmt.Errorf("config: KRITIQUE_RUNNER_DATABASE_URL is required with the local executor")
+	switch c.RunnerImagePullPolicy {
+	case "", "Always", "IfNotPresent", "Never":
+	default:
+		errs = append(errs, fmt.Errorf("config: KRITIQUE_RUNNER_IMAGE_PULL_POLICY %q is not Always, IfNotPresent or Never",
+			c.RunnerImagePullPolicy))
 	}
-	return nil
+	if c.Executor == ExecutorLocal && c.RunnerDatabaseURL == "" {
+		errs = append(errs, errors.New("config: KRITIQUE_RUNNER_DATABASE_URL is required with the local executor"))
+	}
+	if c.WebURL == "" {
+		errs = append(errs, errors.New("config: KRITIQUE_WEB_URL is required to serve"))
+	}
+	if c.GatewayURL == "" {
+		errs = append(errs, errors.New("config: KRITIQUE_GATEWAY_URL is required to serve: every review reaches its model through the gateway"))
+	}
+	return errors.Join(errs...)
 }
 
 // ValidateRunner checks what a runner pod needs. The job document itself is
 // decoded and validated by the runner package.
 func (c *Config) ValidateRunner() error {
 	if c.RunSpecFile == "" {
-		return fmt.Errorf("config: KRITIQUE_RUN_SPEC_FILE is required for the runner role")
+		return errors.New("config: KRITIQUE_RUN_SPEC_FILE is required to run")
 	}
 	return nil
-}
-
-// ValidateWeb checks what the web role needs beyond the common set.
-func (c *Config) ValidateWeb() error {
-	if c.WebURL == "" {
-		return fmt.Errorf("config: KRITIQUE_WEB_URL is required for the web role")
-	}
-	return nil
-}
-
-// WebEnabled reports whether role serves the operator dashboard: the web
-// role always does, and all does once WebURL is configured.
-func (c *Config) WebEnabled(role Role) bool {
-	return role == RoleWeb || (role == RoleAll && c.WebURL != "")
 }
 
 // WebURLParsed returns WebURL parsed into a *url.URL, or nil when WebURL is
 // unset.
 func (c *Config) WebURLParsed() *url.URL { return c.webURL }
+
+// WebBasePath is WebURL's path, "" when it has none or is unset: the
+// dashboard is served under it, and the webhook listener shares it.
+func (c *Config) WebBasePath() string {
+	if c.webURL == nil {
+		return ""
+	}
+	return c.webURL.Path
+}
 
 // parseWebURL trims a trailing slash from WebURL, rejects anything that
 // isn't an absolute http(s) URL with a host and no query or fragment, and
@@ -294,13 +266,6 @@ func (c *Config) parseWebURL() error {
 	return nil
 }
 
-// EmbeddingEnabled reports whether a deployment-wide embedder is configured.
-func (c *Config) EmbeddingEnabled() bool { return c.EmbedModel != "" }
-
-// DashboardKeyring returns the keyring built from DashboardKey and
-// DashboardOldKeys, nil when no key is configured.
-func (c *Config) DashboardKeyring() *sealbox.Keyring { return c.keyring }
-
 // Load parses the environment into a Config and validates it. It fails fast
 // on an invalid value so a misconfigured process never starts serving.
 func Load() (*Config, error) {
@@ -323,9 +288,6 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("config: KRITIQUE_LOG_FORMAT must be json or text, got %q", c.LogFormat)
 	}
-	if c.ConfigReloadInterval <= 0 {
-		return fmt.Errorf("config: KRITIQUE_CONFIG_RELOAD_INTERVAL must be positive, got %s", c.ConfigReloadInterval)
-	}
 	if c.GatewayURL != "" {
 		if _, err := egress.ProxyURL(c.GatewayURL); err != nil {
 			return fmt.Errorf("config: KRITIQUE_GATEWAY_URL: %w", err)
@@ -337,71 +299,27 @@ func (c *Config) validate() error {
 	if err := c.parseWebURL(); err != nil {
 		return err
 	}
-	set := 0
-	for _, v := range []bool{c.EmbedBaseURL != "", c.EmbedAPIKey != "", c.EmbedModel != "", c.EmbedDims != 0} {
-		if v {
-			set++
-		}
-	}
-	if set != 0 && set != 4 {
-		return fmt.Errorf("config: KRITIQUE_EMBED_BASE_URL, KRITIQUE_EMBED_API_KEY, KRITIQUE_EMBED_MODEL " +
-			"and KRITIQUE_EMBED_DIMS must be set together")
-	}
-	if c.EmbedDims < 0 || c.EmbedDims > 4000 {
-		return fmt.Errorf("config: KRITIQUE_EMBED_DIMS must be between 1 and 4000 (the halfvec index limit), got %d", c.EmbedDims)
-	}
-	if c.EmbedMaxBatch <= 0 || c.EmbedMaxBatchChars <= 0 || c.EmbedMaxItemChars <= 0 {
-		return fmt.Errorf("config: KRITIQUE_EMBED_MAX_* must be positive")
-	}
 	if c.DatabaseAppRole == "" || c.DatabaseRunnerRole == "" || c.DatabaseAppRole == c.DatabaseRunnerRole {
-		return fmt.Errorf("config: KRITIQUE_DATABASE_APP_ROLE and KRITIQUE_DATABASE_RUNNER_ROLE must be set and distinct")
+		return errors.New("config: KRITIQUE_DATABASE_APP_ROLE and KRITIQUE_DATABASE_RUNNER_ROLE must be set and distinct")
 	}
 	if c.LeaderRetryInterval <= 0 {
 		return fmt.Errorf("config: KRITIQUE_LEADER_RETRY_INTERVAL must be positive, got %s", c.LeaderRetryInterval)
 	}
 	switch c.Executor {
-	case "kubernetes", "local":
+	case ExecutorKubernetes, ExecutorLocal:
 	default:
 		return fmt.Errorf("config: KRITIQUE_EXECUTOR must be kubernetes or local, got %q", c.Executor)
 	}
-	if err := c.validateWork(); err != nil {
-		return err
-	}
-	return c.buildKeyring()
+	return c.validateWork()
 }
 
 // validateWork checks the settings that size the queues and the runners.
 func (c *Config) validateWork() error {
 	if c.ReviewWorkers <= 0 || c.IndexWorkers <= 0 {
-		return fmt.Errorf("config: KRITIQUE_REVIEW_WORKERS and KRITIQUE_INDEX_WORKERS must be positive")
+		return errors.New("config: KRITIQUE_REVIEW_WORKERS and KRITIQUE_INDEX_WORKERS must be positive")
 	}
 	if c.RunnerTTL <= 0 {
-		return fmt.Errorf("config: KRITIQUE_RUNNER_TTL must be positive")
-	}
-	return nil
-}
-
-func (c *Config) buildKeyring() error {
-	if c.DashboardKey == "" {
-		if len(c.DashboardOldKeys) > 0 {
-			return fmt.Errorf("config: KRITIQUE_DASHBOARD_OLD_KEYS needs KRITIQUE_DASHBOARD_KEY")
-		}
-		return nil
-	}
-	current, err := sealbox.ParseKey(c.DashboardKey)
-	if err != nil {
-		return fmt.Errorf("config: KRITIQUE_DASHBOARD_KEY: %w", err)
-	}
-	old := make([][]byte, 0, len(c.DashboardOldKeys))
-	for i, s := range c.DashboardOldKeys {
-		k, err := sealbox.ParseKey(s)
-		if err != nil {
-			return fmt.Errorf("config: KRITIQUE_DASHBOARD_OLD_KEYS[%d]: %w", i, err)
-		}
-		old = append(old, k)
-	}
-	if c.keyring, err = sealbox.NewKeyring(current, old...); err != nil {
-		return fmt.Errorf("config: KRITIQUE_DASHBOARD_KEY: %w", err)
+		return errors.New("config: KRITIQUE_RUNNER_TTL must be positive")
 	}
 	return nil
 }

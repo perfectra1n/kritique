@@ -3,37 +3,41 @@
 // `$state` rune) so these functions can be imported by tooling that doesn't
 // go through Svelte's compiler -- e.g. a plain Playwright test.
 //
-//   #/                                        overview (tenant picker / landing)
+//   #/                                        overview (account picker / landing)
 //   #/signin                                  sign-in page
-//   #/operator                                operator console (cross-tenant)
-//   #/t/<slug>                                tenant overview
-//   #/t/<slug>/repos                          tenant's repo list
-//   #/t/<slug>/repos/<owner>/<repo>           one repo
-//   #/t/<slug>/pulls                          tenant's pull list
-//   #/t/<slug>/pulls/<owner>/<repo>/<n>       one pull request
-//
-// A repo, pull or repository task-runs route may end in "?installation=<name>", naming which of
-// several installations holding the same owner/repo it means.
-//   #/t/<slug>/reviews/<id>[/<tab>]           one review, optional tab
-//   #/t/<slug>/queue                          run queue
-//   #/t/<slug>/usage                          usage/cost dashboard
-//   #/t/<slug>/followups                      follow-up tracker
-//   #/t/<slug>/task-runs                      task runs of every repository
-//   #/t/<slug>/repos/<owner>/<repo>/task-runs one repository's task runs
-//   #/t/<slug>/task-runs/<id>                 one task run
-//   #/t/<slug>/admin[/<section>]              tenant admin, optional section
+//   #/admin                                   admin console (cross-account)
+//   #/queue                                   the queue of every account
+//   #/settings                                the viewer's own settings
+//   #/a/<slug>                                account overview; slug is <forge>/<name>
+//   #/a/<slug>/repos                          account's repo list
+//   #/a/<slug>/repos/<owner>/<repo>           one repo
+//   #/a/<slug>/pulls[?<filter>]               account's pull list; filter is a PullFilter
+//   #/a/<slug>/pulls/<owner>/<repo>/<n>       one pull request
+//   #/a/<slug>/reviews/<id>[/<tab>]           one review, optional tab
+//   #/a/<slug>/reviews/<id>?finding=<id>      one review, at one of its findings
+//   #/a/<slug>/findings[?<filter>]            account's findings; filter is a FindingFilter
+//   #/a/<slug>/rules                          the files reviews read
+//   #/a/<slug>/queue                          run queue
+//   #/a/<slug>/usage                          usage/cost dashboard
+//   #/a/<slug>/followups                      follow-up tracker
+//   #/a/<slug>/tasks[?<filter>]               account's task runs; filter is a TaskRunFilter
+//   #/a/<slug>/tasks/<id>                     one task run
+//   #/a/<slug>/admin[/<section>]              an account's settings: its configuration or audit log
 //
 // Segments round-trip through encodeURIComponent/decodeURIComponent, so a
 // slug/owner/repo/id/section containing a literal "/" or other reserved
 // character survives href() -> parse(). A single trailing slash is
-// tolerated -- "#/t/<slug>/repos/" parses exactly like "#/t/<slug>/repos" --
+// tolerated -- "#/a/<slug>/repos/" parses exactly like "#/a/<slug>/repos" --
 // since href() never produces one but a bookmark or typed URL might. Any
-// other malformation -- an empty non-trailing segment (e.g. "#/t//repos"),
+// other malformation -- an empty non-trailing segment (e.g. "#/a//repos"),
 // more than one trailing slash, an undecodable percent-escape, or extra
 // trailing segments beyond what a route shape accepts -- falls back to that
-// tenant's overview once a slug has been parsed, and to the global overview
+// account's overview once a slug has been parsed, and to the global overview
 // otherwise, including when the malformation is what prevents the slug
-// itself from being parsed (e.g. "#/t//acme").
+// itself from being parsed (e.g. "#/a//acme").
+
+import type { FindingStatus, ReviewStatus, Severity, Category, TaskRunStatus } from './types';
+import { SEVERITIES, CATEGORIES } from './format';
 
 export const REVIEW_TABS = ['summary', 'diff', 'conversation', 'timeline', 'raw', 'usage'] as const;
 export type ReviewTab = (typeof REVIEW_TABS)[number];
@@ -42,20 +46,116 @@ function isReviewTab(v: string | undefined): v is ReviewTab {
   return v !== undefined && (REVIEW_TABS as readonly string[]).includes(v);
 }
 
+// A pull request's last review is never a skipped one, so skipped is not an outcome to filter by.
+export const PULL_OUTCOMES: readonly ReviewStatus[] = ['running', 'prepared', 'completed', 'superseded', 'capped', 'failed', 'canceled'];
+
+// PullFilter is the pull list's filters, carried in the hash's query so a
+// filtered list can be linked and comes back with Back. A field is present
+// only when it differs from the default: open pulls, any last review
+// outcome, every repository and author, no search. is narrows to those
+// with automatic reviews paused, or a blocking finding in the last review.
+export interface PullFilter {
+  state?: 'closed' | 'all';
+  outcome?: ReviewStatus;
+  is?: 'paused' | 'blocking';
+  repo?: string;
+  author?: string;
+  q?: string;
+}
+
+// pullFilter drops the fields of f that are a default, so each filter has
+// one Route and one URL; undefined when nothing is left.
+export const PULL_IS = ['paused', 'blocking'] as const;
+
+export function pullFilter(f: { state?: string; outcome?: string; is?: string; repo?: string; author?: string; q?: string }): PullFilter | undefined {
+  const out: PullFilter = {};
+  if (f.state === 'closed' || f.state === 'all') out.state = f.state;
+  const outcome = PULL_OUTCOMES.find((o) => o === f.outcome);
+  if (outcome) out.outcome = outcome;
+  const is = PULL_IS.find((i) => i === f.is);
+  if (is) out.is = is;
+  if (f.repo) out.repo = f.repo;
+  if (f.author) out.author = f.author;
+  if (f.q) out.q = f.q;
+  return Object.keys(out).length ? out : undefined;
+}
+
+// FindingFilter is the findings list's filters, in the hash's query like a
+// PullFilter's; a field is present only when it narrows the list.
+export interface FindingFilter {
+  severity?: Severity;
+  category?: Category;
+  status?: FindingStatus;
+  repo?: string;
+  rule?: string;
+  q?: string;
+}
+
+export const FINDING_STATUSES: readonly FindingStatus[] = ['open', 'addressed', 'dismissed'];
+
+// findingFilter drops the fields of f that match everything; undefined when
+// nothing is left.
+export function findingFilter(f: {
+  severity?: string;
+  category?: string;
+  status?: string;
+  repo?: string;
+  rule?: string;
+  q?: string;
+}): FindingFilter | undefined {
+  const out: FindingFilter = {};
+  const severity = SEVERITIES.find((s) => s === f.severity);
+  if (severity) out.severity = severity;
+  const category = CATEGORIES.find((c) => c === f.category);
+  if (category) out.category = category;
+  const status = FINDING_STATUSES.find((s) => s === f.status);
+  if (status) out.status = status;
+  if (f.repo) out.repo = f.repo;
+  if (f.rule) out.rule = f.rule;
+  if (f.q) out.q = f.q;
+  return Object.keys(out).length ? out : undefined;
+}
+
+// TaskRunFilter is the task run list's filters, in the hash's query like a
+// PullFilter's; a field is present only when it narrows the list.
+export interface TaskRunFilter {
+  repo?: string;
+  task?: string;
+  status?: TaskRunStatus;
+}
+
+export const TASK_RUN_STATUSES: readonly TaskRunStatus[] = ['queued', 'running', 'succeeded', 'failed', 'skipped'];
+
+// taskRunFilter drops the fields of f that match everything; undefined
+// when nothing is left.
+export function taskRunFilter(f: { repo?: string; task?: string; status?: string }): TaskRunFilter | undefined {
+  const out: TaskRunFilter = {};
+  if (f.repo) out.repo = f.repo;
+  if (f.task) out.task = f.task;
+  const status = TASK_RUN_STATUSES.find((s) => s === f.status);
+  if (status) out.status = status;
+  return Object.keys(out).length ? out : undefined;
+}
+
 export type Route =
   | { name: 'overview' }
   | { name: 'signin' }
-  | { name: 'operator' }
-  | { name: 'tenant'; slug: string }
+  | { name: 'console' }
+  | { name: 'instanceQueue' }
+  | { name: 'preferences' }
+  | { name: 'account'; slug: string }
   | { name: 'repos'; slug: string }
-  | { name: 'repo'; slug: string; owner: string; repo: string; installation?: string }
-  | { name: 'pulls'; slug: string }
-  | { name: 'pull'; slug: string; owner: string; repo: string; number: number; installation?: string }
-  | { name: 'review'; slug: string; id: string; tab?: ReviewTab }
+  | { name: 'repo'; slug: string; owner: string; repo: string }
+  | { name: 'pulls'; slug: string; filter?: PullFilter }
+  | { name: 'pull'; slug: string; owner: string; repo: string; number: number }
+  // finding is the id of the finding the summary scrolls to.
+  | { name: 'review'; slug: string; id: string; tab?: ReviewTab; finding?: string }
+  | { name: 'findings'; slug: string; filter?: FindingFilter }
+  | { name: 'rules'; slug: string }
   | { name: 'queue'; slug: string }
   | { name: 'usage'; slug: string }
   | { name: 'followups'; slug: string }
-  | { name: 'taskRuns'; slug: string; owner?: string; repo?: string; installation?: string }
+  | { name: 'tasks'; slug: string; filter?: TaskRunFilter }
   | { name: 'taskRun'; slug: string; id: string }
   | { name: 'admin'; slug: string; section?: string };
 
@@ -86,30 +186,44 @@ function segments(hash: string): { parts: string[]; ok: boolean } {
   return { parts: decoded, ok: true };
 }
 
-// parseTenantRoute handles everything under #/t/<slug>/... . Anything
-// malformed past the slug -- including an extra trailing segment -- falls
-// back to that tenant's overview rather than the global overview, so a bad
-// deep link still lands the user in-tenant.
-function parseTenantRoute(slug: string, rest: string[], installation: string | undefined): Route {
+// parseAccountRoute handles everything under #/a/<forge>/<name>/... , the
+// account's slug being "<forge>/<name>". Anything malformed past the slug --
+// including an extra trailing segment -- falls back to that account's
+// overview rather than the global overview, so a bad deep link still lands
+// the user in-account.
+function parseAccountRoute(slug: string, rest: string[], query: URLSearchParams): Route {
   const [section, ...tail] = rest;
-  const inst = installation ? { installation } : {};
   switch (section) {
     case undefined:
-      return { name: 'tenant', slug };
+      return { name: 'account', slug };
     case 'repos':
       if (tail.length === 0) return { name: 'repos', slug };
-      if (tail.length === 2) return { name: 'repo', slug, owner: tail[0]!, repo: tail[1]!, ...inst };
-      if (tail.length === 3 && tail[2] === 'task-runs') return { name: 'taskRuns', slug, owner: tail[0]!, repo: tail[1]!, ...inst };
+      if (tail.length === 2) return { name: 'repo', slug, owner: tail[0]!, repo: tail[1]! };
       break;
     case 'pulls':
-      if (tail.length === 0) return { name: 'pulls', slug };
+      if (tail.length === 0) {
+        const filter = pullFilter(Object.fromEntries(query));
+        return filter ? { name: 'pulls', slug, filter } : { name: 'pulls', slug };
+      }
       if (tail.length === 3 && PULL_NUMBER.test(tail[2]!)) {
-        return { name: 'pull', slug, owner: tail[0]!, repo: tail[1]!, number: Number(tail[2]), ...inst };
+        return { name: 'pull', slug, owner: tail[0]!, repo: tail[1]!, number: Number(tail[2]) };
       }
       break;
     case 'reviews':
-      if (tail.length === 1) return { name: 'review', slug, id: tail[0]! };
+      if (tail.length === 1) {
+        const finding = query.get('finding');
+        return finding ? { name: 'review', slug, id: tail[0]!, finding } : { name: 'review', slug, id: tail[0]! };
+      }
       if (tail.length === 2) return { name: 'review', slug, id: tail[0]!, tab: isReviewTab(tail[1]) ? tail[1] : undefined };
+      break;
+    case 'findings':
+      if (tail.length === 0) {
+        const filter = findingFilter(Object.fromEntries(query));
+        return filter ? { name: 'findings', slug, filter } : { name: 'findings', slug };
+      }
+      break;
+    case 'rules':
+      if (tail.length === 0) return { name: 'rules', slug };
       break;
     case 'queue':
       if (tail.length === 0) return { name: 'queue', slug };
@@ -120,8 +234,11 @@ function parseTenantRoute(slug: string, rest: string[], installation: string | u
     case 'followups':
       if (tail.length === 0) return { name: 'followups', slug };
       break;
-    case 'task-runs':
-      if (tail.length === 0) return { name: 'taskRuns', slug };
+    case 'tasks':
+      if (tail.length === 0) {
+        const filter = taskRunFilter(Object.fromEntries(query));
+        return filter ? { name: 'tasks', slug, filter } : { name: 'tasks', slug };
+      }
       if (tail.length === 1) return { name: 'taskRun', slug, id: tail[0]! };
       break;
     case 'admin':
@@ -129,64 +246,83 @@ function parseTenantRoute(slug: string, rest: string[], installation: string | u
       if (tail.length === 1) return { name: 'admin', slug, section: tail[0] };
       break;
   }
-  return { name: 'tenant', slug };
+  return { name: 'account', slug };
 }
 
 export function parse(hash: string): Route {
   const q = hash.indexOf('?');
-  const installation = q < 0 ? undefined : (new URLSearchParams(hash.slice(q + 1)).get('installation') ?? undefined);
   const { parts, ok } = segments(q < 0 ? hash : hash.slice(0, q));
+  const slug = parts[0] === 'a' && parts[1] !== undefined && parts[2] !== undefined ? `${parts[1]}/${parts[2]}` : undefined;
   if (!ok) {
     // The malformation struck before a slug could be parsed: nothing to
-    // fall back into but the global overview. Once a slug WAS parsed
-    // (parts[0] === 't' && parts[1]), the malformation is downstream of it
-    // (a bad section, an empty segment, extra segments, ...), so fall back
-    // to that tenant's own overview instead.
-    if (parts[0] === 't' && parts[1] !== undefined) return { name: 'tenant', slug: parts[1] };
-    return { name: 'overview' };
+    // fall back into but the global overview. Once a slug WAS parsed, the
+    // malformation is downstream of it (a bad section, an empty segment,
+    // extra segments, ...), so fall back to that account's own overview
+    // instead.
+    return slug ? { name: 'account', slug } : { name: 'overview' };
   }
   if (parts.length === 0) return { name: 'overview' };
   if (parts.length === 1 && parts[0] === 'signin') return { name: 'signin' };
-  if (parts.length === 1 && parts[0] === 'operator') return { name: 'operator' };
-  if (parts[0] === 't' && parts[1] !== undefined) return parseTenantRoute(parts[1], parts.slice(2), installation);
+  if (parts.length === 1 && parts[0] === 'admin') return { name: 'console' };
+  if (parts.length === 1 && parts[0] === 'queue') return { name: 'instanceQueue' };
+  if (parts.length === 1 && parts[0] === 'settings') return { name: 'preferences' };
+  if (slug) return parseAccountRoute(slug, parts.slice(3), new URLSearchParams(q < 0 ? '' : hash.slice(q + 1)));
   return { name: 'overview' };
+}
+
+// slugPath is an account slug, "<forge>/<name>", as two path segments.
+export function slugPath(slug: string): string {
+  const i = slug.indexOf('/');
+  return i < 0 ? encodeURIComponent(slug) : `${encodeURIComponent(slug.slice(0, i))}/${encodeURIComponent(slug.slice(i + 1))}`;
 }
 
 export function href(r: Route): string {
   const s = (v: string) => encodeURIComponent(v);
-  const inst = (v: string | undefined) => (v ? `?installation=${s(v)}` : '');
   switch (r.name) {
     case 'overview':
       return '#/';
     case 'signin':
       return '#/signin';
-    case 'operator':
-      return '#/operator';
-    case 'tenant':
-      return `#/t/${s(r.slug)}`;
+    case 'console':
+      return '#/admin';
+    case 'instanceQueue':
+      return '#/queue';
+    case 'preferences':
+      return '#/settings';
+    case 'account':
+      return `#/a/${slugPath(r.slug)}`;
     case 'repos':
-      return `#/t/${s(r.slug)}/repos`;
+      return `#/a/${slugPath(r.slug)}/repos`;
     case 'repo':
-      return `#/t/${s(r.slug)}/repos/${s(r.owner)}/${s(r.repo)}${inst(r.installation)}`;
-    case 'pulls':
-      return `#/t/${s(r.slug)}/pulls`;
+      return `#/a/${slugPath(r.slug)}/repos/${s(r.owner)}/${s(r.repo)}`;
+    case 'pulls': {
+      const query = new URLSearchParams(Object.entries(r.filter ?? {})).toString();
+      return `#/a/${slugPath(r.slug)}/pulls${query ? `?${query}` : ''}`;
+    }
     case 'pull':
-      return `#/t/${s(r.slug)}/pulls/${s(r.owner)}/${s(r.repo)}/${r.number}${inst(r.installation)}`;
+      return `#/a/${slugPath(r.slug)}/pulls/${s(r.owner)}/${s(r.repo)}/${r.number}`;
     case 'review':
-      return r.tab ? `#/t/${s(r.slug)}/reviews/${s(r.id)}/${s(r.tab)}` : `#/t/${s(r.slug)}/reviews/${s(r.id)}`;
+      if (r.tab) return `#/a/${slugPath(r.slug)}/reviews/${s(r.id)}/${s(r.tab)}`;
+      return `#/a/${slugPath(r.slug)}/reviews/${s(r.id)}${r.finding ? `?finding=${s(r.finding)}` : ''}`;
+    case 'findings': {
+      const query = new URLSearchParams(Object.entries(r.filter ?? {})).toString();
+      return `#/a/${slugPath(r.slug)}/findings${query ? `?${query}` : ''}`;
+    }
+    case 'rules':
+      return `#/a/${slugPath(r.slug)}/rules`;
     case 'queue':
-      return `#/t/${s(r.slug)}/queue`;
+      return `#/a/${slugPath(r.slug)}/queue`;
     case 'usage':
-      return `#/t/${s(r.slug)}/usage`;
+      return `#/a/${slugPath(r.slug)}/usage`;
     case 'followups':
-      return `#/t/${s(r.slug)}/followups`;
-    case 'taskRuns':
-      return r.owner !== undefined && r.repo !== undefined
-        ? `#/t/${s(r.slug)}/repos/${s(r.owner)}/${s(r.repo)}/task-runs${inst(r.installation)}`
-        : `#/t/${s(r.slug)}/task-runs`;
+      return `#/a/${slugPath(r.slug)}/followups`;
+    case 'tasks': {
+      const query = new URLSearchParams(Object.entries(r.filter ?? {})).toString();
+      return `#/a/${slugPath(r.slug)}/tasks${query ? `?${query}` : ''}`;
+    }
     case 'taskRun':
-      return `#/t/${s(r.slug)}/task-runs/${s(r.id)}`;
+      return `#/a/${slugPath(r.slug)}/tasks/${s(r.id)}`;
     case 'admin':
-      return r.section ? `#/t/${s(r.slug)}/admin/${s(r.section)}` : `#/t/${s(r.slug)}/admin`;
+      return r.section ? `#/a/${slugPath(r.slug)}/admin/${s(r.section)}` : `#/a/${slugPath(r.slug)}/admin`;
   }
 }

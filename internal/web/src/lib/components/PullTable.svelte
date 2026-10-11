@@ -1,0 +1,110 @@
+<script lang="ts">
+  // One row per pull request: its title over its repository, number and
+  // author; its last review's findings and status; when it last changed.
+  // `selected` marks the keyboard cursor; a click anywhere on a row that is
+  // not a link opens the pull request. With onpick, each row has a checkbox
+  // for a bulk action, picked naming the ones checked by pullKey; a merged
+  // or closed pull request takes no more reviews, so it has none.
+  import { href, navigate } from '../router.svelte';
+  import { pullKey, pullRoute } from '../links';
+  import type { Pull } from '../types';
+  import { noMoreReviews, usd, wholeNumber } from '../format';
+  import Icon from '../Icon.svelte';
+  import { mdiLockOutline } from '../icons';
+  import { lifecycle } from '../lifecycle';
+  import Time from './Time.svelte';
+  import ReviewStatusTile from './ReviewStatusTile.svelte';
+  import SeverityCounts from './SeverityCounts.svelte';
+
+  let {
+    slug,
+    items,
+    selected = -1,
+    picked = [],
+    onpick,
+  }: { slug: string; items: Pull[]; selected?: number; picked?: string[]; onpick?: (keys: string[], on: boolean) => void } = $props();
+
+  const open = $derived(items.filter((p) => p.state === 'open'));
+
+
+  function onRowClick(e: MouseEvent, p: Pull): void {
+    if ((e.target as Element).closest('a, button, input, label') || getSelection()?.toString()) return;
+    navigate(pullRoute(slug, p));
+  }
+</script>
+
+<div class="table-wrap table-card">
+  <table class="data pull-table">
+    <thead>
+      <tr>
+        {#if onpick}
+          <th scope="col" class="pick">
+            <input
+              type="checkbox"
+              aria-label="Select every pull request shown"
+              checked={open.length > 0 && open.every((p) => picked.includes(pullKey(p)))}
+              disabled={open.length === 0}
+              onchange={(e) => onpick(open.map(pullKey), e.currentTarget.checked)}
+            />
+          </th>
+        {/if}
+        <th scope="col">Pull request</th>
+        <th scope="col" title="Blocking, important and nit, in that order">Findings</th>
+        <th scope="col">Last review</th>
+        <th scope="col" class="num" title="Reviews that completed; skipped ones are not counted">Reviews</th>
+        <th scope="col" class="num" title="What every review of the pull request spent">Cost</th>
+        <th scope="col" class="num">Updated</th>
+      </tr>
+    </thead>
+    <tbody class="pull-rows">
+      {#each items as p, i (p.url)}
+        {@const life = lifecycle(p)}
+        <!-- The title is the row's link; the click is a larger target for a pointer. -->
+        <tr class="pull-row" class:selected={i === selected} data-index={i} onclick={(e) => onRowClick(e, p)}>
+          {#if onpick}
+            <td class="pick">
+              {#if p.state === 'open'}
+                <input
+                  type="checkbox"
+                  aria-label="Select {p.repository}#{p.number}"
+                  checked={picked.includes(pullKey(p))}
+                  onchange={(e) => onpick([pullKey(p)], e.currentTarget.checked)}
+                />
+              {:else}
+                <span class="muted" title={`${noMoreReviews(p.merged)}, from its page`}>
+                  <Icon path={mdiLockOutline} size={13} label="Re-run from its page" />
+                </span>
+              {/if}
+            </td>
+          {/if}
+          <td class="pull-main">
+            <a class="pull-title" href={href(pullRoute(slug, p))} aria-current={i === selected ? 'true' : undefined}>
+              <!-- A row marks what is no longer simply open, and only a merge in colour: a list of red marks would shout. -->
+              {#if life.state !== 'open'}<span class="lifecycle tone-{life.state === 'merged' ? life.tone : 'muted'}" title={life.label}><Icon path={life.icon} size={13} label={life.label} /></span>{/if}
+              <span class="pull-text">{p.title}</span>
+            </a>
+            <span class="pull-sub"><span class="mono">{p.repository}</span> · #{p.number} · {p.author}</span>
+          </td>
+          <td>
+            {#if p.lastReview}
+              <SeverityCounts counts={p.lastReview.findings} />
+            {/if}
+          </td>
+          <td>
+            {#if p.lastReview}
+              <ReviewStatusTile status={p.lastReview.status} title="Last review" />
+            {:else}
+              <span class="small muted">not reviewed</span>
+            {/if}
+            {#if p.paused && p.state === 'open'}
+              <span class="badge" title="Automatic reviews are paused: a push is not reviewed until someone asks for a review or resumes them">paused</span>
+            {/if}
+          </td>
+          <td class="num">{wholeNumber(p.reviewCount)}</td>
+          <td class="num">{usd(p.costUsd)}</td>
+          <td class="num"><Time iso={p.updatedAt} /></td>
+        </tr>
+      {/each}
+    </tbody>
+  </table>
+</div>

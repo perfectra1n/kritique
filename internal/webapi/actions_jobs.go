@@ -15,16 +15,16 @@ type JobActions struct {
 }
 
 // Rerun implements Actions.
-func (a JobActions) Rerun(ctx context.Context, tx pgx.Tx, tenantID, repositoryID string, number int) (int64, error) {
-	return jobs.EnqueueRerun(ctx, tx, a.Queue, tenantID, repositoryID, number)
+func (a JobActions) Rerun(ctx context.Context, tx pgx.Tx, accountID, repositoryID string, number int) (int64, error) {
+	return jobs.EnqueueRerun(ctx, tx, a.Queue, accountID, repositoryID, number)
 }
 
 // Cancel implements Actions.
-func (a JobActions) Cancel(ctx context.Context, tx pgx.Tx, reviewID, by string) error {
-	return jobs.RequestCancel(ctx, tx, a.Queue, reviewID, by)
+func (a JobActions) Cancel(ctx context.Context, tx pgx.Tx, reviewID string) error {
+	return jobs.RequestCancel(ctx, tx, a.Queue, reviewID)
 }
 
 // Reindex implements Actions.
-func (a JobActions) Reindex(ctx context.Context, tx pgx.Tx, tenantID, repositoryID string) (int64, error) {
-	return jobs.EnqueueReindex(ctx, tx, a.Queue, tenantID, repositoryID)
+func (a JobActions) Reindex(ctx context.Context, tx pgx.Tx, accountID, repositoryID string) (int64, error) {
+	return jobs.EnqueueReindex(ctx, tx, a.Queue, accountID, repositoryID)
 }

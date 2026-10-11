@@ -1,8 +1,9 @@
-// Package github holds the GitHub App credential machinery copied from
-// konflate: a transport that signs requests as the App with a short-lived
-// JWT, and one that mints, caches and refreshes an installation token. The
-// installation token authenticates API calls and git fetches alike, so an
-// App-only installation needs no personal token.
+// Package github is kritique's forge: the App's credentials, a transport
+// that signs requests as the App with a short-lived JWT and one that mints,
+// caches and refreshes an installation token, the forge.Client over an
+// installation, and the App manifest flow. The installation token
+// authenticates API calls and git fetches alike, so an App-only
+// installation needs no personal token.
 package github
 
 import (
@@ -10,6 +11,7 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,29 +19,64 @@ import (
 	gh "github.com/google/go-github/v92/github"
 )
 
-// App is a GitHub App identity: the client id and private key of one App,
-// against one GitHub host.
+// App is a GitHub App identity: the client id and private key of one App.
 type App struct {
 	clientID string
-	apiBase  string // "" for github.com
+	apiBase  string // "" for api.github.com
 	apps     *gh.Client
+	// limited is the transport under every client of the App, which waits
+	// out a rate limit that resets soon.
+	limited *rateLimitTransport
+
+	// OnRateLimit, when set, is told of every response GitHub refused for a
+	// rate limit: the wait it asked for, and whether the request waited it
+	// out and was sent again. Set it before the App is used.
+	OnRateLimit func(wait time.Duration, waited bool)
+
+	// tokens holds one InstallationTokens per installation, so every
+	// client and listing of an installation shares its token instead of
+	// minting one each.
+	mu     sync.Mutex
+	tokens map[int64]*InstallationTokens
 }
 
 // NewApp parses the App's private key and builds the App-level client used
 // for installation lookup and token minting. apiBase is empty for
-// github.com and "https://host/api/v3" for GitHub Enterprise Server.
+// api.github.com; tests point it at a server of their own.
 func NewApp(clientID, privateKeyPEM, apiBase string) (*App, error) {
 	key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(privateKeyPEM))
 	if err != nil {
 		return nil, fmt.Errorf("github: parse App private key: %w", err)
 	}
 	a := &App{clientID: clientID, apiBase: apiBase}
-	client, err := newClient(&appJWTTransport{base: http.DefaultTransport, clientID: clientID, key: key}, apiBase)
+	a.limited = &rateLimitTransport{base: baseTransport, maxWait: rateLimitMaxWait, observe: a.rateLimited}
+	client, err := newClient(&appJWTTransport{base: a.limited, clientID: clientID, key: key}, apiBase)
 	if err != nil {
 		return nil, err
 	}
 	a.apps = client
 	return a, nil
+}
+
+// responseHeaderTimeout bounds how long a request waits for GitHub to
+// start answering. The leader's poll runs on a context with no deadline,
+// and a worker's job on one of hours, so a server that accepts a request
+// and never answers would otherwise hold either for as long.
+const responseHeaderTimeout = time.Minute
+
+// baseTransport is under every App's clients: the default transport, which
+// bounds the dial and the TLS handshake, with the wait for response headers
+// bounded too. One transport, so every App shares its connection pool.
+var baseTransport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = responseHeaderTimeout
+	return t
+}()
+
+func (a *App) rateLimited(wait time.Duration, waited bool) {
+	if a.OnRateLimit != nil {
+		a.OnRateLimit(wait, waited)
+	}
 }
 
 // Slug returns the App's URL slug, which names the bot user its comments
@@ -55,15 +92,25 @@ func (a *App) Slug(ctx context.Context) (string, error) {
 	return app.GetSlug(), nil
 }
 
-// InstallationTokens returns a token source for one installation. The
-// installation id is known from the installation webhook; when it is not
-// yet known, DiscoverInstallation finds it from a repository the App can see.
+// InstallationTokens returns the token source for one installation, as
+// DiscoverInstallation finds it: the same one on every call, so the token
+// is minted once an hour however often the installation is used.
 func (a *App) InstallationTokens(installationID int64) *InstallationTokens {
-	return &InstallationTokens{apps: a.apps, instID: installationID}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if t, ok := a.tokens[installationID]; ok {
+		return t
+	}
+	if a.tokens == nil {
+		a.tokens = map[int64]*InstallationTokens{}
+	}
+	t := &InstallationTokens{apps: a.apps, instID: installationID}
+	a.tokens[installationID] = t
+	return t
 }
 
 // DiscoverInstallation returns the id of the App's installation on the
-// repository, for installations declared before their webhook arrived.
+// account that owns the repository.
 func (a *App) DiscoverInstallation(ctx context.Context, owner, repo string) (int64, error) {
 	inst, _, err := a.apps.Apps.GetRepositoryInstallation(ctx, owner, repo)
 	if err != nil {
@@ -72,9 +119,108 @@ func (a *App) DiscoverInstallation(ctx context.Context, owner, repo string) (int
 	return inst.GetID(), nil
 }
 
+// Installation is one account the App is installed on.
+type Installation struct {
+	ID int64
+	// Account is the login of the account, AccountType "User" or
+	// "Organization".
+	Account, AccountType string
+	// AllRepositories is whether it covers every repository of the account
+	// rather than those selected.
+	AllRepositories bool
+	Suspended       bool
+	// HTMLURL is the installation's settings page on GitHub.
+	HTMLURL string
+}
+
+// Installations lists every account the App is installed on.
+func (a *App) Installations(ctx context.Context) ([]Installation, error) {
+	var out []Installation
+	for inst, err := range a.apps.Apps.ListInstallationsIter(ctx, &gh.ListOptions{PerPage: 100}) {
+		if err != nil {
+			return nil, fmt.Errorf("github: list App installations: %w", err)
+		}
+		out = append(out, Installation{
+			ID: inst.GetID(), Account: inst.GetAccount().GetLogin(), AccountType: inst.GetAccount().GetType(),
+			AllRepositories: inst.GetRepositorySelection() == "all", Suspended: inst.SuspendedAt != nil, HTMLURL: inst.GetHTMLURL(),
+		})
+	}
+	return out, nil
+}
+
+// Repository is one repository an installation reaches.
+type Repository struct {
+	// Name is the repository's name, FullName "owner/name".
+	Name, FullName, DefaultBranch string
+	Archived, Fork                bool
+}
+
+// Repositories lists every repository installation id reaches, with a
+// token of that installation.
+func (a *App) Repositories(ctx context.Context, id int64) ([]Repository, error) {
+	client, err := a.Client(a.InstallationTokens(id))
+	if err != nil {
+		return nil, err
+	}
+	var out []Repository
+	for r, err := range client.Apps.ListReposIter(ctx, &gh.ListOptions{PerPage: 100}) {
+		if err != nil {
+			return nil, fmt.Errorf("github: list installation %d repositories: %w", id, err)
+		}
+		out = append(out, Repository{
+			Name: r.GetName(), FullName: r.GetFullName(), DefaultBranch: r.GetDefaultBranch(),
+			Archived: r.GetArchived(), Fork: r.GetFork(),
+		})
+	}
+	return out, nil
+}
+
+// AccountRepositories is what an App reaches on one account: whether it
+// is installed there, and the repositories its installation reaches.
+type AccountRepositories struct {
+	Account      string
+	Installed    bool
+	Repositories []Repository
+}
+
+// Reach lists, for each of accounts in order, whether the App is installed
+// there and the repositories it reaches. A suspended installation reaches
+// none: it can mint no token to list them with.
+func (a *App) Reach(ctx context.Context, accounts []string) ([]AccountRepositories, error) {
+	insts, err := a.Installations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AccountRepositories, 0, len(accounts))
+	for _, account := range accounts {
+		entry := AccountRepositories{Account: account, Repositories: []Repository{}}
+		for _, inst := range insts {
+			if inst.Suspended || !strings.EqualFold(inst.Account, account) {
+				continue
+			}
+			repos, err := a.Repositories(ctx, inst.ID)
+			if err != nil {
+				return nil, err
+			}
+			entry.Installed = true
+			entry.Repositories = append(entry.Repositories, repos...)
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+// Uninstall removes the App's installation id.
+func (a *App) Uninstall(ctx context.Context, id int64) error {
+	if _, err := a.apps.Apps.DeleteInstallation(ctx, id); err != nil {
+		return fmt.Errorf("github: uninstall App installation %d: %w", id, err)
+	}
+	return nil
+}
+
 // Client returns a go-github client authenticated as the installation.
 func (a *App) Client(tokens *InstallationTokens) (*gh.Client, error) {
-	return newClient(&installTransport{base: http.DefaultTransport, tokens: tokens}, a.apiBase)
+	return newClient(&installTransport{base: a.limited, tokens: tokens}, a.apiBase)
 }
 
 func newClient(rt http.RoundTripper, apiBase string) (*gh.Client, error) {
@@ -146,10 +292,12 @@ type InstallationTokens struct {
 	mu  sync.Mutex
 	tok string
 	exp time.Time
+	// contentsReadOnly is whether the cached token was minted without
+	// write access to repository contents.
+	contentsReadOnly bool
 }
 
-// Token returns a valid installation token, minting one if needed. It is
-// also what the runner receives as its git credential.
+// Token returns a valid installation token, minting one if needed.
 func (t *InstallationTokens) Token(ctx context.Context) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -161,18 +309,33 @@ func (t *InstallationTokens) Token(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("github: mint installation token for %d: %w", t.instID, err)
 	}
 	t.tok, t.exp = it.GetToken(), it.GetExpiresAt().Time
+	t.contentsReadOnly = it.Permissions != nil && it.Permissions.GetContents() != "write"
 	return t.tok, nil
 }
 
-// ReadOnly mints a token for repo, a repository name without its owner,
-// that can only read its contents (and the metadata every token reads).
-// It is not cached: each is minted for one runner.
+// CanWriteContents reports whether the installation was granted write
+// access to repository contents. A token GitHub minted without saying what
+// it may do counts as one that can.
+func (t *InstallationTokens) CanWriteContents(ctx context.Context) (bool, error) {
+	if _, err := t.Token(ctx); err != nil {
+		return false, err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.contentsReadOnly, nil
+}
+
+// ReadOnly mints a token that can only read repo's contents and metadata,
+// uncached, for a runner: the commands an agent runs there can read it, so
+// it must not carry the App's other permissions or reach its other
+// repositories.
 func (t *InstallationTokens) ReadOnly(ctx context.Context, repo string) (string, error) {
 	it, _, err := t.apps.Apps.CreateInstallationToken(ctx, t.instID, &gh.InstallationTokenOptions{
-		Repositories: []string{repo}, Permissions: &gh.InstallationPermissions{Contents: new("read")},
+		Repositories: []string{repo},
+		Permissions:  &gh.InstallationPermissions{Contents: new("read"), Metadata: new("read")},
 	})
 	if err != nil {
-		return "", fmt.Errorf("github: mint read-only token for %s in %d: %w", repo, t.instID, err)
+		return "", fmt.Errorf("github: mint a read-only token for %s on installation %d: %w", repo, t.instID, err)
 	}
 	return it.GetToken(), nil
 }

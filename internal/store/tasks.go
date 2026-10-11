@@ -31,11 +31,11 @@ func (s TaskRunStatus) Terminal() bool {
 
 // TaskEvent is one row of task_events: a delivery tasks may run on.
 type TaskEvent struct {
-	ID             string
-	TenantID       string
-	InstallationID string
-	RepositoryID   string
-	Forge          string
+	ID           string
+	AccountID    string
+	ConnectionID string
+	RepositoryID string
+	Forge        string
 	// Event is the normalized event (tasks.EventIssue and so on), "" when
 	// the delivery has none.
 	Event         string
@@ -50,8 +50,8 @@ type TaskEvent struct {
 	ReceivedAt time.Time
 }
 
-// InsertTaskEvent records e in tx, which must be scoped to e's tenant, and
-// returns its id, or "" when the installation's delivery is already
+// InsertTaskEvent records e in tx, which must be scoped to e's account, and
+// returns its id, or "" when the connection's delivery is already
 // recorded: a redelivery.
 func InsertTaskEvent(ctx context.Context, tx pgx.Tx, e TaskEvent) (string, error) {
 	payload := e.Payload
@@ -59,11 +59,11 @@ func InsertTaskEvent(ctx context.Context, tx pgx.Tx, e TaskEvent) (string, error
 		payload = json.RawMessage(`{}`)
 	}
 	var id string
-	err := tx.QueryRow(ctx, `INSERT INTO task_events (tenant_id, installation_id, repository_id, forge, event, raw_event, action,
+	err := tx.QueryRow(ctx, `INSERT INTO task_events (account_id, connection_id, repository_id, forge, event, raw_event, action,
 		sender, delivery, subject_kind, subject_number, payload)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
-		ON CONFLICT (installation_id, delivery) WHERE delivery <> '' DO NOTHING RETURNING id`,
-		e.TenantID, e.InstallationID, e.RepositoryID, e.Forge, e.Event, e.RawEvent, e.Action, e.Sender, e.Delivery,
+		ON CONFLICT (connection_id, delivery) WHERE delivery <> '' DO NOTHING RETURNING id`,
+		e.AccountID, e.ConnectionID, e.RepositoryID, e.Forge, e.Event, e.RawEvent, e.Action, e.Sender, e.Delivery,
 		e.SubjectKind, e.SubjectNumber, string(payload)).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
@@ -82,9 +82,9 @@ var ErrTaskEventGone = errors.New("store: task event is gone")
 func LoadTaskEvent(ctx context.Context, tx pgx.Tx, id string) (TaskEvent, error) {
 	e := TaskEvent{ID: id}
 	var payload []byte
-	err := tx.QueryRow(ctx, `SELECT tenant_id, installation_id, repository_id, forge, event, raw_event, action, sender, delivery,
+	err := tx.QueryRow(ctx, `SELECT account_id, connection_id, repository_id, forge, event, raw_event, action, sender, delivery,
 		subject_kind, subject_number, payload, received_at FROM task_events WHERE id = $1`, id).
-		Scan(&e.TenantID, &e.InstallationID, &e.RepositoryID, &e.Forge, &e.Event, &e.RawEvent, &e.Action, &e.Sender, &e.Delivery,
+		Scan(&e.AccountID, &e.ConnectionID, &e.RepositoryID, &e.Forge, &e.Event, &e.RawEvent, &e.Action, &e.Sender, &e.Delivery,
 			&e.SubjectKind, &e.SubjectNumber, &payload, &e.ReceivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return e, ErrTaskEventGone
@@ -104,7 +104,7 @@ func DeleteTaskEvent(ctx context.Context, tx pgx.Tx, id string) error {
 	return nil
 }
 
-// SweepTaskEvents deletes every tenant's task events received more than
+// SweepTaskEvents deletes every account's task events received more than
 // olderThan ago and returns how many it deleted; their runs keep their
 // record. It runs on the owner connection, which row-level security does
 // not restrict. Leader only.
@@ -125,7 +125,7 @@ func (s *Store) SweepTaskEvents(ctx context.Context, olderThan time.Duration) (i
 // TaskRun is one row of task_runs.
 type TaskRun struct {
 	ID            string
-	TenantID      string
+	AccountID     string
 	RepositoryID  string
 	Task          string
 	EventID       string
@@ -149,10 +149,10 @@ type TaskRun struct {
 // reports whether it inserted it: a redelivered dispatch finds the run
 // already there.
 func QueueTaskRun(ctx context.Context, tx pgx.Tx, r TaskRun) (bool, error) {
-	tag, err := tx.Exec(ctx, `INSERT INTO task_runs (tenant_id, repository_id, task, event_id, subject_kind, subject_number, trigger,
+	tag, err := tx.Exec(ctx, `INSERT INTO task_runs (account_id, repository_id, task, event_id, subject_kind, subject_number, trigger,
 		mode, status, config_sha)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'queued', $9) ON CONFLICT (event_id, task) DO NOTHING`,
-		r.TenantID, r.RepositoryID, r.Task, r.EventID, r.SubjectKind, r.SubjectNumber, r.Trigger, r.Mode, r.ConfigSHA)
+		r.AccountID, r.RepositoryID, r.Task, r.EventID, r.SubjectKind, r.SubjectNumber, r.Trigger, r.Mode, r.ConfigSHA)
 	if err != nil {
 		return false, fmt.Errorf("store: queue task run: %w", err)
 	}
@@ -165,9 +165,9 @@ var ErrTaskRunGone = errors.New("store: task run is gone")
 // LoadTaskRun reads the run of task on the event eventID in tx.
 func LoadTaskRun(ctx context.Context, tx pgx.Tx, eventID, task string) (TaskRun, error) {
 	r := TaskRun{EventID: eventID, Task: task}
-	err := tx.QueryRow(ctx, `SELECT id, tenant_id, repository_id, subject_kind, subject_number, trigger, mode, status, reason,
+	err := tx.QueryRow(ctx, `SELECT id, account_id, repository_id, subject_kind, subject_number, trigger, mode, status, reason,
 		config_sha, created_at, started_at, answered_at, runner_started_at FROM task_runs WHERE event_id = $1 AND task = $2`, eventID, task).
-		Scan(&r.ID, &r.TenantID, &r.RepositoryID, &r.SubjectKind, &r.SubjectNumber, &r.Trigger, &r.Mode, &r.Status, &r.Reason,
+		Scan(&r.ID, &r.AccountID, &r.RepositoryID, &r.SubjectKind, &r.SubjectNumber, &r.Trigger, &r.Mode, &r.Status, &r.Reason,
 			&r.ConfigSHA, &r.CreatedAt, &r.StartedAt, &r.AnsweredAt, &r.RunnerStartedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, ErrTaskRunGone
@@ -195,12 +195,12 @@ type TaskUsage struct {
 }
 
 // ChargeTaskRun records the usage of the run id's model calls in tx, which
-// must be scoped to tenantID, where the tenant's caps count it, and, when
+// must be scoped to accountID, where the account's caps count it, and, when
 // answered, marks the run answered: from then on it is never run again.
-func ChargeTaskRun(ctx context.Context, tx pgx.Tx, tenantID, repositoryID, id string, usage []TaskUsage, answered bool) error {
+func ChargeTaskRun(ctx context.Context, tx pgx.Tx, accountID, repositoryID, id string, usage []TaskUsage, answered bool) error {
 	for _, u := range usage {
-		if _, err := tx.Exec(ctx, `INSERT INTO usage (tenant_id, repository_id, role, model, upstream, input_tokens, output_tokens, cost_usd)
-			VALUES ($1, $2, 'task', $3, $4, $5, $6, $7)`, tenantID, repositoryID, u.Model, u.Upstream, u.Input, u.Output, u.CostUSD); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO usage (account_id, repository_id, role, model, upstream, input_tokens, output_tokens, cost_usd)
+			VALUES ($1, $2, 'task', $3, $4, $5, $6, $7)`, accountID, repositoryID, u.Model, u.Upstream, u.Input, u.Output, u.CostUSD); err != nil {
 			return fmt.Errorf("store: charge task run: %w", err)
 		}
 	}
@@ -291,13 +291,12 @@ func CountTaskRuns(
 }
 
 // InsertTaskRunner records a runner run of kind task in tx for the task run
-// id, links the task run to it and returns its id. A retried job links the
-// run it makes last.
-func InsertTaskRunner(ctx context.Context, tx pgx.Tx, tenantID, taskRunID string) (string, error) {
-	var runID string
-	err := tx.QueryRow(ctx, `INSERT INTO runner_runs (tenant_id, kind) VALUES ($1, 'task') RETURNING id`, tenantID).Scan(&runID)
+// id, started by River job jobID, links the task run to it and returns its
+// id. A retried job links the run it makes last.
+func InsertTaskRunner(ctx context.Context, tx pgx.Tx, accountID, taskRunID string, jobID int64) (string, error) {
+	runID, err := InsertRunnerRun(ctx, tx, accountID, RunnerKindTask, "", jobID)
 	if err != nil {
-		return "", fmt.Errorf("store: insert task runner run: %w", err)
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE task_runs SET runner_run_id = $2 WHERE id = $1`, taskRunID, runID); err != nil {
 		return "", fmt.Errorf("store: link task runner run: %w", err)

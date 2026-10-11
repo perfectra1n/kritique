@@ -8,46 +8,55 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
-const onboardTenants = twoTenants + `
-  - slug: east
-    installations:
-      - name: east-bot
-        forge: forgejo
-        account: east
-        token: { env: KRITIQUE_TEST_TOKEN }
-        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
-    repositories:
-      - name: east/busy
-      - name: east/quiet
-      - name: east/later
-      - name: east/rebuilt
-      - name: east/skipped
-      - name: east/failed
-      - name: east/queued
-      - name: east/indexed
-      - name: east/off
-        enabled: false
-  - slug: west
-    installations:
-      - name: west-bot
-        forge: forgejo
-        account: west
-        token: { env: KRITIQUE_TEST_TOKEN }
-        webhookSecret: { env: KRITIQUE_TEST_TOKEN }
-    repositories:
-      - name: west/one
-      - name: west/old-failure
+const onboardAccounts = `
+apps:
+  alpha-bot:
+    accounts: [alpha]
+    clientId: Iv1.test
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
+  beta-bot:
+    accounts: [beta]
+    clientId: Iv1.test
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
+  east-bot:
+    accounts: [east]
+    clientId: Iv1.test
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
+  west-bot:
+    accounts: [west]
+    clientId: Iv1.test
+    privateKey: { env: KRITIQUE_TEST_TOKEN }
+    webhookSecret: { env: KRITIQUE_TEST_TOKEN }
+repositories:
+  alpha/one: {}
+  alpha/two: {}
+  east/busy: {}
+  east/quiet: {}
+  east/later: {}
+  east/rebuilt: {}
+  east/skipped: {}
+  east/failed: {}
+  east/queued: {}
+  east/indexed: {}
+  east/off: {}
+  west/one: {}
+  west/old-failure: {}
 `
 
 // TestOnboardCandidates checks which repositories the onboarding feeder is
-// offered and in what order: tenants take turns, and a tenant's repositories
+// offered and in what order: accounts take turns, and an account's repositories
 // whose pull requests moved last go first.
 func TestOnboardCandidates(t *testing.T) {
 	s := openStore(t)
-	ctx := context.Background()
-	if err := s.ApplyConfig(ctx, parse(t, onboardTenants), "test"); err != nil {
+	ctx := t.Context()
+	if err := s.ApplyConfig(ctx, parse(t, onboardAccounts)); err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
 	ids := map[string]string{}
@@ -72,6 +81,8 @@ func TestOnboardCandidates(t *testing.T) {
 			t.Fatalf("%s: %v", sql, err)
 		}
 	}
+	// The App lost east/off.
+	exec(`UPDATE repositories SET enabled = false, disabled_at = now() WHERE id = $1`, ids["east/off"])
 	t.Cleanup(func() {
 		_, _ = s.owner.Exec(context.Background(), `DELETE FROM river_job WHERE args->>'repository_id' = ANY($1)`, slices.Collect(maps.Values(ids)))
 	})
@@ -80,12 +91,12 @@ func TestOnboardCandidates(t *testing.T) {
 		exec(`UPDATE repositories SET created_at = now() - $2::interval WHERE id = $1`, ids[name], age)
 	}
 	for name, age := range map[string]string{"east/busy": "1 minute", "west/one": "1 day"} {
-		exec(`INSERT INTO pull_requests (tenant_id, repository_id, number, head_sha, updated_at)
-			SELECT tenant_id, id, 1, 'abc', now() - $2::interval FROM repositories WHERE id = $1`, ids[name], age)
+		exec(`INSERT INTO pull_requests (account_id, repository_id, number, head_sha, updated_at)
+			SELECT account_id, id, 1, 'abc', now() - $2::interval FROM repositories WHERE id = $1`, ids[name], age)
 	}
 	exec(`WITH g AS (
-			INSERT INTO index_runs (tenant_id, repository_id, commit_sha, embed_model, embed_dims, mode, status)
-			SELECT tenant_id, id, 'abc', 'm', 8, 'full', 'completed' FROM repositories WHERE id = $1 RETURNING id, repository_id)
+			INSERT INTO index_runs (account_id, repository_id, commit_sha, embed_model, embed_dims, mode, status)
+			SELECT account_id, id, 'abc', 'm', 8, 'full', 'completed' FROM repositories WHERE id = $1 RETURNING id, repository_id)
 		UPDATE repositories r SET active_index_run_id = g.id FROM g WHERE r.id = g.repository_id`, ids["east/indexed"])
 
 	before, err := s.OnboardingInFlight(ctx)
@@ -109,8 +120,8 @@ func TestOnboardCandidates(t *testing.T) {
 	// An onboarding that built an index since dropped, as a model change
 	// drops them all, is no reason to wait.
 	job("east/rebuilt", "onboard", "completed", "5 minutes")
-	exec(`INSERT INTO index_runs (tenant_id, repository_id, commit_sha, embed_model, embed_dims, mode, status)
-		SELECT tenant_id, id, 'abc', 'm', 8, 'full', 'superseded' FROM repositories WHERE id = $1`, ids["east/rebuilt"])
+	exec(`INSERT INTO index_runs (account_id, repository_id, commit_sha, embed_model, embed_dims, mode, status)
+		SELECT account_id, id, 'abc', 'm', 8, 'full', 'superseded' FROM repositories WHERE id = $1`, ids["east/rebuilt"])
 	after, err := s.OnboardingInFlight(ctx)
 	if err != nil || after != before {
 		t.Fatalf("OnboardingInFlight = %d, %v; want %d: pushes and finished jobs are not onboarding", after, err, before)
@@ -120,7 +131,8 @@ func TestOnboardCandidates(t *testing.T) {
 		t.Fatalf("OnboardingInFlight = %d, %v; want %d", after, err, before+1)
 	}
 
-	refs, err := s.OnboardCandidates(ctx, 1000, time.Hour)
+	all := func(string, string, configfile.RepoTraits) bool { return true }
+	refs, err := s.OnboardCandidates(ctx, 1000, time.Hour, all)
 	if err != nil {
 		t.Fatalf("OnboardCandidates: %v", err)
 	}
@@ -134,7 +146,29 @@ func TestOnboardCandidates(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("candidates = %v, want %v", got, want)
 	}
-	if limited, err := s.OnboardCandidates(ctx, 1, time.Hour); err != nil || len(limited) != 1 {
+	if limited, err := s.OnboardCandidates(ctx, 1, time.Hour, all); err != nil || len(limited) != 1 {
 		t.Fatalf("OnboardCandidates(1) = %v, %v", limited, err)
+	}
+	// A repository its settings leave off is passed over, and takes none
+	// of the limit.
+	ours := func(_, name string, _ configfile.RepoTraits) bool {
+		_, ok := ids[name]
+		return ok && name != "east/busy"
+	}
+	if limited, err := s.OnboardCandidates(ctx, 1, time.Hour, ours); err != nil || len(limited) != 1 || names[limited[0].ID] != "west/one" {
+		t.Fatalf("OnboardCandidates(1, without east/busy) = %v, %v; want west/one", limited, err)
+	}
+	// The callback sees what the forge says of each: here, that the
+	// busiest is a fork.
+	exec(`UPDATE repositories SET fork = true WHERE id = $1`, ids["east/busy"])
+	t.Cleanup(func() {
+		_, _ = s.owner.Exec(context.Background(), `UPDATE repositories SET fork = false WHERE id = $1`, ids["east/busy"])
+	})
+	sources := func(_, name string, traits configfile.RepoTraits) bool {
+		_, ok := ids[name]
+		return ok && !traits.Fork
+	}
+	if limited, err := s.OnboardCandidates(ctx, 1, time.Hour, sources); err != nil || len(limited) != 1 || names[limited[0].ID] != "west/one" {
+		t.Fatalf("OnboardCandidates(1, no forks) = %v, %v; want west/one", limited, err)
 	}
 }

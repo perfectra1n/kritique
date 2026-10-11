@@ -1,0 +1,8 @@
+{
+  "webUrl": "https://kritique.example",
+  "hooksUrl": "https://kritique.example/hooks/",
+  "connections": ["alpha-bot"],
+  "forges": ["github"],
+  "reviewModel": "openrouter/acme-large",
+  "embedding": false
+}

@@ -1,7 +1,6 @@
 // Central icon registry. Importing only the names we use keeps the bundle
-// small (Rollup tree-shakes @mdi/js and simple-icons to just these paths).
-// Grows as later tasks add pages; keep this list scoped to what's actually
-// referenced from src/.
+// small (Rollup tree-shakes @mdi/js and simple-icons to just these paths),
+// so the list holds only what src/ references.
 
 export {
   mdiThemeLightDark,
@@ -15,35 +14,43 @@ export {
   mdiKeyboardOutline,
   mdiLogout,
   mdiConsoleLine,
-  mdiViewDashboardOutline,
   mdiViewGridOutline,
   mdiSourceRepository,
   mdiCurrencyUsd,
   mdiClipboardTextClockOutline,
-  mdiCheckboxMarkedCircleAutoOutline,
   mdiCogOutline,
   mdiLogin,
   mdiContentCopy,
   mdiCheck,
   mdiChevronRight,
   mdiOpenInNew,
-  mdiRefresh,
+  mdiUnfoldMoreHorizontal,
+  mdiTuneVariant,
+  mdiProgressClock,
+  mdiAlertCircleOutline,
+  mdiGaugeFull,
+  mdiDebugStepOver,
+  mdiSwapHorizontal,
+  mdiCancel,
+  mdiSourceMerge,
+  mdiLockOutline,
+  mdiSourceBranchRemove,
+  mdiFileDocumentEditOutline,
+  mdiCircleOutline,
+  mdiBugOutline,
+  mdiChartBoxOutline,
+  mdiScaleBalance,
+  mdiCheckDecagramOutline,
+  mdiFileDocumentOutline,
+  mdiThumbUpOutline,
+  mdiThumbDownOutline,
+  mdiRobotOutline,
 } from '@mdi/js';
 
-import { siForgejo, siGitea, siGithub, siGitlab } from 'simple-icons';
+import { siForgejo, siGitea, siGithub } from 'simple-icons';
+import type { Forge } from './types';
 
-interface BrandIcon {
-  path: string;
-  hex: string;
-  title: string;
-}
+export const githubIcon = siGithub.path;
 
-// Forge brand logos, keyed by the forge kind a tenant/repo is configured
-// with (github | gitlab | forgejo | gitea).
-export const forgeIcon: Record<string, BrandIcon> = {
-  github: siGithub,
-  gitlab: siGitlab,
-  forgejo: siForgejo,
-  gitea: siGitea,
-};
-
+// forgeIcon is each forge's mark.
+export const forgeIcon: Record<Forge, string> = { github: siGithub.path, forgejo: siForgejo.path, gitea: siGitea.path };

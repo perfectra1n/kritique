@@ -95,13 +95,13 @@ func eventSubject(ev webhook.Event) *tasks.Subject {
 // does not report drafts on its issues API would otherwise hide it.
 func Subject(i forge.Issue, raw map[string]any) *tasks.Subject {
 	kind := tasks.SubjectIssue
-	if i.IsPull {
+	if i.PullRequest {
 		kind = tasks.SubjectPull
 	}
 	return &tasks.Subject{
 		Kind: kind, Number: i.Number, Title: i.Title, Body: i.Body, State: i.State, Author: i.Author, URL: i.URL,
 		Labels: slices.Clone(i.Labels), Assignees: slices.Clone(i.Assignees),
-		Draft: i.IsPull && (i.Draft || rawDraft(raw, i.Number)),
+		Draft: i.PullRequest && (i.Draft || rawDraft(raw, i.Number)),
 	}
 }
 

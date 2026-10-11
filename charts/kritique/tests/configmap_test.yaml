@@ -15,14 +15,14 @@ tests:
           value: RELEASE-NAME-kritique
       - matchRegex:
           path: data["config.yaml"]
-          pattern: "review: openrouter/openai/gpt-6-sol"
+          pattern: "clientId: Iv1.example"
       - matchRegex:
           path: data["config.yaml"]
-          pattern: "filter: "
+          pattern: "env: GITHUB_APP_PRIVATE_KEY"
 
   - it: renders nothing when an existing ConfigMap is named
     set:
-      config.existingConfigMap: my-config
+      existingConfigMap: my-config
     asserts:
       - hasDocuments:
           count: 0

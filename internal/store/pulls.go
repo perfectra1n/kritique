@@ -1,0 +1,348 @@
+package store
+
+import (
+	"cmp"
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/perfectra1n/kritique/internal/configfile"
+	"github.com/perfectra1n/kritique/internal/repoconfig"
+)
+
+// PullRequestRow is a pull request as a webhook or a poll reports it.
+type PullRequestRow struct {
+	AccountID, RepositoryID          string
+	Number                           int
+	Title, Author                    string
+	AuthorIsBot, Draft, Fork, Merged bool
+	// State is open or closed.
+	State                          string
+	HeadRef, HeadSHA, BaseRef, URL string
+	Body                           string
+	OpenedAt                       time.Time
+	// UpdatedAt is when the forge last changed the pull request, zero when
+	// the event did not say.
+	UpdatedAt time.Time
+	ClosedAt  *time.Time
+	Labels    json.RawMessage
+}
+
+// UpsertPullRequest records a pull request with what the forge says of it,
+// and reports whether it did: an event the forge changed the pull request
+// after, by its UpdatedAt, is stale and leaves the row alone, so a delivery
+// that arrives late or again cannot rewind the head. An event with no
+// UpdatedAt always applies.
+func UpsertPullRequest(ctx context.Context, tx pgx.Tx, p PullRequestRow) (bool, error) {
+	var opened, updated any
+	if !p.OpenedAt.IsZero() {
+		opened = p.OpenedAt
+	}
+	if !p.UpdatedAt.IsZero() {
+		updated = p.UpdatedAt
+	}
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO pull_requests (account_id, repository_id, number, title, author, author_is_bot, draft, fork, state,
+			head_ref, head_sha, base_ref, url, body, opened_at, labels, merged, closed_at, forge_updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		ON CONFLICT (repository_id, number) DO UPDATE SET
+			title = EXCLUDED.title, author = EXCLUDED.author, author_is_bot = EXCLUDED.author_is_bot, draft = EXCLUDED.draft,
+			fork = EXCLUDED.fork, state = EXCLUDED.state, head_ref = EXCLUDED.head_ref, head_sha = EXCLUDED.head_sha,
+			base_ref = EXCLUDED.base_ref, url = EXCLUDED.url, body = EXCLUDED.body,
+			labels = EXCLUDED.labels, merged = EXCLUDED.merged, closed_at = EXCLUDED.closed_at,
+			forge_updated_at = coalesce(EXCLUDED.forge_updated_at, pull_requests.forge_updated_at), updated_at = now()
+		WHERE EXCLUDED.forge_updated_at IS NULL OR pull_requests.forge_updated_at IS NULL
+			OR EXCLUDED.forge_updated_at >= pull_requests.forge_updated_at`,
+		p.AccountID, p.RepositoryID, p.Number, p.Title, p.Author, p.AuthorIsBot, p.Draft, p.Fork, cmp.Or(p.State, "open"),
+		p.HeadRef, p.HeadSHA, p.BaseRef, p.URL, p.Body, opened, p.Labels, p.Merged, p.ClosedAt, updated)
+	if err != nil {
+		return false, fmt.Errorf("store: upsert pull request: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ClosePullRequest records a pull request as closed, merged or not, when
+// the forge says it closed; a nil closedAt is now. A zero updatedAt always
+// applies; otherwise, as with UpsertPullRequest, an event older than the
+// row leaves it alone.
+func ClosePullRequest(
+	ctx context.Context, tx pgx.Tx, repositoryID string, number int, merged bool, closedAt *time.Time, updatedAt time.Time,
+) error {
+	var updated any
+	if !updatedAt.IsZero() {
+		updated = updatedAt
+	}
+	if _, err := tx.Exec(ctx, `UPDATE pull_requests SET state = 'closed', merged = $3, closed_at = coalesce($4, now()),
+		forge_updated_at = coalesce($5, forge_updated_at), updated_at = now()
+		WHERE repository_id = $1 AND number = $2 AND ($5::timestamptz IS NULL OR forge_updated_at IS NULL OR $5 >= forge_updated_at)`,
+		repositoryID, number, merged, closedAt, updated); err != nil {
+		return fmt.Errorf("store: close pull request: %w", err)
+	}
+	return nil
+}
+
+// OpenPullRequests lists the numbers of the repository's pull requests
+// held as open, lowest first.
+func OpenPullRequests(ctx context.Context, tx pgx.Tx, repositoryID string) ([]int, error) {
+	rows, err := tx.Query(ctx, `SELECT number FROM pull_requests WHERE repository_id = $1 AND state = 'open' ORDER BY number`, repositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list open pull requests: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[int])
+	if err != nil {
+		return nil, fmt.Errorf("store: list open pull requests: %w", err)
+	}
+	return out, nil
+}
+
+// PullRequestPaused reports whether the pull request's automatic reviews
+// are paused.
+func PullRequestPaused(ctx context.Context, tx pgx.Tx, repositoryID string, number int) (bool, error) {
+	var paused bool
+	if err := tx.QueryRow(ctx, `SELECT paused FROM pull_requests WHERE repository_id = $1 AND number = $2`, repositoryID, number).
+		Scan(&paused); err != nil {
+		return false, fmt.Errorf("store: read pull request pause: %w", err)
+	}
+	return paused, nil
+}
+
+// PausePullRequest pauses or resumes the pull request's automatic reviews;
+// resuming starts its count of automatic reviews over.
+func PausePullRequest(ctx context.Context, tx pgx.Tx, pullRequestID string, paused bool) error {
+	if _, err := tx.Exec(ctx, `UPDATE pull_requests SET paused = $2, auto_reviews = CASE WHEN $2 THEN auto_reviews ELSE 0 END,
+		updated_at = now() WHERE id = $1`, pullRequestID, paused); err != nil {
+		return fmt.Errorf("store: pause pull request: %w", err)
+	}
+	return nil
+}
+
+// AutoReviewPauses reports whether counting one more automatic review of
+// the pull request would pause it: it is not paused yet, and the count
+// would reach maxAuto, when that is positive. What CountAutoReview would
+// report, read before the review is posted so its summary can say so.
+func AutoReviewPauses(ctx context.Context, tx pgx.Tx, pullRequestID string, maxAuto int) (bool, error) {
+	var pauses bool
+	if err := tx.QueryRow(ctx, `SELECT NOT paused AND $2 > 0 AND auto_reviews + 1 >= $2 FROM pull_requests WHERE id = $1`,
+		pullRequestID, maxAuto).Scan(&pauses); err != nil {
+		return false, fmt.Errorf("store: read automatic reviews: %w", err)
+	}
+	return pauses, nil
+}
+
+// CountAutoReview counts one automatic review of the pull request, and
+// pauses it when pause is set: when the review's summary announced the
+// pause AutoReviewPauses foretold. Two reviews counted at once may both
+// have been told no pause; the count then passes the limit unpaused, and
+// the next review announces the pause rather than one going unannounced.
+// It reports whether this review paused the pull request.
+func CountAutoReview(ctx context.Context, tx pgx.Tx, pullRequestID string, pause bool) (bool, error) {
+	var pausedNow bool
+	if err := tx.QueryRow(ctx, `WITH before AS (SELECT id, paused FROM pull_requests WHERE id = $1 FOR UPDATE)
+		UPDATE pull_requests p SET auto_reviews = p.auto_reviews + 1, paused = p.paused OR $2, updated_at = now()
+		FROM before WHERE p.id = before.id RETURNING p.paused AND NOT before.paused`,
+		pullRequestID, pause).Scan(&pausedNow); err != nil {
+		return false, fmt.Errorf("store: count automatic review: %w", err)
+	}
+	return pausedNow, nil
+}
+
+// ReviewedStatuses are the review statuses under which a head was
+// reviewed: an event for it again (a redelivery, a reopen) starts nothing.
+var ReviewedStatuses = []ReviewStatus{ReviewCompleted, ReviewCapped}
+
+// pollSettledStatuses are the review statuses under which a head's latest
+// review settles it for a poll: a skip the repository's own settings
+// decided, and a cancellation someone asked for, each only until a later
+// review of the head ends otherwise.
+var pollSettledStatuses = []ReviewStatus{ReviewSkipped, ReviewCanceled}
+
+// pollFailedReviews is how many failed reviews of a head settle it for a
+// poll. A failed review's own comment moves the pull request, so the next
+// poll lists it again and makes up for a failure that does not repeat; one
+// that does is the review's own, and would otherwise run on every poll
+// until the day's cap.
+const pollFailedReviews = 2
+
+// headReviews selects the statuses of the reviews of a pull request's head,
+// by repository ($1), number ($2) and head ($3).
+const headReviews = `SELECT r.status, r.skip_reason, r.created_at FROM reviews r JOIN pull_requests p ON p.id = r.pull_request_id
+	WHERE p.repository_id = $1 AND p.number = $2 AND r.head_sha = $3`
+
+// HeadReviewed reports whether a review of the pull request's head ended in
+// one of ReviewedStatuses.
+func HeadReviewed(ctx context.Context, tx pgx.Tx, repositoryID string, number int, headSHA string) (bool, error) {
+	var reviewed bool
+	if err := tx.QueryRow(ctx, `WITH head AS (`+headReviews+`)
+		SELECT EXISTS (SELECT 1 FROM head WHERE status = ANY($4))`,
+		repositoryID, number, headSHA, ReviewedStatuses).Scan(&reviewed); err != nil {
+		return false, fmt.Errorf("store: read reviews of the head: %w", err)
+	}
+	return reviewed, nil
+}
+
+// PollSettled reports whether the pull request's head needs nothing from a
+// poll, which lists a pull request whenever anything about it moved: a
+// review of it ended in one of ReviewedStatuses, its latest one in one of
+// pollSettledStatuses, or pollFailedReviews reviews of it failed. A
+// superseded review leaves the head unreviewed, so the poll picks it up
+// again.
+func PollSettled(ctx context.Context, tx pgx.Tx, repositoryID string, number int, headSHA string) (bool, error) {
+	var settled bool
+	if err := tx.QueryRow(ctx, `WITH head AS (`+headReviews+`)
+		SELECT EXISTS (SELECT 1 FROM head WHERE status = ANY($4))
+			OR coalesce((SELECT status = ANY($5) FROM head ORDER BY created_at DESC LIMIT 1), false)
+			OR (SELECT count(*) FROM head WHERE status = $6) >= $7`,
+		repositoryID, number, headSHA, ReviewedStatuses, pollSettledStatuses, ReviewFailed, pollFailedReviews).Scan(&settled); err != nil {
+		return false, fmt.Errorf("store: read reviews of the head: %w", err)
+	}
+	return settled, nil
+}
+
+// LabelSettled reports whether the pull request's head needs nothing from a
+// label change: a review of it completed or was capped, or its latest one
+// was canceled or skipped for anything but the repository's filter, the
+// one skip a label can lift.
+func LabelSettled(ctx context.Context, tx pgx.Tx, repositoryID string, number int, headSHA string) (bool, error) {
+	var settled bool
+	if err := tx.QueryRow(ctx, `WITH head AS (`+headReviews+`)
+		SELECT EXISTS (SELECT 1 FROM head WHERE status = ANY($4))
+			OR coalesce((SELECT status = $5 OR (status = $6 AND skip_reason <> $7) FROM head ORDER BY created_at DESC LIMIT 1), false)`,
+		repositoryID, number, headSHA, ReviewedStatuses, ReviewCanceled, ReviewSkipped, string(repoconfig.SkipFiltered)).
+		Scan(&settled); err != nil {
+		return false, fmt.Errorf("store: read reviews of the head: %w", err)
+	}
+	return settled, nil
+}
+
+// RepositoryIndexed reports whether the repository has an active index
+// generation.
+func RepositoryIndexed(ctx context.Context, tx pgx.Tx, repositoryID string) (bool, error) {
+	var indexed bool
+	if err := tx.QueryRow(ctx, `SELECT active_index_run_id IS NOT NULL FROM repositories WHERE id = $1`, repositoryID).
+		Scan(&indexed); err != nil {
+		return false, fmt.Errorf("store: read index state: %w", err)
+	}
+	return indexed, nil
+}
+
+// DisableForgeRepositories disables the forge-reported repositories the
+// App no longer reaches: the one named by repositoryID, or every one of
+// the account when repositoryID is "". Repositories the configuration
+// lists are left alone.
+func DisableForgeRepositories(ctx context.Context, tx pgx.Tx, accountID, repositoryID string) error {
+	if _, err := tx.Exec(ctx, `UPDATE repositories SET enabled = false, disabled_at = coalesce(disabled_at, now()), updated_at = now()
+		WHERE account_id = $1 AND managed_by = 'forge' AND ($2 = '' OR id = $2::uuid)`, accountID, repositoryID); err != nil {
+		return fmt.Errorf("store: disable repositories: %w", err)
+	}
+	return nil
+}
+
+// PollRepo is one enabled repository as a poll sees it. IndexedCommit is
+// the commit its active index generation covers, "" when it has none.
+type PollRepo struct {
+	Name, DefaultBranch, IndexedCommit string
+	Traits                             configfile.RepoTraits
+}
+
+// PollRepositories lists the account's enabled repositories, by name.
+func PollRepositories(ctx context.Context, tx pgx.Tx) ([]PollRepo, error) {
+	rows, err := tx.Query(ctx, `SELECT r.name, r.default_branch, coalesce(g.commit_sha, ''), r.archived, r.fork, r.turned_on
+		FROM repositories r LEFT JOIN index_runs g ON g.id = r.active_index_run_id
+		WHERE r.enabled ORDER BY r.name`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list repositories to poll: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (PollRepo, error) {
+		var r PollRepo
+		err := row.Scan(&r.Name, &r.DefaultBranch, &r.IndexedCommit, &r.Traits.Archived, &r.Traits.Fork, &r.Traits.TurnedOn)
+		return r, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: list repositories to poll: %w", err)
+	}
+	return out, nil
+}
+
+// PollState is what a poll builds on: when the account became known, when
+// it was last polled, and when its App's webhook last delivered, nil for
+// never.
+type PollState struct {
+	Known             time.Time
+	Polled, Delivered *time.Time
+}
+
+// ReadPollState reads the account's poll state against its App.
+func ReadPollState(ctx context.Context, tx pgx.Tx, accountID, connectionID string) (PollState, error) {
+	var s PollState
+	if err := tx.QueryRow(ctx, `SELECT a.created_at, s.last_polled_at, c.last_webhook_at FROM accounts a
+		CROSS JOIN connections c LEFT JOIN poll_state s ON s.account_id = a.id
+		WHERE a.id = $1 AND c.id = $2`, accountID, connectionID).Scan(&s.Known, &s.Polled, &s.Delivered); err != nil {
+		return s, fmt.Errorf("store: read poll state: %w", err)
+	}
+	return s, nil
+}
+
+// RecordPoll records when the account was last polled.
+func RecordPoll(ctx context.Context, tx pgx.Tx, accountID string, at time.Time) error {
+	if _, err := tx.Exec(ctx, `INSERT INTO poll_state (account_id, last_polled_at) VALUES ($1, $2)
+		ON CONFLICT (account_id) DO UPDATE SET last_polled_at = excluded.last_polled_at, updated_at = now()`, accountID, at); err != nil {
+		return fmt.Errorf("store: record poll: %w", err)
+	}
+	return nil
+}
+
+// ReviewedPull is a pull request with inline findings on the forge.
+type ReviewedPull struct {
+	ID, Repository string
+	Number         int
+}
+
+// RecentlyReviewedPulls lists up to limit pull requests with inline
+// findings from reviews since the given time, the most recently reviewed
+// first.
+func RecentlyReviewedPulls(ctx context.Context, tx pgx.Tx, since time.Time, limit int) ([]ReviewedPull, error) {
+	rows, err := tx.Query(ctx, `SELECT p.id, r.name, p.number FROM findings f
+		JOIN reviews v ON v.id = f.review_id JOIN pull_requests p ON p.id = v.pull_request_id
+		JOIN repositories r ON r.id = p.repository_id
+		WHERE f.forge_comment_id IS NOT NULL AND v.created_at > $1
+		GROUP BY p.id, r.name, p.number ORDER BY max(v.created_at) DESC LIMIT $2`, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: list reviewed pull requests: %w", err)
+	}
+	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (ReviewedPull, error) {
+		var p ReviewedPull
+		err := row.Scan(&p.ID, &p.Repository, &p.Number)
+		return p, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: list reviewed pull requests: %w", err)
+	}
+	return out, nil
+}
+
+// Reaction is the reactions on one inline comment of the forge.
+type Reaction struct {
+	CommentID int64
+	Up, Down  int
+}
+
+// RecordReactions writes the reactions of the pull request's inline
+// findings, where they changed.
+func RecordReactions(ctx context.Context, tx pgx.Tx, pullRequestID string, reactions []Reaction) error {
+	ids := make([]int64, len(reactions))
+	up := make([]int, len(reactions))
+	down := make([]int, len(reactions))
+	for i, r := range reactions {
+		ids[i], up[i], down[i] = r.CommentID, r.Up, r.Down
+	}
+	if _, err := tx.Exec(ctx, `UPDATE findings f SET reactions_up = x.up, reactions_down = x.down
+		FROM reviews v, unnest($2::bigint[], $3::int[], $4::int[]) AS x(id, up, down)
+		WHERE v.id = f.review_id AND v.pull_request_id = $1 AND f.forge_comment_id = x.id
+			AND (f.reactions_up, f.reactions_down) IS DISTINCT FROM (x.up, x.down)`, pullRequestID, ids, up, down); err != nil {
+		return fmt.Errorf("store: record reactions: %w", err)
+	}
+	return nil
+}

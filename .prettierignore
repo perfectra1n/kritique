@@ -3,3 +3,6 @@ CHANGELOG.md
 .release-please-manifest.json
 charts/kritique/README.md
 charts/kritique/values.schema.json
+# The docs keep their hand-wrapped layout; formatting them would churn every
+# page on each change.
+docs/

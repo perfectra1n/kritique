@@ -1,97 +1,125 @@
 package configfile
 
 import (
+	"cmp"
+	"maps"
 	"reflect"
 	"slices"
-	"time"
+	"strings"
+
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
-// Tenant returns the tenant with the given slug.
-func (f *File) Tenant(slug string) (*Tenant, bool) {
-	for i := range f.Tenants {
-		if f.Tenants[i].Slug == slug {
-			return &f.Tenants[i], true
+// Account returns the running account name on forge.
+func (f *File) Account(forge Forge, name string) (*Account, bool) {
+	key := AccountKey(forge, name)
+	for i := range f.Accounts {
+		if f.Accounts[i].Key() == key {
+			return &f.Accounts[i], true
 		}
 	}
 	return nil, false
 }
 
-// Installation returns the installation with the given name and the tenant
-// that owns it. Names are unique across the file, so this is how the ingest
-// role turns a hook path into a webhook secret.
-func (f *File) Installation(name string) (*Installation, *Tenant, bool) {
-	for ti := range f.Tenants {
-		t := &f.Tenants[ti]
-		for ii := range t.Installations {
-			if t.Installations[ii].Name == name {
-				return &t.Installations[ii], t, true
-			}
+// AccountByID returns the running account whose id is id.
+func (f *File) AccountByID(id string) (*Account, bool) {
+	for i := range f.Accounts {
+		if f.Accounts[i].ID() == id {
+			return &f.Accounts[i], true
 		}
 	}
-	return nil, nil, false
+	return nil, false
 }
 
-// InstallationFor returns the tenant's installation a repository entry
-// belongs to: the one it names, or else the only one whose account owns
-// it. It is nil when none matches, or when several do and the entry names
-// none of them.
-func (f *File) InstallationFor(t *Tenant, r *Repository) *Installation {
-	in, err := t.repositoryInstallation(r, "")
-	if err != nil {
-		return nil
-	}
-	return in
-}
-
-// Settings resolves the effective settings for the repository "owner/repo"
-// of a tenant, reached through the named installation. Layers apply in one
-// direction: defaults, then the tenant, then the repository entry bound to
-// that installation, if one exists. A repository not listed under the
-// tenant gets the tenant's settings and is enabled; empty installation and
-// repo give the tenant's settings alone.
-func (f *File) Settings(t *Tenant, installation, repo string) Settings {
-	s := Settings{
-		Enabled:     true,
-		Ignore:      append([]string(nil), DefaultIgnore...),
-		Mode:        ReviewSingle,
-		Agent:       DefaultAgent,
-		Incremental: IncrementalSettings{MaxDeltaFiles: DefaultMaxDeltaFiles},
-		Review:      Review{InlineComments: true},
-	}
-	s.apply(&f.Defaults.Overrides)
-	s.Limits = s.Limits.overlay(f.Defaults.Limits)
-	s.apply(&t.Overrides)
-	s.Limits = s.Limits.overlay(t.Limits)
-	fromFile := t.Origin() == OriginFile
-	ts := mergeTasks(mergeTasks(nil, f.Defaults.Tasks, true), t.Tasks, fromFile)
-	if r := f.repositoryEntry(t, installation, repo); r != nil {
-		if r.Enabled != nil {
-			s.Enabled = *r.Enabled
+// Connection returns the running connection with the given name. Names are
+// unique, so this is how the webhook listener turns a hook path into a webhook
+// secret.
+func (f *File) Connection(name string) (*Connection, bool) {
+	for i := range f.Connections {
+		if f.Connections[i].Name == name {
+			return &f.Connections[i], true
 		}
-		s.apply(&r.Overrides)
-		ts = mergeTasks(ts, r.Tasks, fromFile)
 	}
-	s.setTasks(ts)
-	if s.Limits.Concurrency == 0 {
-		s.Limits.Concurrency = DefaultConcurrency
-	}
-	s.TaskBounds = s.Allow.Tasks.Resolve()
-	return s
+	return nil, false
 }
 
-// repositoryEntry is the tenant's entry for the repository "owner/repo"
-// reached through the named installation, nil when it lists none.
-func (f *File) repositoryEntry(t *Tenant, installation, repo string) *Repository {
-	for i := range t.Repositories {
-		r := &t.Repositories[i]
-		if r.Name != repo {
-			continue
+// ConnectionFor returns the running connection serving a, nil when none
+// does.
+func (f *File) ConnectionFor(a *Account) *Connection {
+	for i := range f.Connections {
+		if in := &f.Connections[i]; in.Forge == a.Forge && in.Serves(a.Name) {
+			return in
 		}
-		if in := f.InstallationFor(t, r); in != nil && in.Name == installation {
+	}
+	return nil
+}
+
+// Repository returns the account's entry for the repository fullName,
+// "owner/repo", nil when it lists none.
+func (a *Account) Repository(fullName string) *Repository {
+	for i := range a.Repositories {
+		if r := &a.Repositories[i]; strings.EqualFold(a.Name+"/"+r.Name, fullName) {
 			return r
 		}
 	}
 	return nil
+}
+
+// Settings resolves the effective settings for the repository fullName,
+// "owner/repo", of account a. Layers apply in one direction: defaults, then
+// the account, then its entry for the repository, if one exists. A
+// repository the account does not list gets the account's settings, so it
+// is enabled unless the defaults or the account turn it off; an empty
+// fullName gives the account's settings alone.
+func (f *File) Settings(a *Account, fullName string) Settings {
+	s := Settings{
+		Enabled:     true,
+		Ignore:      slices.Clone(DefaultIgnore),
+		Agent:       DefaultAgent,
+		Incremental: IncrementalSettings{MaxDeltaFiles: DefaultMaxDeltaFiles},
+		Review:      Review{InlineComments: true},
+		Confidence:  Confidence{Threshold: DefaultConfidenceThreshold, Risk: review.RiskLow},
+		Skills:      Skills{Paths: slices.Clone(DefaultSkillPaths)},
+		Providers:   f.providerNames(a),
+	}
+	s.apply(&f.Defaults.Overrides)
+	s.Limits = s.Limits.overlay(f.Defaults.Limits)
+	s.apply(&a.Overrides)
+	s.Limits = s.Limits.overlay(a.Limits)
+	if r := a.Repository(fullName); r != nil {
+		s.apply(&r.Overrides)
+	}
+	s.Limits.Concurrency = cmp.Or(s.Limits.Concurrency, DefaultConcurrency)
+	if a.Forge != ForgeGitHub && slices.Contains(s.Agent.Commands, ghCommand) {
+		// gh talks to GitHub alone, and the run's token is the account's
+		// forge's: offered on another forge it could only fail.
+		s.Agent.Commands = slices.DeleteFunc(slices.Clone(s.Agent.Commands), func(c string) bool { return c == ghCommand })
+	}
+	s.Tasks = enabledTasks(s.Tasks)
+	s.TaskBounds = s.taskBounds.Resolve()
+	return s
+}
+
+// ghCommand is GitHub's CLI, which only an account on GitHub is offered.
+const ghCommand = "gh"
+
+// Runs reports whether repository fullName of account a, known as t, is
+// reviewed, polled and indexed. An archived repository never is: it is
+// read-only until unarchived. One an admin turned on or off runs as they
+// chose. A fork does not otherwise, since an account can reach many forks
+// it never meant kritique to spend on. Any other repository runs as its
+// settings say.
+func (f *File) Runs(a *Account, fullName string, t RepoTraits) bool {
+	switch {
+	case t.Archived:
+		return false
+	case t.TurnedOn != nil:
+		return *t.TurnedOn
+	case t.Fork:
+		return false
+	default:
+		return f.Settings(a, fullName).Enabled
+	}
 }
 
 // Source is the layer a setting's value comes from.
@@ -99,143 +127,111 @@ type Source string
 
 // Sources of a setting.
 const (
-	SourceDefault    Source = "default"
-	SourceEnv        Source = "env"
-	SourceFile       Source = "file"
-	SourceDashboard  Source = "dashboard"
-	SourceRepository Source = "repository"
+	// SourceDefault is kritique's built-in default.
+	SourceDefault Source = "default"
+	SourceEnv     Source = "env"
+	SourceFile    Source = "file"
+	// SourceDefaults is the file's own settings, at its root, and
+	// SourceAccount an account's entry or one of its repository entries.
+	SourceDefaults Source = "defaults"
+	SourceAccount  Source = "account"
 )
 
-// Sources says, for each setting the policy table lets the operator write,
+// Sources says, for each setting the policy table lets an admin write,
 // where the settings Settings resolves for the same repository take it
-// from: the author of the narrowest scope that writes it, the file for
-// the defaults, or the built-in default. Ignore globs come from every
-// scope; the narrowest that adds some is given.
-func (f *File) Sources(t *Tenant, installation, repo string) map[string]Source {
+// from: the narrowest scope that writes it, or the built-in default.
+// Ignore globs come from every scope; the narrowest that adds some is
+// given.
+func (f *File) Sources(a *Account, fullName string) map[string]Source {
 	type scope struct {
 		spec   any
 		source Source
 	}
-	origin := Source(t.Origin())
-	scopes := []scope{{&f.Defaults, SourceFile}, {t, origin}}
-	if r := f.repositoryEntry(t, installation, repo); r != nil {
-		scopes = append(scopes, scope{r, origin})
+	scopes := []scope{{&f.Defaults, SourceDefaults}, {a, SourceAccount}}
+	if r := a.Repository(fullName); r != nil {
+		scopes = append(scopes, scope{r, SourceAccount})
 	}
 	out := map[string]Source{}
 	for _, p := range Policies {
-		if len(p.Scopes) == 0 {
-			continue
-		}
 		out[p.Key] = SourceDefault
 		for _, sc := range scopes {
 			if v, ok := SpecValue(sc.spec, p.Key); ok && !reflect.ValueOf(v).IsZero() {
 				out[p.Key] = sc.source
 			}
 		}
+		if out[p.Key] == SourceDefaults && f.envKeys[p.Key] {
+			out[p.Key] = SourceEnv
+		}
 	}
 	return out
 }
 
 // apply lays one scope's overrides over s: a field the scope writes
-// replaces s's, and its ignore globs are added to s's.
+// replaces s's, its ignore globs are added to s's, its rules to s's by id
+// and its filters to s's by name.
 func (s *Settings) apply(o *Overrides) {
-	s.Models = s.Models.overlay(o.Models)
-	if o.Filter != nil {
-		s.Filter = o.filter
+	if o.Enabled != nil {
+		s.Enabled = *o.Enabled
 	}
-	if o.Forks != nil {
-		s.Forks = *o.Forks
+	if o.Review.Model != nil {
+		s.Models.Review = *o.Review.Model
+	}
+	if o.Review.Fallback != nil {
+		s.Models.Fallback = *o.Review.Fallback
+	}
+	if o.Review.Effort != nil {
+		s.Models.Effort = *o.Review.Effort
+	}
+	if o.Review.Incremental != nil {
+		s.Incremental.MaxDeltaFiles = *o.Review.Incremental
+	}
+	if o.Confidence.Model != nil {
+		s.Confidence.Model = *o.Confidence.Model
+	}
+	if o.Confidence.Fallback != nil {
+		s.Confidence.Fallback = *o.Confidence.Fallback
+	}
+	if o.Confidence.Effort != nil {
+		s.Confidence.Effort = *o.Confidence.Effort
+	}
+	if o.Confidence.Threshold != nil {
+		s.Confidence.Threshold = *o.Confidence.Threshold
+	}
+	if o.Confidence.Gate != nil {
+		s.Confidence.Gate = *o.Confidence.Gate
+	}
+	if o.Confidence.Risk != nil {
+		s.Confidence.Risk = *o.Confidence.Risk
+	}
+	if o.Confidence.Instructions != nil {
+		s.Confidence.Instructions = *o.Confidence.Instructions
 	}
 	s.Ignore = append(s.Ignore, o.Ignore...)
-	if o.Settle != nil {
-		s.Settle = *o.Settle
-	}
-	if o.Mode != "" {
-		s.Mode = o.Mode
-	}
+	s.Skills = s.Skills.overlay(o.Skills)
+	s.trigger(o)
 	s.Agent = s.Agent.overlay(o.Agent)
-	if o.Incremental.MaxDeltaFiles != nil {
-		s.Incremental.MaxDeltaFiles = *o.Incremental.MaxDeltaFiles
-	}
-	s.Review = s.Review.overlay(o.Review)
-	s.Allow = s.Allow.overlay(o.Allow)
+	s.Review = s.Review.overlay(o)
+	s.Tasks = WithTasks(s.Tasks, o.Tasks)
+	s.taskBounds = s.taskBounds.overlay(o.TaskBounds)
 }
 
-// PollInterval is how often the leader polls, 0 when polling is off.
-func (f *File) PollInterval() time.Duration {
-	if f.Polling.Interval != nil {
-		return *f.Polling.Interval
+// trigger lays one scope's trigger keys over s.
+func (s *Settings) trigger(o *Overrides) {
+	s.Filters = s.Filters.with(o.Trigger.Filters)
+	if o.Trigger.Settle != nil {
+		s.Settle = *o.Trigger.Settle
 	}
-	return DefaultPollInterval
+	if o.Trigger.Limit != nil {
+		s.MaxAutoReviews = *o.Trigger.Limit
+	}
 }
 
-// PollLookback bounds how far back a first or long-idle poll looks.
-func (f *File) PollLookback() time.Duration {
-	if f.Polling.Lookback > 0 {
-		return f.Polling.Lookback
-	}
-	return DefaultPollLookback
-}
-
-// ToolsFor returns the tools that provide any of commands, the ones a run
-// whose agent may run commands mounts; nil when none does.
-func (f *File) ToolsFor(commands []string) []Tool {
-	var out []Tool
-	for _, t := range f.Tools {
-		if slices.ContainsFunc(t.Provides(), func(c string) bool { return slices.Contains(commands, c) }) {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-// OnboardWindow is how many onboarding index jobs may be queued or running.
-func (f *File) OnboardWindow() int {
-	if f.Indexing.OnboardWindow > 0 {
-		return f.Indexing.OnboardWindow
-	}
-	return DefaultOnboardWindow
-}
-
-// RunnerFor resolves a tenant's runner Job deadline and resources: the
-// tenant's runner block, then defaults.runner, then DefaultRunnerDeadline
-// and no resources. t may be nil for a tenant no longer in the file.
-func (f *File) RunnerFor(t *Tenant) (deadline time.Duration, resources map[string]any) {
-	deadline = DefaultRunnerDeadline
-	blocks := []*Runner{f.Defaults.Runner}
-	if t != nil {
-		blocks = append(blocks, t.Runner)
-	}
-	for _, r := range blocks {
-		if r == nil {
-			continue
-		}
-		if r.ActiveDeadlineSeconds > 0 {
-			deadline = time.Duration(r.ActiveDeadlineSeconds) * time.Second
-		}
-		if r.Resources != nil {
-			resources = r.Resources
-		}
-	}
-	return deadline, resources
-}
-
-// DisabledIndexGrace returns the configured grace period or the default.
-func (f *File) DisabledIndexGrace() time.Duration {
-	if f.Retention.DisabledIndexGrace > 0 {
-		return f.Retention.DisabledIndexGrace
-	}
-	return DefaultDisabledIndexGrace
-}
-
-func (m Models) overlay(o ModelsSpec) Models {
-	if o.Review != nil {
-		m.Review = *o.Review
-	}
-	if o.Fallback != nil {
-		m.Fallback = *o.Fallback
-	}
-	return m
+// providerNames is the names of the providers account a may use, sorted.
+func (f *File) providerNames(a *Account) []string {
+	names := slices.Collect(maps.Keys(f.Providers))
+	names = append(names, slices.Collect(maps.Keys(a.Providers))...)
+	slices.Sort(names)
+	return names
 }
 
 func (l Limits) overlay(o LimitsSpec) Limits {
@@ -251,69 +247,50 @@ func (l Limits) overlay(o LimitsSpec) Limits {
 	return l
 }
 
-func (r Review) overlay(o ReviewSpec) Review {
-	if o.Instructions != nil {
-		r.Instructions = o.Instructions
+func (r Review) overlay(o *Overrides) Review {
+	if o.Review.Fixes != nil {
+		r.RequireSuggestedFix = *o.Review.Fixes
 	}
-	if o.RequireSuggestedFix != nil {
-		r.RequireSuggestedFix = *o.RequireSuggestedFix
+	if o.Comments.Summary != nil {
+		r.Templates.Summary = *o.Comments.Summary
 	}
-	if o.Templates.Summary != nil {
-		r.Templates.Summary = *o.Templates.Summary
+	if o.Comments.Finding != nil {
+		r.Templates.Inline = *o.Comments.Finding
 	}
-	if o.Templates.Inline != nil {
-		r.Templates.Inline = *o.Templates.Inline
+	if o.Comments.Inline != nil {
+		r.InlineComments = *o.Comments.Inline
 	}
-	if o.MinSeverity != nil {
-		r.MinSeverity = *o.MinSeverity
+	if o.Review.Approve != nil {
+		r.Approve = *o.Review.Approve
 	}
-	if o.InlineComments != nil {
-		r.InlineComments = *o.InlineComments
+	if o.Review.Diagram != nil {
+		r.Diagram = *o.Review.Diagram
+	}
+	if o.Review.Cost != nil {
+		r.Cost = *o.Review.Cost
 	}
 	if o.Context != nil {
 		r.Context = o.Context
 	}
+	r.Rules = WithRules(r.Rules, o.Rules)
 	return r
 }
 
-func (a Allow) overlay(o Allow) Allow {
-	if o.Modes != nil {
-		a.Modes = o.Modes
-	}
-	if o.Models != nil {
-		a.Models = o.Models
-	}
-	if o.Commands != nil {
-		a.Commands = o.Commands
-	}
-	if o.Agent.MaxSteps != nil {
-		a.Agent.MaxSteps = o.Agent.MaxSteps
-	}
-	if o.Agent.MaxToolOutputBytes != nil {
-		a.Agent.MaxToolOutputBytes = o.Agent.MaxToolOutputBytes
-	}
-	if o.Agent.MaxTokens != nil {
-		a.Agent.MaxTokens = o.Agent.MaxTokens
-	}
-	if o.Agent.Timeout != nil {
-		a.Agent.Timeout = o.Agent.Timeout
-	}
-	if o.Settle != nil {
-		a.Settle = o.Settle
-	}
-	a.Tasks = a.Tasks.overlay(o.Tasks)
-	return a
-}
-
 func (a AgentSettings) overlay(o Agent) AgentSettings {
-	if o.MaxSteps != nil {
-		a.MaxSteps = *o.MaxSteps
+	if o.Steps != nil {
+		a.MaxSteps = *o.Steps
 	}
-	if o.MaxToolOutputBytes != nil {
-		a.MaxToolOutputBytes = *o.MaxToolOutputBytes
+	if o.Output != nil {
+		a.MaxToolOutputBytes = *o.Output
 	}
-	if o.MaxTokens != nil {
-		a.MaxTokens = *o.MaxTokens
+	if o.Tokens != nil {
+		a.MaxTokens = *o.Tokens
+	}
+	if o.Prompt != nil {
+		a.MaxPromptTokens = *o.Prompt
+	}
+	if o.Parts != nil {
+		a.MaxParts = *o.Parts
 	}
 	if o.Timeout != nil {
 		a.Timeout = *o.Timeout

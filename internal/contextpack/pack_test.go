@@ -1,14 +1,17 @@
 package contextpack
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/go-git/go-billy/v5/memfs"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/storage/memory"
+	"github.com/go-git/go-billy/v6/memfs"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/storage/memory"
+
+	"github.com/perfectra1n/kritique/internal/gittest"
 )
 
 const widgetBase = `package demo
@@ -75,10 +78,11 @@ func Unrelated() {}
 func repo(t *testing.T) (head, base *object.Tree, diff string) {
 	t.Helper()
 	fs := memfs.New()
-	r, err := git.Init(memory.NewStorage(), fs)
+	r, err := git.Init(memory.NewStorage(), git.WithWorkTree(fs))
 	if err != nil {
 		t.Fatal(err)
 	}
+	gittest.Unsigned(t, r)
 	wt, _ := r.Worktree()
 	write := func(name, content string) {
 		f, _ := fs.Create(name)
@@ -170,7 +174,13 @@ func TestParseDiff(t *testing.T) {
 	if got := d.removed["x.go"]; len(got) != 1 || got[0] != 4 {
 		t.Fatalf("removed = %v", got)
 	}
-	if !d.shown["x.go"][3] || !d.shown["x.go"][7] || d.shown["x.go"][8] {
+	if _, ok3 := d.shown["x.go"][3]; !ok3 {
+		t.Fatalf("shown = %v", d.shown["x.go"])
+	}
+	if _, ok7 := d.shown["x.go"][7]; !ok7 {
+		t.Fatalf("shown = %v", d.shown["x.go"])
+	}
+	if _, ok8 := d.shown["x.go"][8]; ok8 {
 		t.Fatalf("shown = %v", d.shown["x.go"])
 	}
 	if r := runs([]int{1, 2, 3, 10, 30, 31}, 5); len(r) != 3 || r[0] != [2]int{1, 3} || r[1] != [2]int{10, 10} || r[2] != [2]int{30, 31} {
@@ -195,5 +205,113 @@ func TestPickPrefersDistinctFiles(t *testing.T) {
 	}
 	if got := pick(cs, 5); len(got) != 3 {
 		t.Fatalf("pick under the cap must keep everything, got %d", len(got))
+	}
+}
+
+// TestDiffEdges: a new file's hunk, a deleted file's, and lines that read
+// like file headers ("-- x" removed, "++ x" added) are all hunk lines.
+func TestDiffEdges(t *testing.T) {
+	diff := "diff --git a/new.go b/new.go\nnew file mode 100644\n--- /dev/null\n+++ b/new.go\n@@ -0,0 +1,2 @@\n+package x\n+func F() {}\n" +
+		"diff --git a/q.sql b/q.sql\n--- a/q.sql\n+++ b/q.sql\n@@ -1,3 +1,3 @@\n SELECT 1;\n--- old comment\n+++ new comment\n SELECT 2;\n" +
+		"diff --git a/gone.go b/gone.go\ndeleted file mode 100644\n--- a/gone.go\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-package gone\n-var V int\n"
+	d := parseDiff(diff)
+	for name, got := range map[string][]int{"added new.go": d.added["new.go"], "added q.sql": d.added["q.sql"],
+		"removed q.sql": d.removed["q.sql"], "removed gone.go": d.removed["gone.go"]} {
+		want := map[string][]int{"added new.go": {1, 2}, "added q.sql": {2}, "removed q.sql": {2}, "removed gone.go": {1, 2}}[name]
+		if !slices.Equal(got, want) {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
+	}
+	if shown := ShownLines(diff); len(shown["q.sql"]) != 3 || len(shown["new.go"]) != 2 || shown["gone.go"] != nil {
+		t.Errorf("shown = %v", shown)
+	}
+	// The deleted file is matched by its base-side path, the only one it has.
+	for _, tt := range []struct {
+		ignore []string
+		want   int
+	}{{nil, 6}, {[]string{"*.sql"}, 4}, {[]string{"gone.go"}, 4}, {[]string{"**"}, 0}} {
+		if got := ChangedLines(diff, tt.ignore); got != tt.want {
+			t.Errorf("ChangedLines(ignore %v) = %d, want %d", tt.ignore, got, tt.want)
+		}
+	}
+	// A removed line touches the head line that now follows it; a deleted
+	// file has no head lines to touch.
+	if touched := TouchedLines(diff); len(touched) != 2 || !slices.Equal(touched["new.go"], []int{1, 2}) ||
+		!slices.Equal(touched["q.sql"], []int{2, 2}) {
+		t.Errorf("touched = %v", touched)
+	}
+	moved := "diff --git a/old.go b/moved.go\nsimilarity index 80%\nrename from old.go\nrename to moved.go\n--- a/old.go\n+++ b/moved.go\n" +
+		"@@ -1,2 +1,2 @@\n a\n-b\n+B\n" + diff
+	if renames := Renames(moved); len(renames) != 1 || renames["old.go"] != "moved.go" {
+		t.Errorf("renames = %v", renames)
+	}
+	h := Hunks(diff)
+	if len(h) != 2 || h[0] != (Hunk{Path: "new.go", Text: "package x\nfunc F() {}\n"}) ||
+		h[1] != (Hunk{Path: "q.sql", Text: "SELECT 1;\n++ new comment\nSELECT 2;\n"}) {
+		t.Fatalf("hunks = %+v", h)
+	}
+}
+
+// TestOverlayReadsARenamedFilesBase: the lines a diff removed from a
+// renamed file are read from the base tree under the old name, so the
+// identifiers they carry are looked up like any removed line's.
+func TestOverlayReadsARenamedFilesBase(t *testing.T) {
+	fs := memfs.New()
+	r, err := git.Init(memory.NewStorage(), git.WithWorkTree(fs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gittest.Unsigned(t, r)
+	wt, _ := r.Worktree()
+	write := func(name, content string) {
+		f, _ := fs.Create(name)
+		_, _ = f.Write([]byte(content))
+		_ = f.Close()
+		_, _ = wt.Add(name)
+	}
+	sig := &object.Signature{Name: "t", Email: "t@t", When: time.Now()}
+	// Enough unchanged lines for the rename to be detected.
+	filler := "\n// line one of the file\n// line two of the file\n// line three of the file\n// line four of the file\n" +
+		"// line five of the file\n// line six of the file\n// line seven of the file\n// line eight of the file\n"
+	write("old.go", "package demo\n"+filler+"\nfunc Gone() { helperBefore() }\n")
+	write("helpers.go", "package demo\n\nfunc helperBefore() {}\n\nfunc helperAfter() {}\n")
+	baseHash, _ := wt.Commit("base", &git.CommitOptions{Author: sig})
+	_, _ = wt.Remove("old.go")
+	write("moved.go", "package demo\n"+filler+"\nfunc Gone() { helperAfter() }\n")
+	headHash, _ := wt.Commit("head", &git.CommitOptions{Author: sig})
+	bc, _ := r.CommitObject(baseHash)
+	hc, _ := r.CommitObject(headHash)
+	base, _ := bc.Tree()
+	head, _ := hc.Tree()
+	patch, _ := bc.Patch(hc)
+	diff := patch.String()
+	if renames := Renames(diff); renames["old.go"] != "moved.go" {
+		t.Fatalf("no rename detected in:\n%s", diff)
+	}
+	chunks, _, err := Build(t.Context(), Input{Head: head, Base: base, Diff: diff, Changed: []string{"moved.go"}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var defined []string
+	for _, c := range chunks {
+		if c.Stage == StageDefinition {
+			defined = append(defined, c.Symbol)
+		}
+	}
+	slices.Sort(defined)
+	if want := []string{"helperAfter", "helperBefore"}; !slices.Equal(defined, want) {
+		t.Fatalf("definitions = %v, want %v: the removed line's helper comes from the base side under the old name", defined, want)
+	}
+}
+
+// TestBuildStopsAtTheScanBudget: a head tree over the scan budget truncates
+// the scan rather than failing the pack.
+func TestBuildStopsAtTheScanBudget(t *testing.T) {
+	head, base, diff := repo(t)
+	opts := DefaultOptions
+	opts.MaxScanFiles = 1
+	_, stats, err := Build(t.Context(), Input{Head: head, Base: base, Diff: diff, Changed: []string{"widget.go"}}, opts)
+	if err != nil || !stats.ScanTruncated {
+		t.Fatalf("Build = %+v, %v; want a truncated scan and no error", stats, err)
 	}
 }

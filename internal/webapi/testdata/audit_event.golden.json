@@ -7,11 +7,10 @@
     "email": "ada@example.com",
     "avatarUrl": "https://img.example/a.png"
   },
-  "tenant": "alpha",
-  "action": "tenant.update",
-  "target": "alpha",
+  "account": "github/alpha",
+  "action": "repo.reindex",
+  "target": "alpha/one",
   "detail": {
-    "revision": 2,
-    "secretsChanged": ["installations[alpha-bot].token"]
+    "jobId": 42
   }
 }

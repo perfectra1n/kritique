@@ -10,43 +10,32 @@ import (
 	"github.com/perfectra1n/kritique/internal/configfile"
 )
 
-// tenantScope is a request resolved to one tenant its principal may read.
-type tenantScope struct {
+// accountScope is a request resolved to one account its principal may read.
+type accountScope struct {
 	file      *configfile.File
-	tenant    *configfile.Tenant
+	account   *configfile.Account
 	principal *auth.Principal
 }
 
-// role is the principal's effective role on the tenant; an operator is an
-// admin of every tenant.
-func (t *tenantScope) role() auth.Role { return roleOn(t.principal, t.tenant.ID()) }
-
-func roleOn(p *auth.Principal, tenantID string) auth.Role {
-	if p.Operator {
-		return auth.RoleAdmin
-	}
-	return p.Memberships[tenantID]
-}
-
-// resolveTenant finds the tenant named slug in the current file for p. A
-// tenant p may not read is reported exactly like one that does not exist,
-// so the API never confirms a slug to someone outside it.
-func resolveTenant(file *configfile.File, p *auth.Principal, slug string) (*tenantScope, error) {
-	t, ok := file.Tenant(slug)
+// resolveAccount finds the running account name on forge for p. An account
+// p may not read is reported exactly like one that does not exist, so the
+// API never confirms an account to someone outside it.
+func resolveAccount(file *configfile.File, p *auth.Principal, forge, name string) (*accountScope, error) {
+	t, ok := file.Account(configfile.Forge(forge), name)
 	if !ok || !p.CanRead(t.ID()) {
-		return nil, errNotFound("tenant")
+		return nil, errNotFound("account")
 	}
-	return &tenantScope{file: file, tenant: t, principal: p}, nil
+	return &accountScope{file: file, account: t, principal: p}, nil
 }
 
-// tenantHandler serves one /api/v1/tenants/{slug}/... route.
-type tenantHandler func(w http.ResponseWriter, r *http.Request, t *tenantScope) error
+// accountHandler serves one /api/v1/accounts/{forge}/{name}/... route.
+type accountHandler func(w http.ResponseWriter, r *http.Request, t *accountScope) error
 
-// tenant adapts h: it resolves {slug} for the request's principal and
-// writes any error h returns.
-func (s *Server) tenant(h tenantHandler) http.HandlerFunc {
+// account adapts h: it resolves {forge}/{name} for the request's principal
+// and writes any error h returns.
+func (s *Server) account(h accountHandler) http.HandlerFunc {
 	return s.handler(func(w http.ResponseWriter, r *http.Request) error {
-		t, err := resolveTenant(s.current.Get(), auth.PrincipalFrom(r.Context()), r.PathValue("slug"))
+		t, err := resolveAccount(s.current.Get(), auth.PrincipalFrom(r.Context()), r.PathValue("forge"), r.PathValue("name"))
 		if err != nil {
 			return err
 		}
@@ -63,8 +52,19 @@ func (s *Server) handler(h func(w http.ResponseWriter, r *http.Request) error) h
 	}
 }
 
-// read runs fn in a transaction scoped to t's tenant, so row-level
+// admin adapts a handler only an admin may call: to anyone else its route
+// does not exist.
+func (s *Server) admin(h func(w http.ResponseWriter, r *http.Request) error) http.HandlerFunc {
+	return s.handler(func(w http.ResponseWriter, r *http.Request) error {
+		if !auth.PrincipalFrom(r.Context()).Admin {
+			return errNotFound("route")
+		}
+		return h(w, r)
+	})
+}
+
+// read runs fn in a transaction scoped to t's account, so row-level
 // security confines every query in it.
-func (s *Server) read(ctx context.Context, t *tenantScope, fn func(pgx.Tx) error) error {
-	return s.store.WithTenant(ctx, t.tenant.ID(), fn)
+func (s *Server) read(ctx context.Context, t *accountScope, fn func(pgx.Tx) error) error {
+	return s.store.WithAccount(ctx, t.account.ID(), fn)
 }

@@ -1,5 +1,4 @@
-{{- if include "kritique.hasIngest" . }}
-# Webhook listener: only pods that serve hooks (`all` and `ingest`).
+# The public listener: the webhooks and the dashboard.
 apiVersion: v1
 kind: Service
 metadata:
@@ -16,12 +15,9 @@ spec:
       protocol: TCP
   selector:
     {{- include "kritique.selectorLabels" . | nindent 4 }}
-    kritique.perfectra1n.github.io/hooks: "true"
-{{- end }}
-{{- if and (include "kritique.hasWorker" .) .Values.gateway.enabled }}
 ---
-# Egress gateway: the forward proxy runner Jobs reach the outside through
-# (ADR-0008), served by worker-capable pods.
+# The gateway: the forward proxy runner Jobs reach the outside through, and
+# their model and similar-code endpoints.
 apiVersion: v1
 kind: Service
 metadata:
@@ -34,37 +30,13 @@ spec:
   type: ClusterIP
   ports:
     - name: gateway
-      port: {{ .Values.gateway.port }}
+      port: {{ .Values.service.gatewayPort }}
       targetPort: gateway
       protocol: TCP
   selector:
     {{- include "kritique.selectorLabels" . | nindent 4 }}
-    kritique.perfectra1n.github.io/gateway: "true"
-{{- end }}
-{{- if include "kritique.hasWeb" . }}
 ---
-# Dashboard: only pods that serve the web UI/API.
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "kritique.fullname" . }}-web
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "kritique.labels" . | nindent 4 }}
-    app.kubernetes.io/component: web
-spec:
-  type: {{ .Values.service.type }}
-  ports:
-    - name: web
-      port: {{ .Values.service.webPort }}
-      targetPort: web
-      protocol: TCP
-  selector:
-    {{- include "kritique.selectorLabels" . | nindent 4 }}
-    kritique.perfectra1n.github.io/web: "true"
-{{- end }}
----
-# Metrics: every role's pods.
+# Metrics.
 apiVersion: v1
 kind: Service
 metadata:

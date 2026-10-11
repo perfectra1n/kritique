@@ -3,9 +3,10 @@ package store
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,7 +25,7 @@ var migrationFS embed.FS
 // GRANT is idempotent.
 func (s *Store) Migrate(ctx context.Context, appRole, runnerRole string) error {
 	if s.owner == nil {
-		return fmt.Errorf("store: migrate needs the owner DSN")
+		return errors.New("store: migrate needs the owner DSN")
 	}
 	migrator, err := rivermigrate.New(riverpgxv5.New(s.owner), nil)
 	if err != nil {
@@ -42,7 +43,7 @@ func (s *Store) Migrate(ctx context.Context, appRole, runnerRole string) error {
 	if err != nil {
 		return fmt.Errorf("store: list migrations: %w", err)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	for _, name := range names {
 		version := strings.TrimSuffix(strings.TrimPrefix(name, "migrations/"), ".sql")
 		if err := s.applyMigration(ctx, name, version); err != nil {
@@ -127,34 +128,40 @@ func (s *Store) WaitForSchema(ctx context.Context, every time.Duration) error {
 	}
 }
 
-// grant gives the application role what requests and jobs need and the
-// runner role nothing yet beyond connecting; the runner's tables arrive with
-// the runner. Role names come from configuration, so they are quoted as
-// identifiers rather than interpolated raw.
+// grant gives the application role what requests and jobs need, and the
+// runner role what one runner's job writes. Role names come from
+// configuration, so they are quoted as identifiers rather than interpolated
+// raw.
 func (s *Store) grant(ctx context.Context, appRole, runnerRole string) error {
 	app := pgx.Identifier{appRole}.Sanitize()
 	runner := pgx.Identifier{runnerRole}.Sanitize()
 	stmts := []string{
 		`GRANT USAGE ON SCHEMA public TO ` + app + `, ` + runner,
-		`GRANT SELECT ON tenants, config_state, schema_migrations TO ` + app,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON installations, repositories, model_leases, pull_requests TO ` + app,
+		`GRANT SELECT ON accounts, config_state, schema_migrations TO ` + app,
+		// Only the leader writes connections; a request stamps a delivery.
+		`GRANT SELECT, UPDATE (last_webhook_at, last_unsigned_webhook_at) ON connections TO ` + app,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON repositories, model_leases, pull_requests TO ` + app,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON reviews, runner_runs, context_packs, findings, sticky_comments, usage TO ` + app,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON index_runs, index_packs, index_staging, followups, poll_state TO ` + app,
-		`GRANT SELECT ON index_schema, agent_runs TO ` + app,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON gateway_tokens TO ` + app,
-		// The web dashboard's own tables (ADR-0009): all instance-level (no
-		// RLS, access control lives in web code) except model_calls, which is
-		// tenant content gated by its own tenant_isolation policy.
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON accounts, identities, sessions, login_states TO ` + app,
-		`GRANT SELECT, INSERT, UPDATE, DELETE ON memberships, invites, audit_events, dashboard_tenants TO ` + app,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON index_runs, index_packs, index_staging, followups, dismissals, poll_state TO ` + app,
+		`GRANT SELECT ON index_schema, agent_runs, agent_conversations TO ` + app,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON gateway_tokens, job_heartbeats TO ` + app,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON task_events, task_runs TO ` + app,
+		// The web dashboard's own tables: all instance-level (no RLS,
+		// access control lives in web code) except model_calls, which is
+		// account content gated by its own account_isolation policy.
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON users, identities, sessions, login_states TO ` + app,
+		`GRANT SELECT, INSERT ON audit_events TO ` + app,
+		// The audit log is append-only; a database migrated from before
+		// 0015 still has the update and delete its old grant gave.
+		`REVOKE UPDATE, DELETE ON audit_events FROM ` + app,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON model_calls TO ` + app,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON task_events, task_runs TO ` + app,
 		// The runner role sees only its own job through the runner_job
 		// policies; it needs the table privileges those policies gate. On
 		// runner_runs it may update only what a runner reports, never the
-		// tenant or review its run belongs to.
+		// account or review its run belongs to.
 		`GRANT SELECT, UPDATE (` + strings.Join(runnerRunColumns, ", ") + `) ON runner_runs TO ` + runner,
-		`GRANT SELECT, INSERT ON context_packs, index_packs, index_staging, agent_runs TO ` + runner,
+		`GRANT SELECT, INSERT ON context_packs, index_packs, index_staging, agent_runs, agent_conversations TO ` + runner,
 		`GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO ` + runner,
 		`GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO ` + app,
 	}
@@ -179,7 +186,8 @@ func (s *Store) grant(ctx context.Context, appRole, runnerRole string) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("store: %s: %w", strings.SplitN(stmt, " TO ", 2)[0], err)
+			grant, _, _ := strings.Cut(stmt, " TO ")
+			return fmt.Errorf("store: %s: %w", grant, err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {

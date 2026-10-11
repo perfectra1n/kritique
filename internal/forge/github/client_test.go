@@ -42,11 +42,39 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *C
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := NewClient(app, 42, "")
+	c, err := NewClient(app, 42)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return srv, c
+}
+
+func TestFileURL(t *testing.T) {
+	tests := []struct {
+		path          string
+		line, endLine int
+		want          string
+	}{
+		{"cmd/main.go", 3, 0, "https://github.com/o/r/blob/abc/cmd/main.go#L3"},
+		{"docs/a file#1?.md", 2, 5, "https://github.com/o/r/blob/abc/docs/a%20file%231%3F.md#L2-L5"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := (&Client{}).FileURL("o", "r", "abc", tt.path, tt.line, tt.endLine); got != tt.want {
+				t.Fatalf("FileURL = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCommitAndThreadURL(t *testing.T) {
+	c := &Client{}
+	if got := c.CommitURL("o", "r", "abc"); got != "https://github.com/o/r/commit/abc" {
+		t.Fatalf("CommitURL = %q", got)
+	}
+	if got := c.ThreadURL("o", "r", 7, 5_800_000_001); got != "https://github.com/o/r/pull/7#discussion_r5800000001" {
+		t.Fatalf("ThreadURL = %q", got)
+	}
 }
 
 func TestPermission(t *testing.T) {
@@ -71,6 +99,7 @@ func TestPermission(t *testing.T) {
 		{"none permission", `{"permission":"none"}`, forge.PermissionNone},
 		{"maintain role_name overrides write permission", `{"permission":"write","role_name":"maintain"}`, forge.PermissionMaintain},
 		{"triage role_name overrides read permission", `{"permission":"read","role_name":"triage"}`, forge.PermissionTriage},
+		{"custom role falls back to its base permission", `{"permission":"write","role_name":"security-reviewer"}`, forge.PermissionWrite},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,7 +151,7 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *Client) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return f, &Client{api: api, webBase: srv.URL}
+	return f, &Client{api: api, tokens: &InstallationTokens{tok: "ghs_test", exp: time.Now().Add(time.Hour)}}
 }
 
 func (f *fakeAPI) reply(pattern string, status int, body string) {
@@ -147,7 +176,7 @@ func TestMergeBaseAndBranchTip(t *testing.T) {
 	f.reply("GET /api/v3/repos/o/r/compare/main...abc", 200, `{"merge_base_commit":{"sha":"base123"}}`)
 	f.reply("GET /api/v3/repos/o/r", 200, `{"default_branch":"trunk"}`)
 	f.reply("GET /api/v3/repos/o/r/branches/trunk", 200, `{"name":"trunk","commit":{"sha":"tip456"}}`)
-	sha, err := c.MergeBase(t.Context(), "o", "r", 7, "main", "abc")
+	sha, err := c.MergeBase(t.Context(), "o", "r", "main", "abc")
 	if err != nil || sha != "base123" {
 		t.Fatalf("MergeBase = %q, %v", sha, err)
 	}
@@ -155,11 +184,11 @@ func TestMergeBaseAndBranchTip(t *testing.T) {
 	if err != nil || tip != "tip456" || branch != "trunk" {
 		t.Fatalf("BranchTip = %q %q, %v", tip, branch, err)
 	}
-	if c.CloneURL("o", "r") != c.webBase+"/o/r.git" {
+	if c.CloneURL("o", "r") != "https://github.com/o/r.git" {
 		t.Fatalf("CloneURL = %s", c.CloneURL("o", "r"))
 	}
 	f.reply("GET /api/v3/repos/o/r/compare/main...none", 200, `{}`)
-	if _, err := c.MergeBase(t.Context(), "o", "r", 7, "main", "none"); err == nil {
+	if _, err := c.MergeBase(t.Context(), "o", "r", "main", "none"); err == nil {
 		t.Fatal("a compare without a merge base must error")
 	}
 }
@@ -188,6 +217,32 @@ func TestFileAt(t *testing.T) {
 	}
 }
 
+func TestIssue(t *testing.T) {
+	f, c := newFakeAPI(t)
+	f.reply("GET /api/v3/repos/o/r/issues/12", 200, `{
+		"number":12,"title":"Widgets leak","body":"Steps.","state":"open",
+		"user":{"login":"u"},"labels":[{"name":"bug"}],"assignees":[{"login":"a"}],
+		"html_url":"https://github.com/o/r/issues/12"
+	}`)
+	f.reply("GET /api/v3/repos/o/r/issues/13", 200, `{"number":13,"title":"A pull request","state":"open",
+		"pull_request":{"url":"https://api.github.com/repos/o/r/pulls/13"},"draft":true}`)
+	f.reply("GET /api/v3/repos/o/r/issues/14", 404, `{"message":"Not Found"}`)
+	got, err := c.Issue(t.Context(), "o", "r", 12)
+	want := forge.Issue{
+		Number: 12, Title: "Widgets leak", Body: "Steps.", URL: "https://github.com/o/r/issues/12",
+		State: "open", Author: "u", Labels: []string{"bug"}, Assignees: []string{"a"},
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("Issue = %+v, %v; want %+v", got, err, want)
+	}
+	if got, err := c.Issue(t.Context(), "o", "r", 13); err != nil || !got.PullRequest || !got.Draft {
+		t.Fatalf("Issue of a draft pull request = %+v, %v; want PullRequest and Draft set", got, err)
+	}
+	if _, err := c.Issue(t.Context(), "o", "r", 14); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Issue of an unknown number = %v, want fs.ErrNotExist", err)
+	}
+}
+
 func TestPullRequestDiff(t *testing.T) {
 	f, c := newFakeAPI(t)
 	const diff = "diff --git a/a.go b/a.go\n+b\n"
@@ -197,12 +252,12 @@ func TestPullRequestDiff(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(diff))
 	})
-	got, err := c.PullRequestDiff(t.Context(), "o", "r", 7, "base123", "abc")
+	got, err := c.PullRequestDiff(t.Context(), "o", "r", "base123", "abc")
 	if err != nil || got != diff {
 		t.Fatalf("PullRequestDiff = %q, %v", got, err)
 	}
 	f.reply("GET /api/v3/repos/o/r/compare/base123...big", 406, `{"message":"diff too large"}`)
-	if _, err := c.PullRequestDiff(t.Context(), "o", "r", 7, "base123", "big"); err == nil {
+	if _, err := c.PullRequestDiff(t.Context(), "o", "r", "base123", "big"); err == nil {
 		t.Fatal("a diff the forge refuses must be an error")
 	}
 }
@@ -230,6 +285,8 @@ func TestWriteBackCalls(t *testing.T) {
 	f.reply("POST /api/v3/repos/o/r/issues/7/comments", 201, `{"id":100}`)
 	f.reply("PATCH /api/v3/repos/o/r/issues/comments/100", 200, `{"id":100}`)
 	f.reply("POST /api/v3/repos/o/r/pulls/7/reviews", 200, `{"id":5}`)
+	f.reply("GET /api/v3/repos/o/r/pulls/7/reviews/5/comments", 200,
+		`[{"id":301,"path":"a.go","line":3,"body":"b"},{"id":302,"path":"a.go","line":9,"body":"elsewhere"}]`)
 	f.reply("POST /api/v3/repos/o/r/statuses/abc", 201, `{"state":"success"}`)
 	f.reply("POST /api/v3/repos/o/r/pulls/7/comments", 201, `{"id":200}`)
 
@@ -240,11 +297,17 @@ func TestWriteBackCalls(t *testing.T) {
 	if err := c.UpdateComment(t.Context(), "o", "r", 100, "edited"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.CreateReview(t.Context(), "o", "r", 7, "abc", nil); err != nil || f.saw("POST /api/v3/repos/o/r/pulls/7/reviews") {
+	f.reply("PATCH /api/v3/repos/o/r/issues/comments/101", 404, `{"message":"Not Found"}`)
+	if err := c.UpdateComment(t.Context(), "o", "r", 101, "edited"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("UpdateComment of a deleted comment = %v, want fs.ErrNotExist", err)
+	}
+	if ids, err := c.CreateReview(t.Context(), "o", "r", 7, "abc", nil); err != nil || ids == nil || f.saw("POST /api/v3/repos/o/r/pulls/7/reviews") {
 		t.Fatal("a review with no comments must not be posted")
 	}
-	if err := c.CreateReview(t.Context(), "o", "r", 7, "abc", []forge.InlineComment{{Path: "a.go", Line: 3, Body: "b"}}); err != nil {
-		t.Fatal(err)
+	sent := []forge.InlineComment{{Path: "a.go", Line: 3, Body: "b"}, {Path: "b.go", Line: 1, Body: "b"}}
+	ids, err := c.CreateReview(t.Context(), "o", "r", 7, "abc", sent)
+	if err != nil || !slices.Equal(ids, []int64{301, 0}) {
+		t.Fatalf("CreateReview = %v, %v; want each comment's id matched by path and body, 0 where none", ids, err)
 	}
 	review := f.bodies["POST /api/v3/repos/o/r/pulls/7/reviews"].(map[string]any)
 	if review["event"] != "COMMENT" || review["commit_id"] != "abc" {
@@ -271,6 +334,118 @@ func TestWriteBackCalls(t *testing.T) {
 	}
 }
 
+// TestChangesRequested: a reviewer stands where their latest approval,
+// request for changes or dismissal left them; a comment after it changes
+// nothing, and the bot's own reviews do not count.
+func TestChangesRequested(t *testing.T) {
+	tests := []struct {
+		name    string
+		reviews string
+		want    bool
+	}{
+		{name: "no reviews", reviews: `[]`},
+		{name: "a request for changes stands through a later comment", want: true, reviews: `[
+			{"id":1,"user":{"login":"human"},"state":"CHANGES_REQUESTED"},
+			{"id":2,"user":{"login":"human"},"state":"COMMENTED"},
+			{"id":3,"user":{"login":"other"},"state":"APPROVED"}]`},
+		{name: "a later approval lifts it", reviews: `[
+			{"id":1,"user":{"login":"human"},"state":"CHANGES_REQUESTED"},
+			{"id":2,"user":{"login":"human"},"state":"APPROVED"}]`},
+		{name: "a dismissed one does not stand", reviews: `[{"id":1,"user":{"login":"human"},"state":"DISMISSED"}]`},
+		{name: "the bot's own does not count", reviews: `[{"id":1,"user":{"login":"kritique[bot]"},"state":"CHANGES_REQUESTED"}]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, c := newFakeAPI(t)
+			c.login = "kritique[bot]"
+			f.reply("GET /api/v3/repos/o/r/pulls/7/reviews", 200, tt.reviews)
+			got, err := c.ChangesRequested(t.Context(), "o", "r", 7)
+			if err != nil || got != tt.want {
+				t.Fatalf("ChangesRequested = %v, %v; want %v", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestApproveAndDismissApprovals(t *testing.T) {
+	f, c := newFakeAPI(t)
+	c.login = "kritique[bot]"
+	f.reply("GET /api/v3/repos/o/r/pulls/7/reviews", 200, `[
+		{"id":1,"user":{"login":"kritique[bot]"},"state":"COMMENTED","commit_id":"abc"},
+		{"id":2,"user":{"login":"human"},"state":"APPROVED","commit_id":"abc"},
+		{"id":3,"user":{"login":"kritique[bot]"},"state":"DISMISSED","commit_id":"old"},
+		{"id":4,"user":{"login":"kritique[bot]"},"state":"APPROVED","commit_id":"old"}]`)
+	f.reply("POST /api/v3/repos/o/r/pulls/7/reviews", 200, `{"id":5}`)
+	f.reply("PUT /api/v3/repos/o/r/pulls/7/reviews/4/dismissals", 200, `{"id":4,"state":"DISMISSED"}`)
+
+	posted, err := c.Approve(t.Context(), "o", "r", 7, "abc", "clean")
+	if err != nil || !posted {
+		t.Fatalf("Approve = %v, %v; want an approval of a head the bot has not approved", posted, err)
+	}
+	review := f.bodies["POST /api/v3/repos/o/r/pulls/7/reviews"].(map[string]any)
+	if review["event"] != "APPROVE" || review["commit_id"] != "abc" || review["body"] != "clean" {
+		t.Fatalf("review body = %v; must be an APPROVE review pinned to the head", review)
+	}
+	delete(f.bodies, "POST /api/v3/repos/o/r/pulls/7/reviews")
+	// The bot's approval of old stands; a human's of abc, and the bot's
+	// dismissed and comment reviews, do not count.
+	if posted, err := c.Approve(t.Context(), "o", "r", 7, "old", "clean"); err != nil || posted {
+		t.Fatalf("Approve = %v, %v; want the standing approval left as it is", posted, err)
+	}
+	if _, ok := f.bodies["POST /api/v3/repos/o/r/pulls/7/reviews"]; ok {
+		t.Fatal("a head the bot already approved was approved again")
+	}
+	n, err := c.DismissApprovals(t.Context(), "o", "r", 7, "stale")
+	if err != nil || n != 1 {
+		t.Fatalf("DismissApprovals = %d, %v; want the bot's one standing approval dismissed", n, err)
+	}
+	if body := f.bodies["PUT /api/v3/repos/o/r/pulls/7/reviews/4/dismissals"].(map[string]any); body["message"] != "stale" {
+		t.Fatalf("dismissal body = %v", body)
+	}
+	if f.saw("PUT /api/v3/repos/o/r/pulls/7/reviews/2/") {
+		t.Fatal("a human's approval was dismissed")
+	}
+}
+
+func TestListInlineReactions(t *testing.T) {
+	f, c := newFakeAPI(t)
+	f.reply("GET /api/v3/repos/o/r/pulls/7/comments", 200,
+		`[{"id":3,"body":"c","path":"a.go","line":1,"user":{"login":"u"},"reactions":{"+1":2,"-1":1,"heart":5}},
+		  {"id":4,"body":"d","path":"a.go","line":2,"user":{"login":"u"}}]`)
+	inl, err := c.ListInline(t.Context(), "o", "r", 7)
+	if err != nil || len(inl) != 2 {
+		t.Fatalf("ListInline = %+v, %v", inl, err)
+	}
+	if inl[0].ReactionsUp != 2 || inl[0].ReactionsDown != 1 || inl[1].ReactionsUp != 0 || inl[1].ReactionsDown != 0 {
+		t.Fatalf("reactions = %+v; want 👍 and 👎 counted, other reactions and a missing rollup left out", inl)
+	}
+}
+
+// TestGetCommentOutdated: GitHub nulls the line of an inline comment once a
+// push changes the lines it was made on; a current one keeps it.
+func TestGetCommentOutdated(t *testing.T) {
+	f, c := newFakeAPI(t)
+	f.reply("GET /api/v3/repos/o/r/pulls/comments/2", 200, `{"id":2,"body":"inline","path":"a.go","line":4,"original_line":4,"user":{"login":"b[bot]","type":"Bot"}}`)
+	f.reply("GET /api/v3/repos/o/r/pulls/comments/3", 200, `{"id":3,"body":"old","path":"a.go","line":null,"original_line":9,"user":{"login":"b[bot]","type":"Bot"}}`)
+	current, err := c.GetComment(t.Context(), "o", "r", 2, true)
+	if err != nil || current.Outdated || current.Line != 4 {
+		t.Fatalf("current inline GetComment = %+v, %v", current, err)
+	}
+	outdated, err := c.GetComment(t.Context(), "o", "r", 3, true)
+	if err != nil || !outdated.Outdated || outdated.Line != 0 {
+		t.Fatalf("outdated inline GetComment = %+v, %v", outdated, err)
+	}
+}
+
+// openPullsJSON is a listing of two open pull requests, the newer one from
+// a fork and a bot.
+const openPullsJSON = `[
+	{"number":2,"title":"new","state":"open","updated_at":"2026-09-24T22:00:00Z","user":{"login":"x[bot]","type":"Bot"},
+	 "head":{"ref":"f","sha":"h2","repo":{"full_name":"fork/r"}},"base":{"ref":"main","sha":"b2","repo":{"full_name":"o/r","default_branch":"main"}},
+	 "labels":[{"name":"l"}]},
+	{"number":1,"title":"old","state":"open","updated_at":"2026-09-24T10:00:00Z","user":{"login":"u"},
+	 "head":{"ref":"g","sha":"h1","repo":{"full_name":"o/r"}},"base":{"ref":"main","sha":"b1","repo":{"full_name":"o/r"}}}]`
+
 func TestCommentsPermissionAndOpenPullRequests(t *testing.T) {
 	f, c := newFakeAPI(t)
 	f.reply("GET /api/v3/repos/o/r/issues/comments/1", 200, `{"id":1,"body":"hi","user":{"login":"u","type":"User"},"created_at":"2026-09-24T20:00:00Z"}`)
@@ -278,19 +453,14 @@ func TestCommentsPermissionAndOpenPullRequests(t *testing.T) {
 	f.reply("GET /api/v3/repos/o/r/issues/7/comments", 200, `[{"id":1,"body":"a","user":{"login":"u"}},{"id":2,"body":"b","user":{"login":"v"}}]`)
 	f.reply("GET /api/v3/repos/o/r/pulls/7/comments", 200, `[{"id":3,"body":"c","path":"a.go","line":1,"user":{"login":"u"}}]`)
 	f.reply("GET /api/v3/repos/o/r/collaborators/u/permission", 200, `{"permission":"write","role_name":"maintain"}`)
-	f.reply("GET /api/v3/repos/o/r/pulls", 200, `[
-		{"number":2,"title":"new","state":"open","updated_at":"2026-09-24T22:00:00Z","user":{"login":"x[bot]","type":"Bot"},
-		 "head":{"ref":"f","sha":"h2","repo":{"full_name":"fork/r"}},"base":{"ref":"main","sha":"b2","repo":{"full_name":"o/r","default_branch":"main"}},
-		 "labels":[{"name":"l"}]},
-		{"number":1,"title":"old","state":"open","updated_at":"2026-09-24T10:00:00Z","user":{"login":"u"},
-		 "head":{"ref":"g","sha":"h1","repo":{"full_name":"o/r"}},"base":{"ref":"main","sha":"b1","repo":{"full_name":"o/r"}}}]`)
+	f.reply("GET /api/v3/repos/o/r/pulls", 200, openPullsJSON)
 
-	cm, err := c.GetComment(t.Context(), "o", "r", 7, 1, false)
+	cm, err := c.GetComment(t.Context(), "o", "r", 1, false)
 	if err != nil || cm.Author != "u" || cm.AuthorIsBot || cm.CreatedAt.IsZero() {
 		t.Fatalf("GetComment = %+v, %v", cm, err)
 	}
-	inline, err := c.GetComment(t.Context(), "o", "r", 7, 2, true)
-	if err != nil || !inline.Inline || inline.Path != "a.go" || inline.Line != 4 || inline.CommitID != "c1" || inline.InReplyTo != 1 || !inline.AuthorIsBot {
+	inline, err := c.GetComment(t.Context(), "o", "r", 2, true)
+	if err != nil || !inline.Inline || inline.Path != "a.go" || inline.Line != 4 || inline.InReplyTo != 1 || !inline.AuthorIsBot {
 		t.Fatalf("inline GetComment = %+v, %v", inline, err)
 	}
 	conv, err := c.ListConversation(t.Context(), "o", "r", 7)
@@ -316,9 +486,28 @@ func TestCommentsPermissionAndOpenPullRequests(t *testing.T) {
 	}
 }
 
-func TestAPIBase(t *testing.T) {
-	if APIBase("") != "" || APIBase("ghe.example.com/") != "https://ghe.example.com/api/v3" {
-		t.Fatal("APIBase")
+// TestPullRequestByNumber: the zero time lists every open pull request,
+// and one asked for by number comes back as it stands, closed included and
+// with its size, a missing one as fs.ErrNotExist.
+func TestPullRequestByNumber(t *testing.T) {
+	f, c := newFakeAPI(t)
+	f.reply("GET /api/v3/repos/o/r/pulls", 200, openPullsJSON)
+	if all, err := c.ListOpenPullRequests(t.Context(), "o", "r", time.Time{}); err != nil || len(all) != 2 {
+		t.Fatalf("ListOpenPullRequests(zero) = %+v, %v; want every open pull request", all, err)
+	}
+	f.reply("GET /api/v3/repos/o/r/pulls/9", 200, `{"number":9,"state":"closed","merged":true,"closed_at":"2026-10-02T08:59:24Z",
+		"additions":6824,"deletions":291,"changed_files":188,
+		"head":{"ref":"f","sha":"h9","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},
+		"user":{"login":"u","type":"User"}}`)
+	f.reply("GET /api/v3/repos/o/r/pulls/10", 404, `{"message":"Not Found"}`)
+	closed, err := c.PullRequest(t.Context(), "o", "r", 9)
+	if err != nil || closed.State != "closed" || !closed.Merged || closed.ClosedAt == nil ||
+		!closed.ClosedAt.Equal(time.Date(2026, 10, 2, 8, 59, 24, 0, time.UTC)) ||
+		closed.Additions != 6824 || closed.Deletions != 291 || closed.ChangedFiles != 188 {
+		t.Fatalf("PullRequest(9) = %+v, %v; want it closed and merged at 08:59:24, with its size", closed, err)
+	}
+	if _, err := c.PullRequest(t.Context(), "o", "r", 10); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("PullRequest(10) = %v, want fs.ErrNotExist", err)
 	}
 }
 
@@ -343,32 +532,74 @@ func TestOpenPullRequestForkDetection(t *testing.T) {
 	}
 }
 
-func TestIssue(t *testing.T) {
+// TestCommentListingsAreBounded: a listing stops at maxListedComments
+// rather than reading a pull request's every comment into memory.
+func TestCommentListingsAreBounded(t *testing.T) {
+	old := maxListedComments
+	maxListedComments = 2
+	t.Cleanup(func() { maxListedComments = old })
 	f, c := newFakeAPI(t)
-	f.reply("GET /api/v3/repos/o/r/issues/7", 200, `{
-		"number":7,"title":"t","body":"b","state":"open",
-		"user":{"login":"u"},"labels":[{"name":"bug"}],"assignees":[{"login":"a"}],
-		"html_url":"https://github.com/o/r/issues/7"
-	}`)
-	f.reply("GET /api/v3/repos/o/r/issues/8", 200, `{
-		"number":8,"title":"pr","state":"open","user":{"login":"u"},
-		"html_url":"https://github.com/o/r/pull/8","pull_request":{},"draft":true
-	}`)
-	iss, err := c.Issue(t.Context(), "o", "r", 7)
-	if err != nil {
-		t.Fatalf("Issue: %v", err)
+	f.reply("GET /api/v3/repos/o/r/issues/7/comments", 200,
+		`[{"id":1,"body":"a","user":{"login":"u"}},{"id":2,"body":"b","user":{"login":"u"}},{"id":3,"body":"c","user":{"login":"u"}}]`)
+	f.reply("GET /api/v3/repos/o/r/pulls/7/comments", 200,
+		`[{"id":4,"body":"a","path":"a.go","line":1,"user":{"login":"u"}},{"id":5,"body":"b","path":"a.go","line":2,"user":{"login":"u"}},
+		  {"id":6,"body":"c","path":"a.go","line":3,"user":{"login":"u"}}]`)
+	conv, err := c.ListConversation(t.Context(), "o", "r", 7)
+	if err != nil || len(conv) != 2 || conv[1].ID != 2 {
+		t.Fatalf("ListConversation = %+v, %v; want the two oldest", conv, err)
 	}
-	want := forge.Issue{
-		Number: 7, Title: "t", Body: "b", State: "open", Author: "u",
-		Labels: []string{"bug"}, Assignees: []string{"a"}, IsPull: false,
-		URL: "https://github.com/o/r/issues/7",
+	inl, err := c.ListInline(t.Context(), "o", "r", 7)
+	if err != nil || len(inl) != 2 || inl[1].ID != 5 {
+		t.Fatalf("ListInline = %+v, %v; want the two oldest", inl, err)
 	}
-	if !reflect.DeepEqual(iss, want) {
-		t.Fatalf("Issue = %+v, want %+v", iss, want)
+}
+
+// TestReactions: a conversation comment and an inline one are reacted to,
+// and the reaction taken off, in their own namespaces.
+func TestReactions(t *testing.T) {
+	tests := []struct {
+		name    string
+		comment forge.Comment
+		path    string
+	}{
+		{name: "conversation comment", comment: forge.Comment{ID: 5}, path: "/api/v3/repos/o/r/issues/comments/5/reactions"},
+		{name: "inline comment", comment: forge.Comment{ID: 6, Inline: true}, path: "/api/v3/repos/o/r/pulls/comments/6/reactions"},
 	}
-	pr, err := c.Issue(t.Context(), "o", "r", 8)
-	if err != nil || !pr.IsPull || !pr.Draft {
-		t.Fatalf("Issue(pull request) = %+v, %v; want a draft pull request", pr, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, c := newFakeAPI(t)
+			f.reply("POST "+tt.path, 201, `{"id":77,"content":"eyes"}`)
+			f.reply("DELETE "+tt.path+"/77", 204, ``)
+			id, err := c.React(t.Context(), "o", "r", tt.comment, forge.ReactionEyes)
+			if err != nil || id != 77 || f.bodies["POST "+tt.path].(map[string]any)["content"] != "eyes" {
+				t.Fatalf("React = %d, %v, body %v", id, err, f.bodies["POST "+tt.path])
+			}
+			if err := c.Unreact(t.Context(), "o", "r", tt.comment, id); err != nil || !f.saw("DELETE "+tt.path+"/77") {
+				t.Fatalf("Unreact = %v, requests %v", err, f.requests)
+			}
+		})
+	}
+
+	t.Run("a refused reaction is an error", func(t *testing.T) {
+		f, c := newFakeAPI(t)
+		f.reply("POST /api/v3/repos/o/r/issues/comments/5/reactions", 403, `{"message":"Resource not accessible by integration"}`)
+		if _, err := c.React(t.Context(), "o", "r", forge.Comment{ID: 5}, forge.ReactionEyes); err == nil {
+			t.Fatal("React = nil, want the forge's refusal")
+		}
+	})
+}
+
+// TestPullRequestReactions: a pull request's own reactions are its issue's.
+func TestPullRequestReactions(t *testing.T) {
+	f, c := newFakeAPI(t)
+	f.reply("POST /api/v3/repos/o/r/issues/7/reactions", 201, `{"id":78,"content":"+1"}`)
+	f.reply("DELETE /api/v3/repos/o/r/issues/7/reactions/78", 204, ``)
+	id, err := c.ReactToPullRequest(t.Context(), "o", "r", 7, forge.ReactionDone)
+	if err != nil || id != 78 || f.bodies["POST /api/v3/repos/o/r/issues/7/reactions"].(map[string]any)["content"] != "+1" {
+		t.Fatalf("ReactToPullRequest = %d, %v, body %v", id, err, f.bodies["POST /api/v3/repos/o/r/issues/7/reactions"])
+	}
+	if err := c.UnreactToPullRequest(t.Context(), "o", "r", 7, id); err != nil || !f.saw("DELETE /api/v3/repos/o/r/issues/7/reactions/78") {
+		t.Fatalf("UnreactToPullRequest = %v, requests %v", err, f.requests)
 	}
 }
 
@@ -384,7 +615,7 @@ func TestRepoLabelsPaginates(t *testing.T) {
 		_, _ = w.Write([]byte(`[{"name":"a"},{"name":"b"}]`))
 	})
 	labels, err := c.RepoLabels(t.Context(), "o", "r")
-	if err != nil || !reflect.DeepEqual(labels, []string{"a", "b", "c"}) {
+	if err != nil || !slices.Equal(labels, []string{"a", "b", "c"}) {
 		t.Fatalf("RepoLabels = %v, %v", labels, err)
 	}
 }
@@ -395,7 +626,7 @@ func TestAddLabelsAndRemoveLabel(t *testing.T) {
 	if err := c.AddLabels(t.Context(), "o", "r", 7, []string{"bug"}); err != nil {
 		t.Fatalf("AddLabels: %v", err)
 	}
-	body := f.bodies["POST /api/v3/repos/o/r/issues/7/labels"].([]any)
+	body, _ := f.bodies["POST /api/v3/repos/o/r/issues/7/labels"].([]any)
 	if len(body) != 1 || body[0] != "bug" {
 		t.Fatalf("AddLabels body = %v, want a bare array", body)
 	}
@@ -407,7 +638,7 @@ func TestAddLabelsAndRemoveLabel(t *testing.T) {
 	f.reply("DELETE /api/v3/repos/o/r/issues/7/labels/bug", 200, `[]`)
 	f.reply("DELETE /api/v3/repos/o/r/issues/7/labels/gone", 404, `{"message":"Label does not exist"}`)
 	f.reply("DELETE /api/v3/repos/o/r/issues/7/labels/boom", 500, `{"message":"boom"}`)
-	cases := []struct {
+	tests := []struct {
 		name    string
 		label   string
 		wantErr bool
@@ -416,11 +647,10 @@ func TestAddLabelsAndRemoveLabel(t *testing.T) {
 		{"label not applied is not an error", "gone", false},
 		{"server error is an error", "boom", true},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := c.RemoveLabel(t.Context(), "o", "r", 7, tc.label)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("RemoveLabel(%s) = %v, wantErr %v", tc.label, err, tc.wantErr)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := c.RemoveLabel(t.Context(), "o", "r", 7, tt.label); (err != nil) != tt.wantErr {
+				t.Fatalf("RemoveLabel(%s) = %v, wantErr %v", tt.label, err, tt.wantErr)
 			}
 		})
 	}
@@ -429,7 +659,7 @@ func TestAddLabelsAndRemoveLabel(t *testing.T) {
 func TestSetState(t *testing.T) {
 	f, c := newFakeAPI(t)
 	f.reply("PATCH /api/v3/repos/o/r/issues/7", 200, `{"number":7}`)
-	cases := []struct {
+	tests := []struct {
 		name  string
 		open  bool
 		state string
@@ -437,50 +667,48 @@ func TestSetState(t *testing.T) {
 		{"open", true, "open"},
 		{"closed", false, "closed"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := c.SetState(t.Context(), "o", "r", 7, tc.open); err != nil {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := c.SetState(t.Context(), "o", "r", 7, tt.open); err != nil {
 				t.Fatalf("SetState: %v", err)
 			}
-			body := f.bodies["PATCH /api/v3/repos/o/r/issues/7"].(map[string]any)
-			if body["state"] != tc.state {
-				t.Fatalf("SetState(%v) body = %v, want state %q", tc.open, body, tc.state)
+			body, _ := f.bodies["PATCH /api/v3/repos/o/r/issues/7"].(map[string]any)
+			if body["state"] != tt.state {
+				t.Fatalf("SetState(%v) body = %v, want state %q", tt.open, body, tt.state)
 			}
 		})
 	}
 }
 
-func TestAddAssignees(t *testing.T) {
-	f, c := newFakeAPI(t)
-	f.reply("POST /api/v3/repos/o/r/issues/7/assignees", 200, `{"number":7,"assignees":[{"login":"a"}]}`)
-	if err := c.AddAssignees(t.Context(), "o", "r", 7, []string{"a"}); err != nil {
-		t.Fatalf("AddAssignees: %v", err)
+// TestAssigneesAndReviewers: each posts its logins, and none is no call.
+func TestAssigneesAndReviewers(t *testing.T) {
+	tests := []struct {
+		name, route, field string
+		call               func(c *Client, logins []string) error
+	}{
+		{"assignees", "POST /api/v3/repos/o/r/issues/7/assignees", "assignees", func(c *Client, logins []string) error {
+			return c.AddAssignees(t.Context(), "o", "r", 7, logins)
+		}},
+		{"reviewers", "POST /api/v3/repos/o/r/pulls/7/requested_reviewers", "reviewers", func(c *Client, logins []string) error {
+			return c.RequestReviewers(t.Context(), "o", "r", 7, logins)
+		}},
 	}
-	body := f.bodies["POST /api/v3/repos/o/r/issues/7/assignees"].(map[string]any)
-	assignees := body["assignees"].([]any)
-	if len(assignees) != 1 || assignees[0] != "a" {
-		t.Fatalf("AddAssignees body = %v", body)
-	}
-	before := len(f.requests)
-	if err := c.AddAssignees(t.Context(), "o", "r", 7, nil); err != nil || len(f.requests) != before {
-		t.Fatalf("AddAssignees with no logins must be a no-op: err=%v", err)
-	}
-}
-
-func TestRequestReviewers(t *testing.T) {
-	f, c := newFakeAPI(t)
-	f.reply("POST /api/v3/repos/o/r/pulls/7/requested_reviewers", 200, `{"number":7}`)
-	if err := c.RequestReviewers(t.Context(), "o", "r", 7, []string{"rev"}); err != nil {
-		t.Fatalf("RequestReviewers: %v", err)
-	}
-	body := f.bodies["POST /api/v3/repos/o/r/pulls/7/requested_reviewers"].(map[string]any)
-	reviewers := body["reviewers"].([]any)
-	if len(reviewers) != 1 || reviewers[0] != "rev" {
-		t.Fatalf("RequestReviewers body = %v", body)
-	}
-	before := len(f.requests)
-	if err := c.RequestReviewers(t.Context(), "o", "r", 7, nil); err != nil || len(f.requests) != before {
-		t.Fatalf("RequestReviewers with no logins must be a no-op: err=%v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, c := newFakeAPI(t)
+			f.reply(tt.route, 200, `{"number":7}`)
+			if err := tt.call(c, []string{"a"}); err != nil {
+				t.Fatalf("%s: %v", tt.name, err)
+			}
+			body, _ := f.bodies[tt.route].(map[string]any)
+			if got, _ := body[tt.field].([]any); len(got) != 1 || got[0] != "a" {
+				t.Fatalf("%s body = %v", tt.name, body)
+			}
+			before := len(f.requests)
+			if err := tt.call(c, nil); err != nil || len(f.requests) != before {
+				t.Fatalf("%s with no logins must be a no-op: err=%v", tt.name, err)
+			}
+		})
 	}
 }
 
@@ -497,9 +725,10 @@ func TestSearchIssues(t *testing.T) {
 	}{
 		{"issues and pull requests interleaved to the limit", "crash on start", 3,
 			[]string{"repo:o/r is:issue crash on start", "repo:o/r is:pull-request crash on start"}, []int{1, 10, 2}},
-		{"qualifiers are dropped", "crash repo:other/x is:closed -repo:o/r", 5,
+		{"qualifiers are dropped", "crash repo:other/x is:closed -repo:o/r org:other", 5,
 			[]string{"repo:o/r is:issue crash", "repo:o/r is:pull-request crash"}, []int{1, 10, 2, 11}},
 		{"nothing left to search for", "repo:other/x", 5, nil, nil},
+		{"no limit, no search", "crash", 0, nil, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

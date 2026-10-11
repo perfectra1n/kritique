@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // triage is the plan's issue triage example.
@@ -17,10 +17,10 @@ on:
   - issue: [opened, reopened]
   - comment: [created]
   - raw: {event: "issues", actions: ["transferred"]}
-if: 'subject.kind == "issue" && !("triaged" in subject.labels)'
+when: [{expr: 'subject.kind == "issue" && !("triaged" in subject.labels)'}]
 mode: agentic
 models: {review: anthropic/claude}
-agent: {maxSteps: 20, timeout: 5m, tools: [read_file, grep, list_files], commands: [rg]}
+agent: {steps: 20, timeout: 5m, tools: [read_file, grep, list_files], commands: [rg]}
 context:
   thread: {comments: 30}
   files: [{path: CONTRIBUTING.md}, {glob: "docs/area/*.md", max: 5}]
@@ -38,16 +38,16 @@ actions:
   comment:
     mode: sticky
     template: .kritique/tasks/triage-comment.md.tmpl
-    if: 'answer.fields.needsInfo || size(answer.labels.add) > 0'
+    when: [{expr: 'answer.fields.needsInfo || size(answer.labels.add) > 0'}]
   labels:
     propose: {add: ["bug", "enhancement", "area/*"], remove: ["needs-triage"]}
     rules:
       - add: ["priority/{{ .Fields.priority }}", "area/{{ .Fields.area }}"]
       - add: ["needs-info"]
-        if: 'answer.fields.needsInfo'
-  state:     {propose: {close: true}, if: 'subject.kind == "issue"'}
+        when: [{expr: 'answer.fields.needsInfo'}]
+  state:     {propose: {close: true}, when: [{expr: 'subject.kind == "issue"'}]}
   assign:    {propose: {users: ["alice", "bob"]}}
-  reviewers: {rules: [{users: ["bob"], if: 'answer.fields.area == "runner"'}]}
+  reviewers: {rules: [{users: ["bob"], when: [{expr: 'answer.fields.area == "runner"'}]}]}
   inlineComments: {propose: true}
 `
 
@@ -146,12 +146,12 @@ func TestCheck(t *testing.T) {
 	}{
 		{"bad name", "name: Triage\non: [{issue: []}]\n", "name"},
 		{"no trigger", "name: a\n", "at least one trigger"},
-		{"bad CEL", base + "if: 'subject.kind =='\n", "if"},
-		{"CEL not a boolean", base + "if: '1 + 1'\n", "boolean"},
-		{"answer in the task's if", base + "if: 'answer.summary != \"\"'\n", "cannot use answer"},
+		{"bad CEL", base + "when: [{expr: 'subject.kind =='}]\n", "when"},
+		{"CEL not a boolean", base + "when: [{expr: '1 + 1'}]\n", "boolean"},
+		{"answer in the task's when", base + "when: [{expr: 'answer.summary != \"\"'}]\n", "cannot use answer"},
 		{"bad mode", base + "mode: fast\n", "mode"},
 		{"bad model", base + "models: {review: claude}\n", "models.review"},
-		{"negative agent limit", base + "agent: {maxSteps: 0}\n", "positive"},
+		{"negative agent limit", base + "agent: {steps: 0}\n", "positive"},
 		{"command path", base + "agent: {commands: [/bin/sh]}\n", "bare command"},
 		{"bad raw glob", "name: a\non: [{raw: {event: '['}}]\n", "raw.event"},
 		{"bad action glob", "name: a\non: [{issue: ['[']}]\n", "actions[0]"},
@@ -175,7 +175,7 @@ func TestCheck(t *testing.T) {
 		{"bad promptInline", base + "promptInline: '{{ .Subject'\n", "promptInline"},
 		{"define in promptInline", base + "promptInline: '{{ define \"x\" }}{{ end }}'\n", "define"},
 		{"bad rule template", base + "actions: {labels: {rules: [{add: ['{{ .Fields.x']}]}}\n", "labels.rules[0].add"},
-		{"bad action CEL", base + "actions: {labels: {propose: {add: [x]}, if: 'answer.'}}\n", "if"},
+		{"bad action CEL", base + "actions: {labels: {propose: {add: [x]}, when: [{expr: 'answer.'}]}}\n", "when"},
 		{"state rule both", base + "actions: {state: {rules: [{close: true, reopen: true}]}}\n", "exactly one"},
 		{"bad propose login", base + "actions: {assign: {propose: {users: ['a b']}}}\n", "not a login"},
 		{"commands in single mode", base + "mode: single\ncontext: {commands: [{name: x, run: ls}]}\n", "agentic"},
@@ -212,7 +212,7 @@ func TestCheck(t *testing.T) {
 		"comment mode none on a raw release trigger": "name: a\non: [{raw: {event: release}}]\nactions: {comment: {mode: none}}\n",
 		"a raw issues trigger writes labels":         "name: a\non: [{raw: {event: issues}}]\nactions: {labels: {propose: {add: [x]}}}\n",
 		"inline comments with a comment trigger":     "name: a\non: [{issue: []}, {comment: []}]\nactions: {inlineComments: {propose: true}}\n",
-		"answer in an action's if":                   base + "actions: {labels: {propose: {add: [x]}, if: 'answer.fields.x == 1'}}\n",
+		"answer in an action's when":                 base + "actions: {labels: {propose: {add: [x]}, when: [{expr: 'answer.fields.x == 1'}]}}\n",
 		"single mode":                                base + "mode: single\n",
 		"a switched-off task needs only its name":    "name: a\nenabled: false\n",
 	} {
@@ -236,7 +236,7 @@ func TestMatches(t *testing.T) {
 	closed := SampleInput()
 	closed.Action = "closed"
 	release := Input{Forge: "github", RawEvent: "release", Action: "published", Raw: map[string]any{"release": map[string]any{"tag_name": "v1"}}}
-	releases := mustTask(t, "name: rel\non: [{raw: {event: 'rel*', actions: [pub*]}}]\nif: 'raw.release.tag_name.startsWith(\"v\")'\n")
+	releases := mustTask(t, "name: rel\non: [{raw: {event: 'rel*', actions: [pub*]}}]\nwhen: [{expr: 'raw.release.tag_name.startsWith(\"v\")'}]\n")
 	anyIssue := mustTask(t, "name: any\non: [{issue: []}]\n")
 	tests := []struct {
 		name string
@@ -262,9 +262,9 @@ func TestMatches(t *testing.T) {
 			}
 		})
 	}
-	t.Run("a failing if is an error", func(t *testing.T) {
+	t.Run("a failing when is an error", func(t *testing.T) {
 		t.Parallel()
-		bad := mustTask(t, "name: a\non: [{issue: []}]\nif: 'raw.missing.key == 1'\n")
+		bad := mustTask(t, "name: a\non: [{issue: []}]\nwhen: [{expr: 'raw.missing.key == 1'}]\n")
 		if _, err := bad.Matches(issue); err == nil {
 			t.Fatal("want an error")
 		}

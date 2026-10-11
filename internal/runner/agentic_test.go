@@ -3,10 +3,12 @@ package runner
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,9 +32,16 @@ index 111..222 100644
 +func b() {}
 `
 
+// loopPrompt is a review's prompt for s as agentLoop takes it, with the
+// strict contract when strict is set.
+func loopPrompt(s Spec, strict bool) agentPrompt {
+	return agentPrompt{system: "system", user: "user", submit: SubmitTool(strict, s.Prompt.Diagram), validate: review.Check}
+}
+
 func agentPromptSpec() Spec {
-	s := agenticSpec()
+	s := reviewSpec()
 	s.PriorHead = shaB
+	s.Prompt.PriorChecked = []string{"util.go: u is pure"}
 	return s
 }
 
@@ -42,55 +51,93 @@ func TestAgentPrompt(t *testing.T) {
 		Context: []contextpack.Chunk{{Stage: contextpack.StageDefinition, Path: "util.go", StartLine: 1, EndLine: 2, Text: "func u() {}"}},
 		Scope:   review.ScopeFull,
 	}
-	files := repoconfig.Files{"docs/rules.md": "Operator rules.", ".kritique/rules.md": "Repository rules."}
+	files := repoconfig.Files{"docs/rules.md": "Admin rules.", ".kritique/rules.md": "Repository rules.", "AGENTS.md": "Agent notes."}
 	tests := []struct {
-		name         string
-		paths        []string
-		scoped       map[string][]string
-		scope        review.Scope
-		instructions []string
-		strict       bool
+		name    string
+		scope   review.Scope
+		rules   []configfile.Rule
+		active  []review.Rule
+		strict  bool
+		diagram bool
+		// priorDiagram is the last review's diagram the spec carries.
+		priorDiagram string
+		// rerun reviews the head the last review saw.
+		rerun bool
+		// manual is a review asked for by hand.
+		manual bool
 	}{
-		{name: "the named instructions and strictness", paths: []string{"docs/rules.md"},
-			scope: review.ScopeFull, instructions: []string{"Operator rules."}, strict: true},
-		{name: "instructions in the order named", paths: []string{".kritique/rules.md", "docs/rules.md"},
-			scope: review.ScopeFull, instructions: []string{"Repository rules.", "Operator rules."}, strict: true},
-		{name: "an instruction scoped to paths the change does not touch is left out", paths: []string{"docs/rules.md", ".kritique/rules.md"},
-			scoped: map[string][]string{".kritique/rules.md": {"web/**"}}, scope: review.ScopeFull, instructions: []string{"Operator rules."}, strict: true},
-		{name: "one scoped to a path it touches is kept", paths: []string{"docs/rules.md", ".kritique/rules.md"},
-			scoped: map[string][]string{".kritique/rules.md": {"*.go"}}, scope: review.ScopeFull,
-			instructions: []string{"Operator rules.", "Repository rules."}, strict: true},
+		{name: "strictness", scope: review.ScopeFull, strict: true},
+		{name: "a re-run at the reviewed head is not shown the earlier findings", scope: review.ScopeFull, rerun: true},
+		{name: "a re-run asked for at a new head is not shown the earlier findings", scope: review.ScopeFull, manual: true},
+		{name: "a diagram asked for is in the prompt", scope: review.ScopeFull, diagram: true},
 		{name: "incremental adds the delta and the prior findings", scope: review.ScopeIncremental, strict: true},
+		{
+			name: "incremental shows the prior diagram to keep or update", scope: review.ScopeIncremental, diagram: true,
+			priorDiagram: "flowchart LR\n  A[Request] --> B[Handler]",
+		},
+		{
+			name: "a rule scoped to paths the change does not touch is left out", scope: review.ScopeFull,
+			rules:  []configfile.Rule{{ID: "go", Rule: "Wrap errors.", Paths: []string{"*.go"}}, {ID: "web", Rule: "No inline styles.", Paths: []string{"web/**"}}},
+			active: []review.Rule{{ID: "go", Text: "Wrap errors."}},
+		},
+		{
+			name: "a file rule carries its file, in the order written", scope: review.ScopeFull,
+			rules: []configfile.Rule{{ID: "repo", File: ".kritique/rules.md"}, {ID: "admin", File: "docs/rules.md", Paths: []string{"web/**"}},
+				{ID: "go", Rule: "Wrap errors."}},
+			active: []review.Rule{{ID: "repo", Text: "Repository rules.", File: ".kritique/rules.md"}, {ID: "go", Text: "Wrap errors."}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := agentPromptSpec()
-			s.Prompt.Instructions, s.Prompt.InstructionScopes, s.Prompt.RequireSuggestedFix = tt.paths, tt.scoped, tt.strict
+			s.Prompt.RequireSuggestedFix, s.Prompt.Diagram, s.Prompt.Rules = tt.strict, tt.diagram, tt.rules
+			s.Prompt.PriorDiagram = tt.priorDiagram
+			if tt.rerun {
+				s.PriorHead = s.Head
+			}
+			if tt.manual {
+				s.Prompt.PullRequest.Event = "manual"
+			}
+			fresh := tt.rerun || tt.manual
 			pack := pack
 			pack.Scope = tt.scope
 			if tt.scope == review.ScopeIncremental {
 				pack.DeltaDiff = agentDiff
 			}
-			system, user, strict := agentPrompt(s, files, pack, nil)
-			if want := review.AgenticSystemPrompt(tt.instructions, nil); system != want {
+			in := newPromptInputs(s, files, nil, pack.Changed)
+			if !slices.Equal(in.ruleIDs(), ruleIDs(tt.active)) {
+				t.Fatalf("rule ids = %v, want %v", in.ruleIDs(), ruleIDs(tt.active))
+			}
+			prompt := newAgentPrompt(s, in, pack, nil, false, false)
+			system, user := prompt.system, prompt.user
+			if want := review.SystemPrompt(tt.active, nil, []string{"Agent notes."}, nil, false, false, tt.diagram); system != want {
 				t.Fatalf("system prompt:\n%s", system)
 			}
 			var inc *review.IncrementalInput
-			if tt.scope == review.ScopeIncremental {
-				inc = &review.IncrementalInput{PriorHeadSHA: shaB, DeltaDiff: agentDiff, Prior: s.Prompt.Prior}
+			var earlier *review.EarlierInput
+			switch {
+			case tt.scope == review.ScopeIncremental:
+				inc = &review.IncrementalInput{PriorHeadSHA: shaB, DeltaDiff: agentDiff, Prior: s.Prompt.Prior, PriorDiagram: tt.priorDiagram,
+					Checked: s.Prompt.PriorChecked}
+			case !fresh:
+				earlier = &review.EarlierInput{HeadSHA: shaB, Findings: s.Prompt.Prior, Checked: s.Prompt.PriorChecked}
 			}
 			want, _, _ := review.Build(review.Input{
 				Repository: "acme/widgets", Number: 7, Title: "Add b", Author: "octocat", Body: "Adds b.", BaseRef: "main",
-				Changed: pack.Changed, Diff: agentDiff, Context: pack.Context, Incremental: inc, BudgetTokens: review.UserBudget(system),
+				Changed: pack.Changed, Diff: agentDiff, Context: pack.Context, Incremental: inc, Earlier: earlier,
+				BudgetTokens: review.UserBudget(system, 0),
 			})
 			if user != want {
 				t.Fatalf("user message:\n%s\nwant:\n%s", user, want)
 			}
-			if strict != tt.strict {
-				t.Fatalf("strict = %v, want %v", strict, tt.strict)
+			if want := SubmitTool(tt.strict, tt.diagram); string(prompt.submit.InputSchema) != string(want.InputSchema) {
+				t.Fatalf("submit schema is not the strict = %v, diagram = %v contract", tt.strict, tt.diagram)
 			}
-			if tt.scope == review.ScopeIncremental && !strings.Contains(user, "earlier finding") {
-				t.Fatalf("incremental prompt lacks the prior findings:\n%s", user)
+			if tt.priorDiagram != "" && !strings.Contains(user, tt.priorDiagram) {
+				t.Fatalf("incremental prompt lacks the prior diagram:\n%s", user)
+			}
+			if strings.Contains(user, "earlier finding") == fresh || strings.Contains(user, "u is pure") == fresh {
+				t.Fatalf("a re-review is shown the last review's findings and notes unless it re-runs the reviewed head or was asked for:\n%s", user)
 			}
 		})
 	}
@@ -102,32 +149,107 @@ func TestAgentPromptPointsAtContext(t *testing.T) {
 		{Path: "docs/arch.md", Description: "how the parts fit"},
 		{Path: "db/schema.sql", Description: "the schema", Paths: []string{"**/*.sql"}},
 	}
-	_, user, _ := agentPrompt(s, repoconfig.Files{"docs/arch.md": "never inlined"}, packView{Diff: agentDiff, Changed: []string{"main.go"}}, nil)
+	files := repoconfig.Files{"docs/arch.md": "never inlined"}
+	pack := packView{Diff: agentDiff, Changed: []string{"main.go"}}
+	user := newAgentPrompt(s, newPromptInputs(s, files, nil, pack.Changed), pack, nil, false, false).user
 	if !strings.Contains(user, "### docs/arch.md: how the parts fit\n") || strings.Contains(user, "never inlined") || strings.Contains(user, "schema") {
 		t.Fatalf("user message:\n%s", user)
 	}
 }
 
+// ruleIDs is the ids of rules, for comparing with a prompt's inputs.
+func ruleIDs(rules []review.Rule) []string {
+	ids := make([]string, 0, len(rules))
+	for _, r := range rules {
+		ids = append(ids, r.ID)
+	}
+	return ids
+}
+
+// TestPromptInputsNotes: the notes say what the prompt's budgets cut.
+func TestPromptInputsNotes(t *testing.T) {
+	s := agentPromptSpec()
+	s.Prompt.Rules = []configfile.Rule{{ID: "big", Rule: strings.Repeat("x", repoconfig.MaxRulesBytes)}, {ID: "left", Rule: "Wrap errors."}}
+	files := repoconfig.Files{"AGENTS.md": strings.Repeat("y", repoconfig.MaxInstructionBytes+1)}
+	in := newPromptInputs(s, files, nil, []string{"main.go"})
+	if want := []string{noteInstructionsTruncated, "1 review rules left out, past the 16 KiB of rule text or 32 KiB of rule files a review is given"}; !slices.Equal(in.notes, want) {
+		t.Fatalf("notes = %q, want %q", in.notes, want)
+	}
+	const lines = 60_000
+	big := "diff --git a/big.go b/big.go\n--- a/big.go\n+++ b/big.go\n@@ -0,0 +1," + strconv.Itoa(lines) + " @@\n" + strings.Repeat("+x\n", lines)
+	long := packView{Diff: agentDiff + big, Changed: []string{"main.go", "big.go"}}
+	prompt := newAgentPrompt(s, in, long, nil, false, false)
+	if notes := prompt.notes(); len(notes) != 1 || notes[0] != "1 diff file(s) left out of the prompt to fit its budget: big.go" {
+		t.Fatalf("prompt notes = %q", notes)
+	}
+	many := agentPrompt{omitted: []string{"a", "b", "c", "d", "e", "f", "g"}, contextOmitted: 2}
+	want := []string{"7 diff file(s) left out of the prompt to fit its budget: a, b, c, d, e, and 2 more", "2 context chunk(s) left out of the prompt to fit its budget"}
+	if notes := many.notes(); !slices.Equal(notes, want) {
+		t.Fatalf("notes = %q, want %q", notes, want)
+	}
+}
+
 func TestAgentSkip(t *testing.T) {
+	// Three lines change in main.go and two in docs/a.md.
+	const diff = "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,2 +1,3 @@\n-a\n+A\n+B\n c\n" +
+		"diff --git a/docs/a.md b/docs/a.md\n--- a/docs/a.md\n+++ b/docs/a.md\n@@ -1,2 +1,2 @@\n-x\n+X\n y\n"
+	both := []string{"main.go", "docs/a.md"}
+	large := configfile.Filters{Exclude: []configfile.Filter{{Name: "too-large", Expr: "pr.lines > 4"}}}
+	docs := configfile.Filters{Exclude: []configfile.Filter{{Name: "docs", Paths: []string{"docs/**"}}}}
+	filtered := string(repoconfig.SkipFiltered)
 	tests := []struct {
 		name    string
-		skip    []string
+		ignore  []string
 		changed []string
 		patchID string
-		want    string
+		filters []configfile.Filters
+		// labels replace the pull request's when set.
+		labels     string
+		want       string
+		wantDetail string
+		wantErr    bool
 	}{
 		{name: "reviewed", changed: []string{"main.go"}, patchID: "p2"},
 		{name: "unchanged bot patch", changed: []string{"main.go"}, patchID: "p1", want: SkipUnchangedPatch},
-		{name: "only skipped paths", skip: []string{"**/*.md"}, changed: []string{"docs/a.md"}, patchID: "p2",
+		{name: "only ignored paths", ignore: []string{"**/*.md"}, changed: []string{"docs/a.md"}, patchID: "p2",
 			want: string(repoconfig.SkipOnlyPaths)},
-		{name: "a path the skip rule does not cover", skip: []string{"**/*.md"}, changed: []string{"docs/a.md", "main.go"}, patchID: "p2"},
+		{name: "a path the ignore globs do not cover", ignore: []string{"**/*.md"}, changed: []string{"docs/a.md", "main.go"}, patchID: "p2"},
+		{name: "more changed lines than an exclusion allows", changed: both, patchID: "p2", filters: []configfile.Filters{large},
+			want: filtered, wantDetail: "too-large"},
+		{name: "ignored paths do not count toward pr.lines", ignore: []string{"**/*.md"}, changed: both, patchID: "p2",
+			filters: []configfile.Filters{large}},
+		{name: "exactly the lines an exclusion allows", changed: both, patchID: "p2",
+			filters: []configfile.Filters{{Exclude: []configfile.Filter{{Name: "too-large", Expr: "pr.lines > 5"}}}}},
+		{name: "an exclusion by paths", changed: both, patchID: "p2", filters: []configfile.Filters{docs}, want: filtered, wantDetail: "docs"},
+		{name: "an exclusion whose paths nothing changed matches", changed: []string{"main.go"}, patchID: "p2", filters: []configfile.Filters{docs}},
+		{name: "an exclusion without a name", changed: both, patchID: "p2",
+			filters: []configfile.Filters{{Exclude: []configfile.Filter{{Paths: []string{"docs/**"}}}}}, want: filtered},
+		{name: "the second lists skip", changed: both, patchID: "p2",
+			filters: []configfile.Filters{{Exclude: []configfile.Filter{{Name: "huge", Expr: "pr.lines > 100"}}}, docs}, want: filtered, wantDetail: "docs"},
+		{name: "an inclusion by paths holds", changed: both, patchID: "p2",
+			filters: []configfile.Filters{{Include: []configfile.Filter{{Name: "source", Paths: []string{"*.go"}}}}}},
+		{name: "no inclusion by paths holds", changed: both, patchID: "p2",
+			filters: []configfile.Filters{{Include: []configfile.Filter{{Name: "source", Paths: []string{"src/**"}}}}}, want: filtered},
+		{name: "an unchanged bot patch is skipped as such first", changed: both, patchID: "p1", filters: []configfile.Filters{large, docs},
+			want: SkipUnchangedPatch},
+		{name: "only ignored paths are skipped as such first", ignore: []string{"**/*.md"}, changed: []string{"docs/a.md"}, patchID: "p2",
+			filters: []configfile.Filters{docs}, want: string(repoconfig.SkipOnlyPaths)},
+		// The expression passes the smoke test, the sample having a label,
+		// and fails on a pull request with none.
+		{name: "a condition that fails to evaluate", changed: both, patchID: "p2", labels: "[]",
+			filters: []configfile.Filters{{Exclude: []configfile.Filter{{Name: "broken", Expr: `pr.labels[0].name == "x"`, Paths: []string{"docs/**"}}}}},
+			want:    filtered, wantDetail: "broken", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := agentPromptSpec()
-			s.Prompt.UnchangedPatchID, s.Prompt.SkipPaths = "p1", tt.skip
-			if got := agentSkip(s, tt.changed, tt.patchID); got != tt.want {
-				t.Fatalf("agentSkip = %q, want %q", got, tt.want)
+			s.Prompt.UnchangedPatchID, s.Prompt.Filters, s.Ignore = "p1", tt.filters, tt.ignore
+			if tt.labels != "" {
+				s.Prompt.PullRequest.Labels = []byte(tt.labels)
+			}
+			got, detail, err := agentSkip(s, tt.changed, tt.patchID, diff)
+			if got != tt.want || detail != tt.wantDetail || (err != nil) != tt.wantErr {
+				t.Fatalf("agentSkip = %q, %q, %v; want %q, %q, error %v", got, detail, err, tt.want, tt.wantDetail, tt.wantErr)
 			}
 		})
 	}
@@ -136,22 +258,53 @@ func TestAgentSkip(t *testing.T) {
 func TestAgentErrorsAreMasked(t *testing.T) {
 	secrets := Secrets{GitToken: "git-token", GatewayToken: "krk_run_token"}
 	rec, err := newAgentRecord(agent.Result{Stop: agent.StopError, Err: `401: {"error":"bad token krk_run_token"}`},
-		nil, []string{"https://example.com/?key=krk_run_token"}, []string{"context x not gathered: krk_run_token"}, secrets)
+		nil, []string{"https://example.com/?key=krk_run_token"}, secrets)
 	if err != nil || strings.Contains(rec.err, "krk_run_token") || !strings.Contains(rec.err, "bad token ***") {
 		t.Fatalf("agent run error = %q, %v", rec.err, err)
-	}
-	if !slices.Equal(rec.notes, []string{"context x not gathered: ***"}) {
-		t.Fatalf("notes = %q", rec.notes)
 	}
 	if string(rec.sources) != `["https://example.com/?key=***"]` {
 		t.Fatalf("sources = %s", rec.sources)
 	}
-	if rec, err := newAgentRecord(agent.Result{Stop: agent.StopMaxSteps}, nil, nil, nil, secrets); err != nil || string(rec.sources) != "[]" ||
-		rec.notes == nil {
+	submitted, err := newAgentRecord(agent.Result{Stop: agent.StopSubmitted, Submitted: json.RawMessage(`{"summary":"the token is git-token"}`)},
+		nil, nil, secrets)
+	if err != nil || submitted.result != `{"summary":"the token is ***"}` {
+		t.Fatalf("submitted review = %s, %v", submitted.result, err)
+	}
+	if rec, err := newAgentRecord(agent.Result{Stop: agent.StopMaxSteps}, nil, nil, secrets); err != nil || string(rec.sources) != "[]" {
 		t.Fatalf("sources of a run without commands = %s, %v", rec.sources, err)
 	}
-	if got := failure(secrets, errors.New("clone https://x:git-token@forge.example.com: denied")); strings.Contains(got, "git-token") {
+	if got := secrets.Mask("clone https://x:git-token@forge.example.com: denied"); strings.Contains(got, "git-token") {
 		t.Fatalf("run error = %q", got)
+	}
+}
+
+func TestKeptConversation(t *testing.T) {
+	secrets := Secrets{GitToken: "git-token", GatewayToken: "krk_run_token"}
+	conv := func(text string, tokens int64) *agent.Conversation {
+		return &agent.Conversation{System: "s", Messages: []model.Message{{Role: model.RoleUser, Text: text}}, Tokens: tokens}
+	}
+	tests := []struct {
+		name string
+		c    *agent.Conversation
+		kept bool
+	}{
+		{"none", nil, false},
+		{"short enough", conv("the diff", agent.ContinueTokens-1), true},
+		{"too long to carry on", conv("the diff", agent.ContinueTokens), false},
+		{"holding the git token", conv("a log said git-token", 10), false},
+		{"holding the run token", conv(`{"auth":"krk_run_token"}`, 10), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := keptConversation(tt.c, secrets, slog.New(slog.DiscardHandler))
+			if (got != nil) != tt.kept {
+				t.Fatalf("kept = %s, want kept %v", got, tt.kept)
+			}
+			var back agent.Conversation
+			if tt.kept && (json.Unmarshal(got, &back) != nil || back.Messages[0].Text != "the diff") {
+				t.Fatalf("kept conversation = %s", got)
+			}
+		})
 	}
 }
 
@@ -176,6 +329,26 @@ func call(id, name, input string) model.ToolCall {
 	return model.ToolCall{ID: id, Name: name, Input: json.RawMessage(input)}
 }
 
+func TestReviewAgentReturnsAFlattenedSummaryToTheModel(t *testing.T) {
+	head := tree(t, map[string]string{"main.go": "package main\n"})
+	flattened := `{"summary":"ok","take":"ok","praise":"[]","findings":[]}`
+	submitted := `{"summary":{"take":"ok","praise":[]},"findings":[]}`
+	st := &scriptedStepper{steps: []model.StepResponse{
+		{ToolCalls: []model.ToolCall{call("1", "submit_review", flattened)}},
+		{ToolCalls: []model.ToolCall{call("2", "submit_review", submitted)}},
+	}}
+	logger := slog.New(slog.DiscardHandler)
+	res, _ := agentLoop(t.Context(), st, agentPromptSpec(), offeredTools(agentPromptSpec(), head, nil, nil), loopPrompt(agentPromptSpec(), false),
+		time.Minute, logger)
+	if res.Stop != agent.StopSubmitted || res.Steps != 2 || string(res.Submitted) != submitted {
+		t.Fatalf("result = %+v", res)
+	}
+	last := st.reqs[1].Messages[len(st.reqs[1].Messages)-1]
+	if len(last.ToolResults) != 1 || !last.ToolResults[0].IsError || !strings.Contains(last.ToolResults[0].Content, "Result.summary") {
+		t.Fatalf("the flattened submit's result = %+v, want the contract's error", last.ToolResults)
+	}
+}
+
 func TestReviewAgentRecordsATimeline(t *testing.T) {
 	head := tree(t, map[string]string{"main.go": "package main\n\nfunc b() {}\n", "vendor/x.go": "func b() {}\n"})
 	st := &scriptedStepper{steps: []model.StepResponse{
@@ -185,8 +358,9 @@ func TestReviewAgentRecordsATimeline(t *testing.T) {
 			Usage: model.Usage{Input: 300, Output: 30}, CostUSD: 0.5},
 	}}
 	s := agentPromptSpec()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	res, timeline := reviewAgent(t.Context(), st, s, head, []string{"vendor/**"}, nil, "system", "user", true, time.Minute, logger)
+	s.Prompt.Diagram = true
+	logger := slog.New(slog.DiscardHandler)
+	res, timeline := agentLoop(t.Context(), st, s, offeredTools(s, head, []string{"vendor/**"}, nil), loopPrompt(s, true), time.Minute, logger)
 	if res.Stop != agent.StopSubmitted || res.Steps != 3 || res.ToolCalls["grep"] != 1 || res.ToolCalls["read_file"] != 1 ||
 		res.ToolCalls["submit_review"] != 1 || res.CostUSD != 0.5 {
 		t.Fatalf("result = %+v", res)
@@ -208,25 +382,49 @@ func TestReviewAgentRecordsATimeline(t *testing.T) {
 		t.Fatalf("timeline = %s", mustJSON(t, timeline))
 	}
 	// The grep saw main.go but not the ignored vendor file; the strict
-	// contract was offered as submit_review.
+	// contract, with the diagram the spec asks for, was offered as
+	// submit_review.
 	req := st.reqs[1]
 	if out := req.Messages[len(req.Messages)-1].ToolResults[0].Content; !strings.Contains(out, "main.go") || strings.Contains(out, "vendor/") {
 		t.Fatalf("grep output = %q", out)
 	}
 	submit := st.reqs[0].Tools[len(st.reqs[0].Tools)-1]
-	if submit.Name != "submit_review" || string(submit.InputSchema) != string(review.SchemaStrict()) {
+	if submit.Name != "submit_review" || string(submit.InputSchema) != string(review.SchemaStrict(true)) {
 		t.Fatalf("submit tool = %+v", submit)
 	}
-	if st.reqs[0].Model != "review" || st.reqs[0].System != "system" || st.reqs[0].MaxTokens != 8192 {
+	if st.reqs[0].Model != "review" || st.reqs[0].System != "system" || st.reqs[0].MaxTokens != agent.DefaultLimits.MaxOutputTokensPerStep {
 		t.Fatalf("request = %+v", st.reqs[0])
+	}
+}
+
+func TestReviewAgentOffersTheDescription(t *testing.T) {
+	head := tree(t, map[string]string{"main.go": "package main\n"})
+	st := &scriptedStepper{steps: []model.StepResponse{
+		{ToolCalls: []model.ToolCall{call("1", "read_description", `{}`)}},
+		{ToolCalls: []model.ToolCall{call("2", "read_description", `{"issue":12}`)}},
+		{ToolCalls: []model.ToolCall{call("3", "submit_review", `{"summary":{"take":"ok","praise":[]},"findings":[]}`)}},
+	}}
+	s := agentPromptSpec()
+	s.Prompt.Issues = []review.Issue{{Number: 12, Title: "Add b", Body: "b is missing."}}
+	logger := slog.New(slog.DiscardHandler)
+	res, _ := agentLoop(t.Context(), st, s, offeredTools(s, head, nil, nil), loopPrompt(s, false), time.Minute, logger)
+	if res.Stop != agent.StopSubmitted || res.ToolCalls["read_description"] != 2 {
+		t.Fatalf("result = %+v", res)
+	}
+	for i, want := range []string{"Adds b.", "b is missing."} {
+		req := st.reqs[i+1]
+		if out := req.Messages[len(req.Messages)-1].ToolResults[0]; out.IsError || out.Content != want {
+			t.Fatalf("read_description result %d = %+v, want %q", i, out, want)
+		}
 	}
 }
 
 func TestReviewAgentTimeout(t *testing.T) {
 	head := tree(t, map[string]string{"main.go": "package main\n"})
 	st := blockingStepper{}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	res, _ := reviewAgent(t.Context(), st, agentPromptSpec(), head, nil, nil, "s", "u", false, 20*time.Millisecond, logger)
+	logger := slog.New(slog.DiscardHandler)
+	res, _ := agentLoop(t.Context(), st, agentPromptSpec(), offeredTools(agentPromptSpec(), head, nil, nil), loopPrompt(agentPromptSpec(), false),
+		20*time.Millisecond, logger)
 	if res.Stop != agent.StopCanceled || !strings.Contains(res.Err, "timeout") {
 		t.Fatalf("result = %+v", res)
 	}
@@ -246,4 +444,124 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func TestSimilarCode(t *testing.T) {
+	chunk := contextpack.Chunk{Stage: contextpack.StageSimilar, Path: "other.go", StartLine: 3, EndLine: 9, Ref: "similarity 0.81", Text: "func a() {}"}
+	for _, tc := range []struct {
+		name    string
+		status  int
+		body    string
+		want    contextpack.SimilarResponse
+		wantErr string
+	}{
+		{name: "chunks", status: http.StatusOK, body: `{"chunks":[{"stage":"similar","path":"other.go","start_line":3,"end_line":9,` +
+			`"ref":"similarity 0.81","text":"func a() {}"}],"indexed":true}`, want: contextpack.SimilarResponse{Chunks: []contextpack.Chunk{chunk}, Indexed: true}},
+		{name: "no index", status: http.StatusOK, body: `{"chunks":[],"indexed":false}`, want: contextpack.SimilarResponse{Chunks: []contextpack.Chunk{}}},
+		{name: "refused", status: http.StatusTooManyRequests, body: `{"error":{"code":"budget_exceeded"}}` + "\n",
+			wantErr: `429 Too Many Requests: {"error":{"code":"budget_exceeded"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var path, auth, body string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				path, auth, body = r.Method+" "+r.URL.Path, r.Header.Get("Authorization"), string(b)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			got, err := similarCode(t.Context(), srv.URL+"/", "krk_run", contextpack.SimilarRequest{Queries: []string{"main.go\nfunc b() {}"}, Exclude: []string{"main.go"}})
+			if path != "POST /v1/similar" || auth != "Bearer krk_run" || body != `{"queries":["main.go\nfunc b() {}"],"exclude":["main.go"]}` {
+				t.Fatalf("request = %s with %q: %s", path, auth, body)
+			}
+			if tc.wantErr != "" {
+				if err == nil || !strings.HasSuffix(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want it to end %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(got.Chunks, tc.want.Chunks) || got.Indexed != tc.want.Indexed {
+				t.Fatalf("similarCode = %+v, %v; want %+v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestHunkQueries: each hunk is led by its path, the removed lines are
+// left out, and the count and size are bounded.
+func TestHunkQueries(t *testing.T) {
+	got := hunkQueries(agentDiff)
+	if want := []string{"main.go\npackage main\n\nfunc b() {}\n"}; !slices.Equal(got, want) {
+		t.Fatalf("hunkQueries = %q, want %q", got, want)
+	}
+	var many strings.Builder
+	for range contextpack.SimilarQueries + 3 {
+		many.WriteString(agentDiff)
+	}
+	if got := hunkQueries(many.String()); len(got) != contextpack.SimilarQueries {
+		t.Fatalf("%d queries, want %d", len(got), contextpack.SimilarQueries)
+	}
+	if got := hunkQueries(""); len(got) != 0 {
+		t.Fatalf("queries of an empty diff = %q", got)
+	}
+}
+
+// TestSearchTool: search_code asks the gateway once per call, formats what
+// it gets back, and stops at its call limit.
+func TestSearchTool(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var req contextpack.SimilarRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Queries) != 1 || req.Queries[0] != "where is the retry" || !slices.Equal(req.Exclude, []string{"main.go"}) {
+			t.Errorf("request = %+v", req)
+		}
+		_, _ = w.Write([]byte(`{"chunks":[{"stage":"similar","path":"retry.go","start_line":3,"end_line":9,"symbol":"retry","kind":"function",` +
+			`"ref":"similarity 0.81","text":"func retry() {}"}],"indexed":true}`))
+	}))
+	defer srv.Close()
+	tool := &searchTool{gatewayURL: srv.URL, token: "krk_run", exclude: []string{"main.go"}, maxBytes: 1 << 10}
+	if def := tool.Def(); def.Name != "search_code" {
+		t.Fatalf("tool name = %q", def.Name)
+	}
+	out, err := tool.Run(t.Context(), json.RawMessage(`{"query":"where is the retry"}`))
+	if err != nil || out != "retry.go:3-9 (function retry) similarity 0.81\nfunc retry() {}" {
+		t.Fatalf("Run = %q, %v", out, err)
+	}
+	if _, err := tool.Run(t.Context(), json.RawMessage(`{"query":" "}`)); err == nil {
+		t.Fatal("an empty query ran")
+	}
+	for range searchCalls - 1 {
+		if _, err := tool.Run(t.Context(), json.RawMessage(`{"query":"where is the retry"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tool.Run(t.Context(), json.RawMessage(`{"query":"where is the retry"}`)); err == nil || calls != searchCalls {
+		t.Fatalf("past the limit: err=%v calls=%d", err, calls)
+	}
+}
+
+func TestAgentPromptBudget(t *testing.T) {
+	big := "diff --git a/big.go b/big.go\n--- a/big.go\n+++ b/big.go\n@@ -0,0 +1,3000 @@\n" +
+		strings.Repeat("+// a line of the large file under review\n", 3000)
+	pack := packView{Diff: agentDiff + big, Changed: []string{"main.go", "big.go"}, Scope: review.ScopeFull}
+	tests := []struct {
+		name  string
+		agent *AgentLimits
+		kept  bool
+	}{
+		{name: "a zero budget takes the default", agent: &AgentLimits{}},
+		{name: "the configured budget keeps the large file", agent: &AgentLimits{MaxPromptTokens: 60_000}, kept: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := agentPromptSpec()
+			s.Agent = tt.agent
+			prompt := newAgentPrompt(s, newPromptInputs(s, nil, nil, pack.Changed), pack, nil, false, false)
+			if kept := strings.Contains(prompt.user, "+// a line of the large file under review"); kept != tt.kept {
+				t.Fatalf("large file in the prompt = %v, want %v", kept, tt.kept)
+			}
+		})
+	}
 }

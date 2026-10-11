@@ -1,0 +1,13 @@
+{
+  "kind": "rule",
+  "id": "wrap-errors",
+  "text": "Wrap an error with the package name before returning it.",
+  "path": "",
+  "description": "",
+  "paths": ["**/*.go"],
+  "when": [],
+  "source": "entry",
+  "repositories": ["alpha/one"],
+  "findings": 3,
+  "addressed": 1
+}

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +11,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/bmatcuk/doublestar/v4"
 
@@ -18,12 +18,13 @@ import (
 	"github.com/perfectra1n/kritique/internal/gitfetch"
 	"github.com/perfectra1n/kritique/internal/repoconfig"
 	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/textcut"
 )
 
 // SpecVersion is the only job document version this runner understands. A
 // worker and runner on different images must agree on it, so a runner
 // refuses any other version instead of guessing at its meaning.
-const SpecVersion = 5
+const SpecVersion = 23
 
 // HeartbeatInterval is how often a runner stamps runner_runs.heartbeat_at.
 // The worker's staleness threshold is several of these.
@@ -39,80 +40,132 @@ const (
 	KindReview Kind = "review"
 	// KindIndex chunks a tree into the index staging table.
 	KindIndex Kind = "index"
+	// KindFollowUp fetches head and merge-base, as a review does, and
+	// answers a comment in a pull request thread.
+	KindFollowUp Kind = "followup"
 	// KindTask runs an agentic task over the tree of one commit.
 	KindTask Kind = "task"
 )
 
 // Valid reports whether k is a kind of run the runner implements.
-func (k Kind) Valid() bool { return k == KindReview || k == KindIndex || k == KindTask }
+func (k Kind) Valid() bool {
+	return k == KindReview || k == KindIndex || k == KindFollowUp || k == KindTask
+}
 
-func (k Kind) String() string { return string(k) }
+// agentic reports whether a run of kind k runs an agent: a review's or a
+// follow-up's.
+func (k Kind) agentic() bool { return k == KindReview || k == KindFollowUp }
 
-// Mode is how a review is carried out.
-type Mode string
-
-// Review modes. The empty mode is single.
-const (
-	ModeSingle  Mode = "single"
-	ModeAgentic Mode = "agentic"
-)
-
-// Valid reports whether m is a review mode; the empty mode is single.
-func (m Mode) Valid() bool { return m == "" || m == ModeSingle || m == ModeAgentic }
-
-func (m Mode) String() string { return string(m) }
-
-// ModelEndpoint is where an agentic run's model calls go: the worker's
-// gateway, which holds the provider key, picks the provider model and its
-// fallbacks, and counts what the run spends (ADR-0004). The run's token for
-// it reaches the pod as a job-scoped secret.
+// ModelEndpoint is where an agent's model calls go: the worker's gateway,
+// which holds the provider key, picks the provider model and its fallbacks,
+// and counts what the run spends. The run's token for it reaches the pod as
+// a job-scoped secret.
 type ModelEndpoint struct {
 	// GatewayURL is the gateway's address, http://host:port.
 	GatewayURL string `json:"gatewayUrl"`
 	// Model is the name the gateway knows the run's model by.
 	Model string `json:"model"`
+	// Granted is the provider/model reference the gateway answers a
+	// review's run with, which its runner records with the conversation it
+	// keeps; the runner calls the model only by Model.
+	Granted string `json:"granted,omitempty"`
 }
 
-// AgentLimits bound an agentic run. A zero limit takes the agent loop's
+// AgentLimits bound a review's or a follow-up's agent. A zero limit takes the agent loop's
 // default; a zero timeout leaves the tool loop to the Job deadline.
 type AgentLimits struct {
 	MaxSteps           int   `json:"maxSteps"`
 	MaxToolOutputBytes int   `json:"maxToolOutputBytes"`
 	MaxTokens          int64 `json:"maxTokens"`
-	TimeoutSeconds     int   `json:"timeoutSeconds,omitempty"`
+	// MaxPromptTokens bounds the agent's opening prompt, the diff and
+	// context it starts from; zero takes review.DefaultBudgetTokens.
+	MaxPromptTokens int `json:"maxPromptTokens,omitempty"`
+	// Parts is the most parts the runner may split a review into, which
+	// the run's grant and deadline cover; under two it never splits.
+	// Parallel is how many of them may run at once, the review model's
+	// slots the run holds; under two runs them one after another.
+	// TimeoutSeconds bounds each part.
+	Parts          int `json:"parts,omitempty"`
+	Parallel       int `json:"parallel,omitempty"`
+	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
 	// Commands name the binaries the run tool may execute; the runner
 	// offers those it finds on its PATH, and no run tool without any.
 	Commands              []string `json:"commands,omitempty"`
 	CommandTimeoutSeconds int      `json:"commandTimeoutSeconds,omitempty"`
 }
 
-// Prompt is what an agentic run needs beyond the checkout to write its
+// Prompt is what a review run needs beyond the checkout to write its
 // review prompt and to tell whether the worker will skip the review: the
 // pull request, the review settings with the merge-base .kritique.yaml
-// applied, and the last completed review's findings.
+// applied, and the last completed review's findings. A follow-up's prompt
+// is written from the same pull request, rules, context files and
+// findings.
 type Prompt struct {
 	Repository  string                 `json:"repository"`
 	PullRequest repoconfig.PullRequest `json:"pullRequest"`
-	// Instructions name repository files, as the review settings do, and
-	// InstructionScopes the changed-path globs a scoped one applies to.
-	Instructions      []string            `json:"instructions,omitempty"`
-	InstructionScopes map[string][]string `json:"instructionScopes,omitempty"`
+	// Issues are the issues the pull request's description says it
+	// closes, as the worker read them from the forge.
+	Issues []review.Issue `json:"issues,omitempty"`
 	// Context names the files that explain the code, which the agent is
 	// pointed at to read for itself.
-	Context             []configfile.ContextFile `json:"context,omitempty"`
-	RequireSuggestedFix bool                     `json:"requireSuggestedFix,omitempty"`
-	// SkipPaths are the .kritique.yaml skip.onlyPaths globs: when every
-	// changed path matches one, the worker will skip the review.
-	SkipPaths []string `json:"skipPaths,omitempty"`
+	Context []configfile.ContextFile `json:"context,omitempty"`
+	// Rules are the configuration's rules, each applied when the change
+	// matches its paths; a file rule's file is among the spec's RepoFiles.
+	Rules               []configfile.Rule `json:"rules,omitempty"`
+	RequireSuggestedFix bool              `json:"requireSuggestedFix,omitempty"`
+	// Diagram asks the review for a Mermaid diagram of the change's flow
+	// in its summary.
+	Diagram bool `json:"diagram,omitempty"`
 	// MaxDeltaFiles is the incremental re-review threshold.
 	MaxDeltaFiles int              `json:"maxDeltaFiles"`
 	Prior         []review.Finding `json:"prior,omitempty"`
+	// PriorDiagram is the last completed review's summary diagram, which a
+	// re-review is asked to keep or update; "" when Diagram is off.
+	PriorDiagram string `json:"priorDiagram,omitempty"`
+	// PriorChecked are the last completed review's notes on what it
+	// checked and found sound, which a re-review is shown with Prior.
+	PriorChecked []string `json:"priorChecked,omitempty"`
+	// Dismissed are the findings maintainers dismissed on the pull
+	// request, which the review is told not to raise again.
+	Dismissed []review.DismissedFinding `json:"dismissed,omitempty"`
 	// UnchangedPatchID, when the head's patch id equals it, means the
 	// worker will skip the review, so the agent is not run.
 	UnchangedPatchID string `json:"unchangedPatchId,omitempty"`
+	// Skills are the directories of the merge base the repository's skills
+	// are looked for in, with the scope of those that have one; nil offers
+	// none.
+	Skills *Skills `json:"skills,omitempty"`
+	// Filters are the include and exclude lists with a condition only the
+	// diff can judge, each of which the pull request must pass: the
+	// admin's, which the worker leaves out for a review someone asked
+	// for, and the repository's own.
+	Filters []configfile.Filters `json:"filters,omitempty"`
+	// Continue, when set, lets an incremental review carry on the last
+	// review's conversation, which the gateway serves the run, if the
+	// review would send it the same system prompt and tools; nil starts
+	// afresh.
+	Continue *Continuation `json:"continue,omitempty"`
 }
 
-// TaskTools are the read-only agent tools a task may use.
+// Continuation is the last review's conversation a review may carry on.
+type Continuation struct {
+	// RunID is the run that kept it, and Session the conversation its
+	// steps were sent as, which the gateway sends this run's as too.
+	RunID   string `json:"runId"`
+	Session string `json:"session"`
+}
+
+// Skills is where a review's skills are looked for and which of them it is
+// offered: Scope's paths are judged against the changed paths here, and
+// Off names the skills whose conditions the worker found not to hold.
+type Skills struct {
+	Paths []string                         `json:"paths"`
+	Scope map[string]configfile.SkillScope `json:"scope,omitempty"`
+	Off   []string                         `json:"off,omitempty"`
+}
+
+// TaskTools are the read-only agent tools a task may use, besides the run
+// tool.
 var TaskTools = []string{"read_file", "grep", "list_files"}
 
 // TaskPrompt is what an agentic task's run needs beyond the checkout: the
@@ -189,21 +242,30 @@ type Spec struct {
 	CloneURL string `json:"cloneUrl"`
 	// Head is the commit under review or to index. Base is the merge-base
 	// for a review and the previously indexed commit for an incremental
-	// index. PriorHead is the head of the last completed review.
-	Head      string `json:"head"`
-	Base      string `json:"base,omitempty"`
-	PriorHead string `json:"priorHead,omitempty"`
-	// Ignore globs, the operator's and .kritique.yaml's, are skipped by the
-	// context stages.
+	// index. PriorHead is the head of the last completed review,
+	// PriorChanged the paths the change touched there, and PriorBase the
+	// merge base it was reviewed against, so the delta since is kept to the
+	// change's own paths, less what the base gained in them, under a merge
+	// or a rebase.
+	Head         string   `json:"head"`
+	Base         string   `json:"base,omitempty"`
+	PriorHead    string   `json:"priorHead,omitempty"`
+	PriorChanged []string `json:"priorChanged,omitempty"`
+	PriorBase    string   `json:"priorBase,omitempty"`
+	// Ignore globs, the admin's and .kritique.yaml's, are skipped by the
+	// context stages, and a review whose every changed path matches one is
+	// skipped.
 	Ignore []string `json:"ignore,omitempty"`
 	// RepoFiles are repository paths read from the merge base: the files
 	// the review settings name, and .kritique.yaml itself when there is one.
 	RepoFiles []string       `json:"repoFiles,omitempty"`
-	Mode      Mode           `json:"mode,omitempty"`
 	Agent     *AgentLimits   `json:"agent,omitempty"`
 	Model     *ModelEndpoint `json:"model,omitempty"`
 	Prompt    *Prompt        `json:"prompt,omitempty"`
-	// Task is a KindTask run's.
+	// Thread is the comments a follow-up answers, oldest first, the last
+	// of them the one to answer.
+	Thread []review.Message `json:"thread,omitempty"`
+	// Task is a task run's prompt, for KindTask.
 	Task *TaskPrompt `json:"task,omitempty"`
 }
 
@@ -213,10 +275,7 @@ func (s Spec) Validate() error {
 		return fmt.Errorf("runner: spec version %d is not supported (want %d)", s.Version, SpecVersion)
 	}
 	if !s.Kind.Valid() {
-		return fmt.Errorf("runner: spec kind %q is not review, index or task", s.Kind)
-	}
-	if !s.Mode.Valid() {
-		return fmt.Errorf("runner: spec mode %q is not single or agentic", s.Mode)
+		return fmt.Errorf("runner: spec kind %q is not review, index, followup or task", s.Kind)
 	}
 	if s.RunID == "" || s.CloneURL == "" {
 		return errors.New("runner: spec needs runId and cloneUrl")
@@ -224,26 +283,35 @@ func (s Spec) Validate() error {
 	if !gitfetch.IsSHA(s.Head) {
 		return fmt.Errorf("runner: spec head %q is not a commit SHA", s.Head)
 	}
-	if s.Kind == KindReview && s.Base == "" {
-		return errors.New("runner: a review spec needs a base")
+	if s.Kind.agentic() && s.Base == "" {
+		return fmt.Errorf("runner: a %s spec needs a base", s.Kind)
 	}
-	for name, sha := range map[string]string{"base": s.Base, "priorHead": s.PriorHead} {
-		if sha != "" && !gitfetch.IsSHA(sha) {
-			return fmt.Errorf("runner: spec %s %q is not a commit SHA", name, sha)
+	for _, c := range []struct{ name, sha string }{{"base", s.Base}, {"priorHead", s.PriorHead}, {"priorBase", s.PriorBase}} {
+		if c.sha != "" && !gitfetch.IsSHA(c.sha) {
+			return fmt.Errorf("runner: spec %s %q is not a commit SHA", c.name, c.sha)
 		}
 	}
-	if s.Mode == ModeAgentic {
+	if s.Kind == KindFollowUp && len(s.Thread) == 0 {
+		return errors.New("runner: a followup spec needs the thread it answers")
+	}
+	if s.Kind == KindTask {
+		return s.validateTask()
+	}
+	if s.Kind.agentic() {
 		if s.Agent == nil {
-			return errors.New("runner: an agentic spec needs agent limits")
+			return fmt.Errorf("runner: a %s spec needs agent limits", s.Kind)
 		}
 		if s.Model == nil || s.Model.Model == "" || s.Model.GatewayURL == "" {
-			return errors.New("runner: an agentic spec needs a model and the gateway to reach it through")
+			return fmt.Errorf("runner: a %s spec needs a model and the gateway to reach it through", s.Kind)
 		}
-		if s.Kind == KindReview && s.Prompt == nil {
-			return errors.New("runner: an agentic spec needs a prompt")
+		if s.Prompt == nil {
+			return fmt.Errorf("runner: a %s spec needs a prompt", s.Kind)
+		}
+		if c := s.Prompt.Continue; c != nil && (c.RunID == "" || c.Session == "") {
+			return fmt.Errorf("runner: a %s spec's continuation needs a run and a session", s.Kind)
 		}
 		if len(s.Agent.Commands) > 0 && s.Agent.CommandTimeoutSeconds <= 0 {
-			return errors.New("runner: an agentic spec with commands needs a command timeout")
+			return fmt.Errorf("runner: a %s spec with commands needs a command timeout", s.Kind)
 		}
 		for _, c := range s.Agent.Commands {
 			// A name with a separator would make exec.LookPath take it as a path.
@@ -252,13 +320,27 @@ func (s Spec) Validate() error {
 			}
 		}
 	}
-	if s.Kind == KindTask {
-		if s.Mode != ModeAgentic || s.Task == nil {
-			return errors.New("runner: a task spec needs agentic mode and a task")
-		}
-		return s.Task.validate(s.Agent.Commands)
-	}
 	return nil
+}
+
+// validateTask checks a task run's spec: its agent, the gateway it reaches
+// its model through and its prompt.
+func (s Spec) validateTask() error {
+	if s.Agent == nil || s.Task == nil {
+		return errors.New("runner: a task spec needs agent limits and a task prompt")
+	}
+	if s.Model == nil || s.Model.Model == "" || s.Model.GatewayURL == "" {
+		return errors.New("runner: a task spec needs a model and the gateway to reach it through")
+	}
+	if len(s.Agent.Commands) > 0 && s.Agent.CommandTimeoutSeconds <= 0 {
+		return errors.New("runner: a task spec with commands needs a command timeout")
+	}
+	for _, c := range s.Agent.Commands {
+		if c == "" || strings.ContainsRune(c, '/') {
+			return fmt.Errorf("runner: spec command %q is not a bare command name", c)
+		}
+	}
+	return s.Task.validate(s.Agent.Commands)
 }
 
 // Spec size bounds. A spec travels as a key of the run's Secret, which
@@ -269,12 +351,16 @@ const (
 	// git and gateway tokens.
 	MaxSpecBytes = 900 << 10
 	// MaxPriorFindings is how many of the last review's findings a spec
-	// carries.
+	// carries, and how many dismissed ones.
 	MaxPriorFindings = 200
 	// MaxBodyBytes bounds the pull request body a spec carries. Encoding
 	// can grow it sixfold (each '<' becomes \u003c), which the spec bound
 	// still holds.
 	MaxBodyBytes = 64 << 10
+	// MaxIssueBytes bounds each linked issue's body a spec carries: the
+	// prompt shows a few thousand characters of one, and three worst-case
+	// issues must leave the body and the findings their room.
+	MaxIssueBytes = 16 << 10
 )
 
 // maxPromptBytes is what Trim leaves an encoded prompt, under MaxSpecBytes
@@ -287,22 +373,19 @@ const maxPromptBytes = 768 << 10
 // share of the spec, by half at a time, keeping the first in the order the
 // worker read them.
 func (p *Prompt) Trim() {
-	if body := p.PullRequest.Body; len(body) > MaxBodyBytes {
-		n := MaxBodyBytes
-		for n > 0 && !utf8.RuneStart(body[n]) {
-			n--
-		}
-		p.PullRequest.Body = body[:n]
+	p.PullRequest.Body = textcut.Prefix(p.PullRequest.Body, MaxBodyBytes)
+	for i := range p.Issues {
+		p.Issues[i].Body = textcut.Prefix(p.Issues[i].Body, MaxIssueBytes)
 	}
-	if len(p.Prior) > MaxPriorFindings {
-		p.Prior = p.Prior[:MaxPriorFindings]
-	}
-	for len(p.Prior) > 0 {
+	p.Prior = p.Prior[:min(len(p.Prior), MaxPriorFindings)]
+	p.Dismissed = p.Dismissed[:min(len(p.Dismissed), MaxPriorFindings)]
+	for len(p.Prior) > 0 || len(p.Dismissed) > 0 {
 		b, err := json.Marshal(p)
 		if err != nil || len(b) <= maxPromptBytes {
 			return
 		}
 		p.Prior = p.Prior[:len(p.Prior)/2]
+		p.Dismissed = p.Dismissed[:len(p.Dismissed)/2]
 	}
 }
 
@@ -355,8 +438,8 @@ func DecodeSpec(data []byte) (Spec, error) {
 }
 
 // Secrets are a run's credentials, delivered apart from the spec: the git
-// token it fetches with and, for an agentic run, its token for the model
-// gateway.
+// token it fetches with and, for a review or a follow-up, its token for
+// the model gateway.
 type Secrets struct {
 	GitToken     string
 	GatewayToken string
@@ -366,7 +449,7 @@ type Secrets struct {
 // "***". Longer secrets go first so one containing another is masked whole.
 func (s Secrets) Mask(text string) string {
 	values := []string{s.GitToken, s.GatewayToken}
-	slices.SortFunc(values, func(a, b string) int { return len(b) - len(a) })
+	slices.SortFunc(values, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	for _, v := range values {
 		if v != "" {
 			text = strings.ReplaceAll(text, v, "***")

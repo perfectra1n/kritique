@@ -1,9 +1,9 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/perfectra1n/kritique/main/docs/kritique.schema.json
+# yaml-language-server: $schema=https://kritique.perfectra1n.github.io/kritique.schema.json
 tasks:
   - name: pr-area
     on:
       - pull_request: [opened, ready_for_review]
-    if: "!subject.draft"
+    when: [{ expr: "!subject.draft" }]
     mode: single
     promptInline: |
       Pick the areas of the project pull request #{{ .Subject.Number }} of {{ .Repo.Owner }}/{{ .Repo.Name }}
@@ -15,4 +15,4 @@ tasks:
         # Every area/ label the repository has is on offer, but none is
         # added unless the model is sure.
         propose: { add: ["area/*"] }
-        if: answer.fields.confidence == "high"
+        when: [{ name: sure, expr: answer.fields.confidence == "high" }]

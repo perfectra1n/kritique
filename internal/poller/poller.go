@@ -1,19 +1,24 @@
 // Package poller backstops missed webhooks: on the leader, every interval
-// and per installation, it lists the open pull requests updated since the
-// last poll and hands them to the ingest dispatcher as if a webhook had
-// delivered them. Review jobs are unique on the head SHA, so a head the
+// and per account, it lists the open pull requests, hands those updated
+// since the last poll to the ingest dispatcher as if a webhook had
+// delivered them, and closes the ones kritique holds open that the forge no
+// longer lists. Review jobs are unique on the head SHA, so a head the
 // webhook already enqueued is skipped as a duplicate, never reviewed twice.
-// An installation's first poll records the pull requests last updated
-// before kritique knew the installation as a baseline instead of reviewing
-// them: no webhook for them was missed, and on a large install reviewing
-// them all would be one burst of model calls nobody asked for.
+// An account's first poll records the pull requests last updated before
+// kritique knew the account as a baseline instead of reviewing them: no
+// webhook for them was missed, and on a large install reviewing them all
+// would be one burst of model calls nobody asked for.
 package poller
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,146 +31,389 @@ import (
 	"github.com/perfectra1n/kritique/internal/webhook"
 )
 
-// Forges builds a forge client per installation, as the worker does.
-type Forges interface {
-	For(ctx context.Context, in *configfile.Installation, externalID int64, repo string) (forge.Client, error)
-}
-
 // Poller lists open pull requests on a schedule.
 type Poller struct {
 	Store      *store.Store
 	Current    *configfile.Current
-	Forges     Forges
+	Forges     forge.Clients
 	Dispatcher ingest.Dispatcher
 	Logger     *slog.Logger
 	// Metrics may be nil.
 	Metrics *metrics.Metrics
+	// Reach lists, by lowercased account login, the repositories a
+	// connection's App reaches; nil registers none.
+	Reach func(ctx context.Context, in *configfile.Connection) (map[string][]store.ReachedRepository, error)
+
+	// unknown are the pull requests held open that the forge did not know
+	// when asked, by "owner/name#number": asked once per process, so they
+	// neither cost a request every poll nor use up the poll's checks.
+	mu      sync.Mutex
+	unknown map[string]bool
 }
 
 // pollOffRecheck is how often Run looks again at a file that turns
 // polling off, so turning it back on takes effect without a restart.
 const pollOffRecheck = time.Minute
 
+// reachTimeout bounds one connection's repository listing: the leader
+// lists right after applying the configuration and applies no change
+// until it is done, so a hung forge must not hold that up.
+const reachTimeout = time.Minute
+
 // Run polls until ctx ends, every polling.interval of the file current at
 // the time. The first poll happens after one interval, so a freshly
 // elected leader does not hammer the forge while ingest is already serving
-// webhooks.
-func (p *Poller) Run(ctx context.Context) error {
+// webhooks. A poll is given the interval: one that outlasts it, on a forge
+// that answers slowly for every repository of a large account, is cut
+// there, and its accounts' poll state is left where it was for the next.
+func (p *Poller) Run(ctx context.Context) {
 	for {
 		interval := p.Current.Get().PollInterval()
-		wait := interval
-		if interval <= 0 {
-			wait = pollOffRecheck
-		}
-		t := time.NewTimer(wait)
+		t := time.NewTimer(cmp.Or(interval, pollOffRecheck))
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			return nil
+			return
 		case <-t.C:
 			if interval > 0 {
-				p.PollAll(ctx)
+				pctx, cancel := context.WithTimeout(ctx, interval)
+				p.PollAll(pctx)
+				if pctx.Err() != nil && ctx.Err() == nil {
+					p.Logger.Warn("poll cut at its interval", "interval", interval)
+				}
+				cancel()
 			}
 		}
 	}
 }
 
-// PollAll polls every installation in the current configuration whose forge
-// the worker can build a client for.
-func (p *Poller) PollAll(ctx context.Context) {
+// SyncRepositories registers the repositories each running connection's
+// App reaches on the accounts it serves, as a webhook from each would, so
+// they are known, polled and indexed without one: an App installed before
+// kritique started sends no installation event. The forge-reported
+// repositories an account's listing no longer has are disabled, in case
+// the webhook that said so was missed. A connection whose listing fails,
+// or takes longer than reachTimeout, is logged and left for the next poll,
+// and an account whose listing is empty is left as it is.
+func (p *Poller) SyncRepositories(ctx context.Context) {
+	if p.Reach == nil {
+		return
+	}
 	file := p.Current.Get()
-	for ti := range file.Tenants {
-		tenant := &file.Tenants[ti]
-		for ii := range tenant.Installations {
-			in := &tenant.Installations[ii]
-			if ctx.Err() != nil {
-				return
+	for i := range file.Connections {
+		in := &file.Connections[i]
+		if ctx.Err() != nil {
+			return
+		}
+		// The listing's time is the database's, which stamps the rows a
+		// webhook names meanwhile; this clock may differ from it.
+		listedAt, err := p.Store.Now(ctx)
+		if err != nil {
+			p.Logger.Warn("repositories not synced", "connection", in.Name, "error", err)
+			continue
+		}
+		reachCtx, cancel := context.WithTimeout(ctx, reachTimeout)
+		reach, err := p.Reach(reachCtx, in)
+		cancel()
+		if err != nil {
+			p.Logger.Warn("repositories not synced", "connection", in.Name, "error", err)
+			continue
+		}
+		for j := range file.Accounts {
+			account := &file.Accounts[j]
+			if c := file.ConnectionFor(account); c == nil || c.Name != in.Name {
+				continue
 			}
-			n, err := p.Poll(ctx, file, tenant, in)
-			switch {
-			case err != nil:
-				p.Logger.Warn("poll failed", "installation", in.Name, "error", err)
-				p.Metrics.Poll(in.Name, "error", 0)
-			default:
-				p.Metrics.Poll(in.Name, "ok", n)
+			repos := reach[strings.ToLower(account.Name)]
+			if len(repos) == 0 {
+				continue
+			}
+			added, disabled, err := p.Store.RegisterRepositories(ctx, account.ID(), repos, listedAt)
+			if err != nil {
+				p.Logger.Warn("repositories not synced", "connection", in.Name, "account", account.Key(), "error", err)
+				continue
+			}
+			if added > 0 {
+				p.Logger.Info("repositories registered", "connection", in.Name, "account", account.Key(), "added", added)
+			}
+			if disabled > 0 {
+				p.Logger.Info("repositories no longer listed disabled", "connection", in.Name, "account", account.Key(), "disabled", disabled)
 			}
 		}
 	}
 }
 
-type repoRow struct {
-	name       string
-	externalID int64
+// PollAll registers the repositories the Apps reach, then polls every
+// account in the current configuration through the connection serving it.
+func (p *Poller) PollAll(ctx context.Context) {
+	p.SyncRepositories(ctx)
+	file := p.Current.Get()
+	for i := range file.Accounts {
+		account := &file.Accounts[i]
+		in := file.ConnectionFor(account)
+		if in == nil || ctx.Err() != nil {
+			continue
+		}
+		n, err := p.Poll(ctx, file, account, in)
+		switch {
+		case err != nil:
+			p.Logger.Warn("poll failed", "connection", in.Name, "account", account.Key(), "error", err)
+			p.Metrics.Poll(in.Name, "error", 0)
+		default:
+			p.Metrics.Poll(in.Name, "ok", n)
+		}
+	}
 }
 
-// Poll lists one installation's repositories and returns how many pull
-// requests were handed to the dispatcher.
-func (p *Poller) Poll(ctx context.Context, file *configfile.File, tenant *configfile.Tenant, in *configfile.Installation) (int, error) {
-	var repos []repoRow
-	var known time.Time
-	var polled *time.Time
-	err := p.Store.WithTenant(ctx, tenant.ID(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT r.name, coalesce(i.external_id, 0) FROM repositories r JOIN installations i ON i.id = r.installation_id
-			WHERE r.installation_id = $1 AND r.enabled ORDER BY r.name`, in.ID())
-		if err != nil {
+// Poll lists one account's repositories through the connection serving it
+// and returns how many pull requests were handed to the dispatcher. For a
+// connection no webhook has reached lately, it also checks each indexed
+// repository's default branch, since no push webhook will say it moved. A
+// repository the forge will not answer for is skipped and the rest polled;
+// the poll state is then left where it was, so the next poll covers the
+// skipped repository's window too, and the error names each one.
+func (p *Poller) Poll(ctx context.Context, file *configfile.File, account *configfile.Account, in *configfile.Connection) (int, error) {
+	var repos []store.PollRepo
+	var state store.PollState
+	err := p.Store.WithAccount(ctx, account.ID(), func(tx pgx.Tx) error {
+		var err error
+		if repos, err = store.PollRepositories(ctx, tx); err != nil {
 			return err
 		}
-		if repos, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (repoRow, error) {
-			var r repoRow
-			err := row.Scan(&r.name, &r.externalID)
-			return r, err
-		}); err != nil {
-			return err
-		}
-		return tx.QueryRow(ctx, `SELECT i.created_at, s.last_polled_at FROM installations i
-			LEFT JOIN poll_state s ON s.installation_id = i.id WHERE i.id = $1`, in.ID()).Scan(&known, &polled)
+		state, err = store.ReadPollState(ctx, tx, account.ID(), in.ID())
+		return err
 	})
 	if err != nil {
-		return 0, fmt.Errorf("poller: read state: %w", err)
+		return 0, err
 	}
 	since := time.Now().Add(-file.PollLookback())
-	if polled != nil && polled.After(since) {
-		since = *polled
+	if state.Polled != nil && state.Polled.After(since) {
+		since = *state.Polled
 	}
+	checkTips := state.Delivered == nil || state.Delivered.Before(time.Now().Add(-file.PollLookback()))
 	started := time.Now()
 	handled := 0
+	runs := map[string]bool{}
+	var skipped []error
 	for _, r := range repos {
 		if ctx.Err() != nil {
 			return handled, ctx.Err()
 		}
-		client, err := p.Forges.For(ctx, in, r.externalID, r.name)
+		repo := r.Name
+		// The App can reach it, but it is archived, a fork not turned on,
+		// or off in the settings.
+		if !file.Runs(account, repo, r.Traits) {
+			continue
+		}
+		runs[repo] = true
+		// The client is the account's, not the repository's: without it
+		// nothing else can be polled either.
+		client, err := p.Forges.For(ctx, in, repo)
 		if err != nil {
 			return handled, err
 		}
-		owner, name, _ := strings.Cut(r.name, "/")
-		prs, err := client.ListOpenPullRequests(ctx, owner, name, since)
+		owner, name, _ := strings.Cut(repo, "/")
+		if checkTips && r.IndexedCommit != "" {
+			if err := p.pollTip(ctx, file, account, in, client, r, started); err != nil {
+				skipped = append(skipped, fmt.Errorf("%s: %w", repo, err))
+			}
+		}
+		// Every open pull request is listed, not only those updated since
+		// the last poll: the ones kritique holds open and the forge no
+		// longer lists have closed.
+		prs, err := client.ListOpenPullRequests(ctx, owner, name, time.Time{})
 		if err != nil {
-			return handled, err
+			skipped = append(skipped, fmt.Errorf("%s: %w", repo, err))
+			continue
+		}
+		if err := p.closeMissed(ctx, file, account, in, client, r, prs); err != nil {
+			skipped = append(skipped, fmt.Errorf("%s: %w", repo, err))
 		}
 		for _, pr := range prs {
-			action := "poll"
-			if polled == nil && !pr.UpdatedAt.After(known) {
+			if pr.UpdatedAt.Before(since) {
+				continue
+			}
+			action := ingest.ActionPoll
+			if state.Polled == nil && !pr.UpdatedAt.After(state.Known) {
 				action = ingest.ActionBaseline
 			}
 			ev := webhook.Event{
 				Kind: webhook.KindPullRequest, Action: action, Delivery: fmt.Sprintf("poll-%s-%d", started.UTC().Format("20060102T150405"), pr.Number),
-				Repository: &webhook.Repository{FullName: r.name, DefaultBranch: pr.DefaultBranch}, Account: owner, PullRequest: &pr.PullRequest,
+				Repository: &webhook.Repository{FullName: repo, DefaultBranch: pr.DefaultBranch, RepoTraits: r.Traits},
+				Account:    owner, PullRequest: &pr.PullRequest,
 			}
-			out, err := p.Dispatcher.Dispatch(ctx, ingest.Request{File: file, Tenant: tenant, Installation: in, Event: ev})
+			out, err := p.Dispatcher.Dispatch(ctx, ingest.Request{File: file, Account: account, Event: ev})
 			if err != nil {
 				return handled, err
 			}
 			handled++
-			p.Logger.Info("polled pull request "+out.Status, "installation", in.Name, "repository", r.name, "pr", pr.Number, "reason", out.Reason)
+			p.Logger.Info("polled pull request", "status", out.Status, "connection", in.Name, "repository", repo,
+				"pr", pr.Number, "reason", out.Reason)
 		}
 	}
-	err = p.Store.WithTenant(ctx, tenant.ID(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO poll_state (installation_id, tenant_id, last_polled_at) VALUES ($1, $2, $3)
-			ON CONFLICT (installation_id) DO UPDATE SET last_polled_at = excluded.last_polled_at, updated_at = now()`, in.ID(), tenant.ID(), started)
+	if err := p.pollReactions(ctx, account, in, runs); err != nil {
+		p.Logger.Warn("reactions not read", "connection", in.Name, "account", account.Key(), "error", err)
+	}
+	if len(skipped) > 0 {
+		return handled, fmt.Errorf("poller: %d of %d repositories not polled: %w", len(skipped), len(runs), errors.Join(skipped...))
+	}
+	err = p.Store.WithAccount(ctx, account.ID(), func(tx pgx.Tx) error {
+		return store.RecordPoll(ctx, tx, account.ID(), started)
+	})
+	return handled, err
+}
+
+// maxCloseChecks bounds how many pull requests one poll of a repository
+// asks the forge about one by one; the rest wait for the next poll.
+const maxCloseChecks = 50
+
+// closeMissed records as closed the pull requests of repository r that
+// kritique holds open and listed, the forge's open ones, does not have: a
+// closed event that was never delivered would otherwise leave one open for
+// good. Each is asked for by number, so one opened since the listing is
+// left as it is, and one the forge no longer knows is left for a person,
+// and not asked for again while the process runs.
+func (p *Poller) closeMissed(
+	ctx context.Context, file *configfile.File, account *configfile.Account, in *configfile.Connection, client forge.Client,
+	r store.PollRepo, listed []forge.OpenPullRequest,
+) error {
+	var held []int
+	err := p.Store.WithAccount(ctx, account.ID(), func(tx pgx.Tx) error {
+		var err error
+		held, err = store.OpenPullRequests(ctx, tx, configfile.RepositoryID(account.ID(), r.Name))
 		return err
 	})
 	if err != nil {
-		return handled, fmt.Errorf("poller: write state: %w", err)
+		return err
 	}
-	return handled, nil
+	open := make(map[int]bool, len(listed))
+	for _, pr := range listed {
+		open[pr.Number] = true
+	}
+	owner, name, _ := strings.Cut(r.Name, "/")
+	checks := 0
+	for _, number := range held {
+		key := fmt.Sprintf("%s#%d", r.Name, number)
+		if open[number] || p.isUnknown(key) {
+			continue
+		}
+		if checks++; checks > maxCloseChecks {
+			break
+		}
+		pr, err := client.PullRequest(ctx, owner, name, number)
+		if errors.Is(err, fs.ErrNotExist) {
+			p.Logger.Warn("pull request held open is unknown to the forge", "connection", in.Name, "repository", r.Name, "pr", number)
+			p.markUnknown(key)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if pr.State != "closed" {
+			continue
+		}
+		ev := webhook.Event{
+			Kind: webhook.KindPullRequest, Action: "closed", Delivery: fmt.Sprintf("poll-closed-%d", number),
+			Repository: &webhook.Repository{FullName: r.Name, DefaultBranch: pr.DefaultBranch, RepoTraits: r.Traits},
+			Account:    owner, PullRequest: &pr.PullRequest,
+		}
+		if _, err := p.Dispatcher.Dispatch(ctx, ingest.Request{File: file, Account: account, Event: ev}); err != nil {
+			return err
+		}
+		p.Logger.Info("pull request closed without its event", "connection", in.Name, "repository", r.Name, "pr", number, "merged", pr.Merged)
+	}
+	return nil
+}
+
+func (p *Poller) isUnknown(key string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.unknown[key]
+}
+
+func (p *Poller) markUnknown(key string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.unknown == nil {
+		p.unknown = map[string]bool{}
+	}
+	p.unknown[key] = true
+}
+
+// reactionWindow is how long after its latest review a pull request's
+// reactions are read again: a finding is reacted to soon after it is
+// posted, if at all.
+const reactionWindow = 7 * 24 * time.Hour
+
+// reactionPulls bounds the pull requests one poll reads the reactions of,
+// per account, the most recently reviewed first, so an account with many
+// open pull requests does not spend its API quota on them every poll.
+const reactionPulls = 30
+
+// pollReactions reads the 👍 and 👎 on the inline comments kritique posted
+// on the account's recently reviewed pull requests, in the repositories
+// that run, into their findings. GitHub sends no webhook for a reaction.
+func (p *Poller) pollReactions(ctx context.Context, account *configfile.Account, in *configfile.Connection, runs map[string]bool) error {
+	var pulls []store.ReviewedPull
+	err := p.Store.WithAccount(ctx, account.ID(), func(tx pgx.Tx) error {
+		var err error
+		pulls, err = store.RecentlyReviewedPulls(ctx, tx, time.Now().Add(-reactionWindow), reactionPulls)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	for _, pr := range pulls {
+		if !runs[pr.Repository] || ctx.Err() != nil {
+			continue
+		}
+		client, err := p.Forges.For(ctx, in, pr.Repository)
+		if err != nil {
+			return err
+		}
+		owner, name, _ := strings.Cut(pr.Repository, "/")
+		comments, err := client.ListInline(ctx, owner, name, pr.Number)
+		if err != nil {
+			return err
+		}
+		reactions := make([]store.Reaction, len(comments))
+		for i, c := range comments {
+			reactions[i] = store.Reaction{CommentID: c.ID, Up: c.ReactionsUp, Down: c.ReactionsDown}
+		}
+		err = p.Store.WithAccount(ctx, account.ID(), func(tx pgx.Tx) error {
+			return store.RecordReactions(ctx, tx, pr.ID, reactions)
+		})
+		if err != nil {
+			return fmt.Errorf("poller: write reactions of %s#%d: %w", pr.Repository, pr.Number, err)
+		}
+	}
+	return nil
+}
+
+// pollTip hands the dispatcher a push to r's default branch when its tip is
+// not the commit r's index covers, so the index follows the branch as a
+// push webhook would have made it.
+func (p *Poller) pollTip(
+	ctx context.Context, file *configfile.File, account *configfile.Account, in *configfile.Connection, client forge.Client, r store.PollRepo,
+	started time.Time,
+) error {
+	owner, name, _ := strings.Cut(r.Name, "/")
+	tip, branch, err := client.BranchTip(ctx, owner, name, r.DefaultBranch)
+	if err != nil {
+		return err
+	}
+	if tip == r.IndexedCommit {
+		return nil
+	}
+	ev := webhook.Event{
+		Kind: webhook.KindPush, Delivery: fmt.Sprintf("poll-%s-push", started.UTC().Format("20060102T150405")),
+		Repository: &webhook.Repository{FullName: r.Name, DefaultBranch: branch, RepoTraits: r.Traits}, Account: owner,
+		Push: &webhook.Push{Ref: "refs/heads/" + branch, After: tip},
+	}
+	out, err := p.Dispatcher.Dispatch(ctx, ingest.Request{File: file, Account: account, Event: ev})
+	if err != nil {
+		return err
+	}
+	p.Logger.Info("polled default branch", "status", out.Status, "connection", in.Name, "repository", r.Name, "tip", tip, "reason", out.Reason)
+	return nil
 }

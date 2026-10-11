@@ -3,15 +3,16 @@
   import { href } from '../../router.svelte';
   import { REVIEW_TABS, type ReviewTab } from '../../routes';
   import { Resource, live } from '../../resource.svelte';
-  import { isActive } from '../../format';
-  import { pullRoute, rerunPath, cancelPath } from '../../links';
-  import { canAdmin } from '../../session.svelte';
+  import { isActive, rerunBody, skipText } from '../../format';
+  import { pullRoute, rerunPath, cancelPath, accountApi } from '../../links';
+  import { isAdmin } from '../../session.svelte';
   import ActionButton from '../../components/ActionButton.svelte';
   import type { ReviewDetail } from '../../types';
   import StateView from '../../components/StateView.svelte';
-  import ReviewStatusPill from '../../components/ReviewStatusPill.svelte';
+  import ReviewStatusTile from '../../components/ReviewStatusTile.svelte';
   import ReviewMeta from '../../components/ReviewMeta.svelte';
   import Time from '../../components/Time.svelte';
+  import NoMoreReviews from '../../components/NoMoreReviews.svelte';
   import SummaryTab from './SummaryTab.svelte';
   import DiffTab from './DiffTab.svelte';
   import ConversationTab from './ConversationTab.svelte';
@@ -19,9 +20,9 @@
   import RawTab from './RawTab.svelte';
   import UsageTab from './UsageTab.svelte';
 
-  let { slug, id, tab = 'summary' }: { slug: string; id: string; tab?: ReviewTab } = $props();
+  let { slug, id, tab = 'summary', finding }: { slug: string; id: string; tab?: ReviewTab; finding?: string } = $props();
 
-  const base = $derived(`/api/v1/tenants/${encodeURIComponent(slug)}/reviews/${encodeURIComponent(id)}`);
+  const base = $derived(`${accountApi(slug)}/reviews/${encodeURIComponent(id)}`);
   const res = new Resource(() => getJSON<ReviewDetail>(base));
   // Bumped on every live refresh so the lazily-loaded tab data refetches too.
   let version = $state(0);
@@ -31,13 +32,22 @@
   });
   $effect(() =>
     live(
-      (e) => e.tenant === slug && e.reviewId === id && !!res.data && isActive(res.data.review.status),
+      (e) => e.account === slug && e.reviewId === id && !!res.data && isActive(res.data.review.status),
       () => {
         void res.load();
         version++;
       },
     ),
   );
+
+  // The status leads, so a tab left open on a running review shows when it
+  // is done.
+  const title = $derived.by(() => {
+    const r = res.data?.review;
+    return r ? `${r.status} · ${r.pull.repository}#${r.pull.number} review` : 'Review';
+  });
+
+  const RUN_TABS: readonly ReviewTab[] = ['conversation', 'timeline', 'raw', 'usage'];
 
   const labels: Record<ReviewTab, string> = {
     summary: 'Summary',
@@ -49,11 +59,14 @@
   };
 </script>
 
+<svelte:head><title>{title} · kritique</title></svelte:head>
+
 <main class="page">
   <div class="page-inner">
     <StateView {res} retry={() => res.load()}>
       {#snippet children(d)}
         {@const r = d.review}
+        {@const cancelable = isActive(r.status) && !r.cancelRequestedAt}
         <header class="page-head">
           <p class="crumbs">
             <a href={href({ name: 'pulls', slug })}>Pull requests</a> /
@@ -61,29 +74,34 @@
           </p>
           <h1>{r.pull.title}</h1>
           <p class="meta-line">
-            <ReviewStatusPill status={r.status} />
-            <Time iso={r.createdAt} />
-            <ReviewMeta {r} />
+            <ReviewStatusTile status={r.status} />
+            <span>started <Time iso={r.createdAt} /></span>
+            {#if r.status === 'skipped' && r.skipReason}<span>skipped: {skipText[r.skipReason]}</span>{/if}
+            {#if r.priorReviewId}
+              <span>after <a href={href({ name: 'review', slug, id: r.priorReviewId })}>the review before</a></span>
+            {/if}
           </p>
-          {#if r.scopeReason}<p class="small muted">scope: {r.scope} ({r.scopeReason})</p>{/if}
-          {#if r.priorReviewId}
-            <p class="small muted">
-              follows <a class="mono" href={href({ name: 'review', slug, id: r.priorReviewId })}>{r.priorReviewId}</a>
+          <ReviewMeta {r} scopeReason={r.scopeReason} />
+          {#if r.newestReviewId}
+            <p class="notice newer-notice" role="note">
+              The pull request has been reviewed again since.
+              <a href={href({ name: 'review', slug, id: r.newestReviewId })}>Open its latest review</a>
             </p>
           {/if}
           {#if r.error}<p class="error-text" role="note">{r.error}</p>{/if}
           {#if r.cancelRequestedAt}<p class="small muted">cancel requested <Time iso={r.cancelRequestedAt} /></p>{/if}
-          {#if canAdmin(slug)}
+          {#if r.pullState !== 'open'}<NoMoreReviews merged={r.pullMerged} />{/if}
+          {#if isAdmin()}
             <div class="page-actions">
               <ActionButton
                 label="Re-run"
                 title="Re-run the review?"
-                body={`Queue a fresh review of ${r.pull.repository}#${r.pull.number} at its current head.`}
+                body={rerunBody(`${r.pull.repository}#${r.pull.number}`, r.pullState === 'open', r.pullMerged)}
                 path={rerunPath(slug, r.pull)}
                 done="Re-run queued"
                 ondone={() => res.load()}
               />
-              {#if isActive(r.status) && !r.cancelRequestedAt}
+              {#if cancelable}
                 <ActionButton
                   label="Cancel review"
                   title="Cancel this review?"
@@ -98,23 +116,25 @@
           {/if}
         </header>
 
+        <!-- What the review said comes first; how it ran sits apart, to the right. -->
         <nav class="tabs" aria-label="Review sections">
           {#each REVIEW_TABS as t (t)}
+            {#if t === RUN_TABS[0]}<span class="tabs-group-label">Run</span>{/if}
             <a class="tab" class:active={t === tab} aria-current={t === tab ? 'page' : undefined} href={href({ name: 'review', slug, id, tab: t })}>
-              {labels[t]}{#if t === 'summary' && d.findings.length}<span class="tab-count">{d.findings.length}</span>{/if}
+              <span class="tab-label" data-label={labels[t]}>{labels[t]}</span>{#if t === 'summary' && d.findings.length}<span class="tab-count">{d.findings.length}</span>{/if}
             </a>
           {/each}
         </nav>
 
         <section class="tab-panel" aria-label={labels[tab]}>
           {#if tab === 'summary'}
-            <SummaryTab {d} />
+            <SummaryTab {slug} {d} {finding} />
           {:else if tab === 'diff'}
             <DiffTab {base} {d} />
           {:else if tab === 'conversation'}
-            <ConversationTab {base} {version} />
+            <ConversationTab {base} {version} {slug} />
           {:else if tab === 'timeline'}
-            <TimelineTab {d} />
+            <TimelineTab {slug} {d} />
           {:else if tab === 'raw'}
             <RawTab {base} {d} {version} />
           {:else}

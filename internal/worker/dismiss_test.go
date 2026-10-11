@@ -1,0 +1,82 @@
+package worker
+
+import (
+	"reflect"
+	"testing"
+
+	"github.com/perfectra1n/kritique/internal/review"
+	"github.com/perfectra1n/kritique/internal/store"
+)
+
+func TestRequestsDismiss(t *testing.T) {
+	for _, tt := range []struct {
+		body   string
+		reason string
+		want   bool
+	}{
+		{"@kritique dismiss", "", true},
+		{"@kritique dismiss: we lock this upstream", "we lock this upstream", true},
+		{"@Kritique Dismissed, the caller checks nil\nalways has", "the caller checks nil\nalways has", true},
+		{"@kritique dismissing this", "", false},
+		{"@kritiquebot dismiss", "", false},
+		{"please @kritique review", "", false},
+		{"dismiss @kritique", "", false},
+	} {
+		reason, ok := requestsDismiss(tt.body, "kritique")
+		if ok != tt.want || reason != tt.reason {
+			t.Errorf("requestsDismiss(%q) = %q, %v; want %q, %v", tt.body, reason, ok, tt.reason, tt.want)
+		}
+	}
+}
+
+func TestWithDismissals(t *testing.T) {
+	kept := priorFinding{Path: "a.go", Title: "Unchecked error", commentID: 11}
+	gone := priorFinding{Path: "b.go", Title: "Stale comment", commentID: 12}
+	dismissed := []store.Dismissal{{Fingerprint: review.Fingerprint(gone.Finding), Finding: gone.Finding, Reason: "intended"}}
+	p := priorReview{findings: []priorFinding{kept, gone}}
+	p.withDismissals(dismissed)
+	if len(p.findings) != 1 || p.findings[0].commentID != 11 || len(p.dismissed) != 1 {
+		t.Fatalf("findings = %+v, dismissed = %+v; want the dismissed finding moved apart", p.findings, p.dismissed)
+	}
+	want := []review.DismissedFinding{{Finding: gone.Finding, Reason: "intended"}}
+	if got := dismissedFindings(p.dismissed); !reflect.DeepEqual(got, want) {
+		t.Fatalf("dismissedFindings = %+v, want %+v", got, want)
+	}
+}
+
+func TestDropDismissed(t *testing.T) {
+	a := review.Finding{Path: "a.go", Line: 3, Title: "Unchecked error"}
+	b := review.Finding{Path: "b.go", Line: 9, Title: "stale COMMENT"}
+	// c was first reported as "Nil map write", and dismissed after a later
+	// review reported it again in other words, carrying that fingerprint on.
+	c := review.Finding{Path: "c.go", Line: 4, Title: "Assignment panics"}
+	dismissed := []store.Dismissal{
+		{Fingerprint: review.Fingerprint(review.Finding{Path: "b.go", Title: "Stale comment"})},
+		{Fingerprint: review.Fingerprint(review.Finding{Path: "c.go", Title: "Nil map write"}), Finding: review.Finding{Path: "c.go", Line: 4, Title: "Assignment panics"}},
+	}
+	kept, n := dropDismissed([]review.Finding{a, b, c}, dismissed)
+	if n != 2 || len(kept) != 1 || kept[0].Title != a.Title {
+		t.Fatalf("dropDismissed = %+v, %d; want the dismissed finding left out", kept, n)
+	}
+	if kept, n := dropDismissed([]review.Finding{a, b}, nil); n != 0 || len(kept) != 2 {
+		t.Fatalf("dropDismissed without dismissals = %+v, %d", kept, n)
+	}
+}
+
+func TestRequestsPause(t *testing.T) {
+	for _, tt := range []struct {
+		body       string
+		paused, ok bool
+	}{
+		{"@kritique pause", true, true},
+		{"@Kritique Resume please", false, true},
+		{"@kritique paused?", false, false},
+		{"@kritiquebot pause", false, false},
+		{"pause @kritique", false, false},
+	} {
+		paused, ok := requestsPause(tt.body, "kritique")
+		if ok != tt.ok || paused != tt.paused {
+			t.Errorf("requestsPause(%q) = %v, %v; want %v, %v", tt.body, paused, ok, tt.paused, tt.ok)
+		}
+	}
+}

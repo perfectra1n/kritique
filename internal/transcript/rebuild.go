@@ -13,9 +13,12 @@ import (
 // StoredRow is a model_calls row as read back. System and Tools are nil
 // where the row left them unchanged.
 type StoredRow struct {
-	ID                string
-	Kind              Kind
-	Step              int
+	ID   string
+	Kind Kind
+	Step int
+	// Part is the part of a split review the call stepped for, 0 when it
+	// was not split.
+	Part              int
 	ReviewID          string
 	RunnerRunID       string
 	FollowupCommentID int64
@@ -32,6 +35,10 @@ type StoredRow struct {
 	Error             string
 	Truncated         bool
 	CreatedAt         time.Time
+	// CarriedReviewID is the review whose transcript holds the messages
+	// before MessagesFrom, when the row's run carried on its run's
+	// conversation; "" when they are the row's own run's.
+	CarriedReviewID string
 }
 
 // Conversation is a set of model calls as the transcript view shows them:
@@ -52,6 +59,7 @@ type Turn struct {
 	ID                string
 	Kind              Kind
 	Step              int
+	Part              int
 	RunnerRunID       string
 	FollowupCommentID int64
 	Model             string
@@ -68,42 +76,70 @@ type Turn struct {
 	Error             string
 	Truncated         bool
 	CreatedAt         time.Time
+	// CarriedReviewID is the review whose transcript holds the messages
+	// before MessagesFrom, "" when they are earlier turns of this one.
+	CarriedReviewID string
 }
 
 // Rebuild turns rows, in the order they were recorded, into a
-// conversation.
+// conversation. A row leaves its system prompt and tools out when its
+// run's part sent the same with its last step, so the ones a turn had in
+// effect are its part's. A turn shows them where they differ from those its
+// part had at its turn before or, at a part's first turn, from the
+// conversation's, so a split review's parts, interleaved as they run at
+// once, each read on their own.
 func Rebuild(rows []StoredRow) Conversation {
 	var c Conversation
-	var system *string
-	var tools *[]model.ToolDef
-	runs := map[string]bool{}
+	type conversation struct {
+		run  string
+		part int
+	}
+	type sent struct {
+		system *string
+		tools  *[]model.ToolDef
+	}
+	var base sent
+	last := map[conversation]sent{}
+	runs := map[conversation]bool{}
 	for _, r := range rows {
-		t := Turn{
-			ID: r.ID, Kind: r.Kind, Step: r.Step, RunnerRunID: r.RunnerRunID, FollowupCommentID: r.FollowupCommentID,
-			Model: r.Model, Upstream: r.Upstream, MessagesFrom: r.MessagesFrom, Messages: r.Messages, Response: r.Response,
-			Usage: r.Usage, CostUSD: r.CostUSD, Duration: r.Duration, Error: r.Error, Truncated: r.Truncated, CreatedAt: r.CreatedAt,
-		}
+		key := conversation{r.RunnerRunID, r.Part}
+		before, seen := last[key]
+		effect := before
 		if r.System != nil {
-			switch {
-			case system == nil:
-				c.System = *r.System
-			case *r.System != *system:
-				t.System = r.System
-			}
-			system = r.System
+			effect.system = r.System
 		}
 		if r.Tools != nil {
+			effect.tools = r.Tools
+		}
+		last[key] = effect
+		if !seen {
+			before = base
+		}
+		t := Turn{
+			ID: r.ID, Kind: r.Kind, Step: r.Step, Part: r.Part, RunnerRunID: r.RunnerRunID, FollowupCommentID: r.FollowupCommentID,
+			Model: r.Model, Upstream: r.Upstream, MessagesFrom: r.MessagesFrom, Messages: r.Messages, Response: r.Response,
+			Usage: r.Usage, CostUSD: r.CostUSD, Duration: r.Duration, Error: r.Error, Truncated: r.Truncated, CreatedAt: r.CreatedAt,
+			CarriedReviewID: r.CarriedReviewID,
+		}
+		if effect.system != nil {
 			switch {
-			case tools == nil:
-				c.Tools = *r.Tools
-			case !slices.EqualFunc(*r.Tools, *tools, sameTool):
-				t.Tools = r.Tools
+			case base.system == nil:
+				base.system, c.System = effect.system, *effect.system
+			case before.system == nil || *effect.system != *before.system:
+				t.System = effect.system
 			}
-			tools = r.Tools
+		}
+		if effect.tools != nil {
+			switch {
+			case base.tools == nil:
+				base.tools, c.Tools = effect.tools, *effect.tools
+			case before.tools == nil || !slices.EqualFunc(*effect.tools, *before.tools, sameTool):
+				t.Tools = effect.tools
+			}
 		}
 		if r.Kind == KindAgentStep {
-			t.Reset = r.MessagesFrom == 0 && runs[r.RunnerRunID]
-			runs[r.RunnerRunID] = true
+			t.Reset = r.MessagesFrom == 0 && runs[key]
+			runs[key] = true
 		}
 		c.Turns = append(c.Turns, t)
 	}

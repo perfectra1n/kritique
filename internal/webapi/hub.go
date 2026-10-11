@@ -26,12 +26,16 @@ const (
 )
 
 // hub fans the store's row events out to the server-sent event streams of
-// every principal allowed to read the event's tenant.
+// every principal allowed to read the event's account.
 type hub struct {
 	current   *configfile.Current
 	logger    *slog.Logger
 	heartbeat time.Duration
 	buffer    int
+	// stands, when set, is asked at every heartbeat whether the stream's
+	// session still stands; a stream whose session ended is closed, and
+	// the browser's reconnect is refused.
+	stands func(*http.Request) bool
 
 	mu      sync.Mutex
 	clients map[*client]struct{}
@@ -73,31 +77,29 @@ func (h *hub) unsubscribe(c *client) {
 	h.mu.Unlock()
 }
 
-// slug returns the slug of the tenant with id tenantID in the current
-// file, false for a tenant the file no longer has.
-func (h *hub) slug(tenantID string) (string, bool) {
-	file := h.current.Get()
-	for i := range file.Tenants {
-		if file.Tenants[i].ID() == tenantID {
-			return file.Tenants[i].Slug, true
-		}
+// slug returns the slug of the account with id accountID in the current
+// file, false for an account the file no longer has.
+func (h *hub) slug(accountID string) (string, bool) {
+	a, ok := h.current.Get().AccountByID(accountID)
+	if !ok {
+		return "", false
 	}
-	return "", false
+	return a.Slug(), true
 }
 
-// publish delivers e to every client that may read its tenant, without
+// publish delivers e to every client that may read its account, without
 // ever blocking: a client whose buffer is full is sent a resync instead.
 // It runs on the store listener's single callback goroutine.
 func (h *hub) publish(e store.Event) {
-	slug, ok := h.slug(e.TenantID)
+	slug, ok := h.slug(e.AccountID)
 	if !ok {
 		return
 	}
-	ev := Event{Kind: e.Kind, Tenant: slug, ID: e.ID, ReviewID: e.ReviewID}
+	ev := Event{Kind: e.Kind, Account: slug, ID: e.ID, ReviewID: e.ReviewID}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for c := range h.clients {
-		if !c.principal.CanRead(e.TenantID) {
+		if !c.principal.CanRead(e.AccountID) {
 			continue
 		}
 		select {
@@ -175,6 +177,9 @@ func (h *hub) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-ticker.C:
+			if h.stands != nil && !h.stands(r) {
+				return
+			}
 			frame = []byte(": heartbeat\n\n")
 		}
 	}

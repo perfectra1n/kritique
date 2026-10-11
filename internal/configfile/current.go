@@ -1,40 +1,28 @@
 package configfile
 
-import "sync"
+import "sync/atomic"
 
-// Current holds the last good File and lets one consumer wait for the next
-// replacement. It is the hand-off between Watch, which produces files, and
-// the leader, which applies them.
+// Current holds the configuration the service runs with: read once, at
+// startup, and handed to every part of the service that reads it per
+// request or per job.
 type Current struct {
-	mu      sync.Mutex
-	file    *File
-	changed chan struct{}
+	file atomic.Pointer[File]
 }
 
-// NewCurrent starts from the file loaded at startup.
+// NewCurrent holds the configuration loaded at startup.
 func NewCurrent(f *File) *Current {
-	return &Current{file: f, changed: make(chan struct{})}
+	c := &Current{}
+	c.file.Store(f)
+	return c
 }
 
-// Get returns the last good file.
+// Get returns the configuration.
 func (c *Current) Get() *File {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.file
+	return c.file.Load()
 }
 
-// Set replaces the file and wakes anyone waiting on Changed.
+// Set replaces the configuration. The service never calls it after
+// startup; tests swap configurations with it.
 func (c *Current) Set(f *File) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.file = f
-	close(c.changed)
-	c.changed = make(chan struct{})
-}
-
-// Changed returns a channel closed on the next Set. Call Get after it fires.
-func (c *Current) Changed() <-chan struct{} {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.changed
+	c.file.Store(f)
 }

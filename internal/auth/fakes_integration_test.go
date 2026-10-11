@@ -25,7 +25,7 @@ const (
 	fakeClientSecret = "tok" // KRITIQUE_TEST_TOKEN, which every clientSecret reads
 )
 
-// fakeUser is one account on a fake provider.
+// fakeUser is one user on a fake provider.
 type fakeUser struct {
 	ID            int64
 	Login, Email  string
@@ -33,6 +33,8 @@ type fakeUser struct {
 	// Orgs maps a lowercase organization to "admin", "member", or for
 	// GitHub "pending"; absent means not a member.
 	Orgs map[string]string
+	// Groups is the OIDC groups claim.
+	Groups []string
 }
 
 // pendingAuth is what the fake's authorize step would have recorded for a
@@ -170,7 +172,7 @@ func newFakeOIDC(t *testing.T) *fakeOAuth {
 		now := time.Now()
 		claims, _ := json.Marshal(map[string]any{
 			"iss": iss, "sub": p.user.Login, "aud": fakeClientID, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix(),
-			"nonce": nonce, "preferred_username": p.user.Login, "email": p.user.Email,
+			"nonce": nonce, "preferred_username": p.user.Login, "email": p.user.Email, "groups": p.user.Groups,
 			// Some issuers send email_verified as a string.
 			"email_verified": map[bool]string{true: "true", false: "false"}[p.user.EmailVerified], "name": "Name " + p.user.Login,
 		})
@@ -187,18 +189,19 @@ func newFakeOIDC(t *testing.T) *fakeOAuth {
 	return f
 }
 
-// newFakeGitHub is a GitHub Enterprise Server: OAuth under /login/oauth, the
-// REST API under /api/v3.
+// newFakeGitHub is GitHub: OAuth under /login/oauth, as on github.com, and
+// the REST API at the root, as on api.github.com. trustingClient routes both
+// hosts to it.
 func newFakeGitHub(t *testing.T) *fakeOAuth {
 	mux := http.NewServeMux()
 	f := newFakeOAuth(t, mux)
 	mux.HandleFunc("POST /login/oauth/access_token", f.token)
-	mux.HandleFunc("GET /api/v3/user", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /user", func(w http.ResponseWriter, r *http.Request) {
 		if u := f.user(w, r); u != nil {
 			writeFakeJSON(w, map[string]any{"id": u.ID, "login": u.Login, "name": "Name " + u.Login, "email": nil, "avatar_url": "https://a/" + u.Login})
 		}
 	})
-	mux.HandleFunc("GET /api/v3/user/emails", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /user/emails", func(w http.ResponseWriter, r *http.Request) {
 		if u := f.user(w, r); u != nil {
 			writeFakeJSON(w, []map[string]any{
 				{"email": "other@" + u.Login + ".example", "primary": false, "verified": true},
@@ -206,7 +209,7 @@ func newFakeGitHub(t *testing.T) *fakeOAuth {
 			})
 		}
 	})
-	mux.HandleFunc("GET /api/v3/user/memberships/orgs/{org}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /user/memberships/orgs/{org}", func(w http.ResponseWriter, r *http.Request) {
 		u := f.user(w, r)
 		if u == nil {
 			return
@@ -220,54 +223,49 @@ func newFakeGitHub(t *testing.T) *fakeOAuth {
 			writeFakeJSON(w, map[string]string{"state": "active", "role": role})
 		}
 	})
-	return f
-}
-
-// newFakeForgejo is a Forgejo instance: OAuth2 under /login/oauth, the API
-// under /api/v1.
-func newFakeForgejo(t *testing.T) *fakeOAuth {
-	mux := http.NewServeMux()
-	f := newFakeOAuth(t, mux)
-	mux.HandleFunc("POST /login/oauth/access_token", f.token)
-	mux.HandleFunc("GET /api/v1/user", func(w http.ResponseWriter, r *http.Request) {
-		if u := f.user(w, r); u != nil {
-			writeFakeJSON(w, map[string]any{"id": u.ID, "login": u.Login, "full_name": "Name " + u.Login, "email": u.Email, "avatar_url": ""})
-		}
-	})
-	mux.HandleFunc("GET /api/v1/user/emails", func(w http.ResponseWriter, r *http.Request) {
-		if u := f.user(w, r); u != nil {
-			writeFakeJSON(w, []map[string]any{{"email": u.Email, "primary": true, "verified": u.EmailVerified}})
-		}
-	})
-	mux.HandleFunc("GET /api/v1/orgs/{org}/members/{username}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /user/memberships/orgs", func(w http.ResponseWriter, r *http.Request) {
 		u := f.user(w, r)
 		if u == nil {
 			return
 		}
-		if r.PathValue("username") != u.Login || u.Orgs[strings.ToLower(r.PathValue("org"))] == "" {
-			w.WriteHeader(http.StatusNotFound)
-			return
+		out := []map[string]any{}
+		for org, role := range u.Orgs {
+			if role != "pending" && r.URL.Query().Get("page") == "1" {
+				out = append(out, map[string]any{"state": "active", "role": role, "organization": map[string]string{"login": org}})
+			}
 		}
-		w.WriteHeader(http.StatusNoContent)
+		writeFakeJSON(w, out)
 	})
-	mux.HandleFunc("GET /api/v1/users/{username}/orgs/{org}/permissions", func(w http.ResponseWriter, r *http.Request) {
-		u := f.user(w, r)
-		if u == nil {
-			return
+	mux.HandleFunc("GET /user/teams", func(w http.ResponseWriter, r *http.Request) {
+		if u := f.user(w, r); u != nil {
+			writeFakeJSON(w, []any{})
 		}
-		role := u.Orgs[strings.ToLower(r.PathValue("org"))]
-		writeFakeJSON(w, map[string]bool{"is_owner": role == "admin", "is_admin": false, "can_read": role != ""})
 	})
 	return f
 }
 
-// trustingClient trusts every fake's self-signed certificate.
-func trustingClient(fakes ...*fakeOAuth) *http.Client {
+// trustingClient trusts every fake's self-signed certificate, and sends
+// what a GitHub sign-in asks of github.com and api.github.com to gh.
+func trustingClient(gh *fakeOAuth, fakes ...*fakeOAuth) *http.Client {
 	pool := x509.NewCertPool()
-	for _, f := range fakes {
+	for _, f := range append(fakes, gh) {
 		pool.AddCert(f.srv.Certificate())
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-	return &http.Client{Transport: tr, Timeout: 10 * time.Second}
+	return &http.Client{Transport: githubTo{fake: gh.srv.Listener.Addr().String(), base: tr}, Timeout: 10 * time.Second}
+}
+
+// githubTo sends requests for github.com and api.github.com to fake.
+type githubTo struct {
+	fake string
+	base http.RoundTripper
+}
+
+func (g githubTo) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host == "github.com" || r.URL.Host == "api.github.com" {
+		r = r.Clone(r.Context())
+		r.URL.Host, r.Host = g.fake, g.fake
+	}
+	return g.base.RoundTrip(r)
 }

@@ -111,10 +111,12 @@ type TaskRunDetail struct {
 	// Fields, Proposed, Applied and Dropped are the run's JSON records as
 	// stored, nil for NULL.
 	Fields, Proposed, Applied, Dropped json.RawMessage
-	ModelCalls                         int
-	CostUSD                            float64
-	InputTokens                        int64
-	OutputTokens                       int64
+	// Notes say what the run's context left out, and why.
+	Notes        []string
+	ModelCalls   int
+	CostUSD      float64
+	InputTokens  int64
+	OutputTokens int64
 }
 
 // FindTaskRun returns one task run, or ErrNotFound.
@@ -123,7 +125,8 @@ func FindTaskRun(ctx context.Context, tx pgx.Tx, id string) (TaskRunDetail, erro
 	if uuid.Validate(id) != nil {
 		return d, ErrNotFound
 	}
-	rows, err := tx.Query(ctx, `SELECT `+taskRunColumns+`, t.fields, t.proposed, t.applied, t.dropped,
+	rows, err := tx.Query(ctx, `SELECT `+taskRunColumns+`, nullif(t.fields, 'null'::jsonb), nullif(t.proposed, 'null'::jsonb),
+		nullif(t.applied, 'null'::jsonb), nullif(t.dropped, 'null'::jsonb), t.notes,
 		e.id::text, e.forge, e.event, e.raw_event, e.action, e.sender, e.delivery, e.received_at,
 		mc.calls, mc.cost, mc.input, mc.output
 		FROM task_runs t JOIN repositories r ON r.id = t.repository_id
@@ -143,7 +146,7 @@ func FindTaskRun(ctx context.Context, tx pgx.Tx, id string) (TaskRunDetail, erro
 		var receivedAt *time.Time
 		err := row.Scan(&x.ID, &x.RepositoryID, &x.Repository, &x.Task, &x.SubjectKind, &x.SubjectNumber, &x.Trigger, &x.Mode, &status,
 			&x.Reason, &x.ConfigSHA, &x.Model, &x.Error, &x.CommentID, &x.CreatedAt, &x.StartedAt, &x.FinishedAt, &x.DroppedCount,
-			&fields, &proposed, &applied, &dropped,
+			&fields, &proposed, &applied, &dropped, &x.Notes,
 			&eventID, &forge, &event, &rawEvent, &action, &sender, &delivery, &receivedAt,
 			&x.ModelCalls, &x.CostUSD, &x.InputTokens, &x.OutputTokens)
 		if err != nil {
@@ -168,8 +171,10 @@ func FindTaskRun(ctx context.Context, tx pgx.Tx, id string) (TaskRunDetail, erro
 	return d, nil
 }
 
+// rawOrNil is a jsonb column as read, nil for NULL; the query reads a
+// JSON null as NULL.
 func rawOrNil(b []byte) json.RawMessage {
-	if len(b) == 0 || string(b) == "null" {
+	if len(b) == 0 {
 		return nil
 	}
 	return json.RawMessage(b)

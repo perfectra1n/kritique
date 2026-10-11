@@ -1,9 +1,10 @@
 // Pure display formatting shared by every page. No runes, so tests and
 // tooling can import it directly.
-import type { JobState, ReviewStatus, Severity, IndexRunStatus, FollowupStatus, TaskRunStatus } from './types';
+import type { SkipReason, JobCause, JobState, ReviewStatus, Severity, IndexRunStatus, FollowupStatus, Category, TaskRunStatus } from './types';
 
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 const whole = new Intl.NumberFormat('en');
+const cents = new Intl.NumberFormat('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 // tokens renders a token count compactly ("12.3K"), with the exact figure
 // available through wholeNumber for a title attribute.
@@ -20,7 +21,7 @@ export function wholeNumber(n: number): string {
 export function usd(n: number): string {
   if (n === 0) return '$0';
   if (Math.abs(n) < 0.01) return `$${n.toFixed(4)}`;
-  return `$${n.toFixed(2)}`;
+  return `$${cents.format(n)}`;
 }
 
 export function duration(ms: number | null | undefined): string {
@@ -32,7 +33,7 @@ export function duration(ms: number | null | undefined): string {
   const rem = Math.round(s % 60);
   if (m < 60) return rem ? `${m}m ${rem}s` : `${m}m`;
   const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
+  return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
 }
 
 // between is the duration between two RFC 3339 timestamps, null when either
@@ -79,6 +80,35 @@ export const jobTone: Record<JobState, Tone> = {
   discarded: 'danger',
 };
 
+// jobCauseText says a job's cause in words, ahead of the error's own text.
+export const jobCauseText: Record<JobCause, string> = {
+  forge_unavailable: 'The forge did not answer.',
+};
+
+// skipText says why a skipped review was.
+export const skipText: Record<Exclude<SkipReason, ''>, string> = {
+  disabled: 'reviews disabled',
+  filtered: 'excluded by a trigger condition',
+  only_skipped_paths: 'only ignored paths changed',
+  unchanged_patch: 'patch unchanged since the last review',
+  too_large: 'more changed lines than the repository allows',
+};
+
+// noMoreReviews says why a pull request that is not open takes no
+// automatic reviews: a merged or closed one is reviewed only when someone
+// asks.
+export function noMoreReviews(merged: boolean): string {
+  return merged ? 'Merged: reviewed again only when asked' : 'Closed: reviewed only when asked';
+}
+
+// rerunBody is what a re-run queues: a merged or closed pull request's is a
+// look back at its last head, which sets no commit status and approves
+// nothing.
+export function rerunBody(name: string, open: boolean, merged: boolean): string {
+  if (open) return `Queue a fresh review of ${name} at its current head.`;
+  return `Queue a look back at ${name}, ${merged ? 'merged' : 'closed'}, at its last head. It sets no commit status and approves nothing.`;
+}
+
 export const indexTone: Record<IndexRunStatus, Tone> = {
   running: 'accent',
   completed: 'ok',
@@ -98,10 +128,11 @@ export const taskTone: Record<TaskRunStatus, Tone> = {
   running: 'accent',
   succeeded: 'ok',
   failed: 'danger',
-  skipped: 'warn',
+  skipped: 'muted',
 };
 
 export const SEVERITIES: readonly Severity[] = ['blocking', 'important', 'nit'];
+export const CATEGORIES: readonly Category[] = ['correctness', 'security', 'performance', 'reliability', 'maintainability', 'tests'];
 
 // isActive reports whether a review is still moving, i.e. its page should
 // follow live events.
@@ -129,4 +160,19 @@ export function pretty(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+// change is how now differs from before, for a delta chip: a signed
+// percentage, or with points the difference of two percentages; "new" when
+// before was zero, and nothing when neither has a value.
+export function change(now: number | null, before: number | null, points = false): { text: string; dir: -1 | 0 | 1 } | undefined {
+  if (now === null || before === null || (now === 0 && before === 0)) return undefined;
+  const dir = now > before ? 1 : now < before ? -1 : 0;
+  if (points) {
+    const d = Math.round(now - before);
+    return { text: `${d > 0 ? '+' : ''}${d} pts`, dir };
+  }
+  if (before === 0) return { text: 'new', dir };
+  const d = Math.round(((now - before) / Math.abs(before)) * 100);
+  return { text: `${d > 0 ? '+' : ''}${d}%`, dir };
 }

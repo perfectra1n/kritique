@@ -2,11 +2,13 @@ package configfile
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path"
@@ -16,14 +18,16 @@ import (
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 
 	"github.com/perfectra1n/kritique/internal/jobtimeout"
+	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/prfilter"
+	"github.com/perfectra1n/kritique/internal/review"
 )
 
-// nameRe bounds installation and tenant names to what is safe in a URL path
-// segment, a Kubernetes label value and a log line.
+// nameRe bounds connection and provider names to what is safe in a URL
+// path segment, a Kubernetes label value and a log line.
 var nameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // toolNameRe bounds a tool name to what fits a pod volume name after its
@@ -34,192 +38,342 @@ var toolNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,56}[a-z0-9])?$`)
 // separator, so the allowlist cannot name a file in the checkout.
 var commandRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
 
-// Load reads, decodes, resolves and validates the file at name.
+// fileDoc is the configuration file's schema: sign-in and the whole
+// configuration.
+type fileDoc struct {
+	Auth      Auth                  `yaml:"auth,omitempty"`
+	Apps      map[string]Connection `yaml:"apps,omitempty"`
+	Providers map[string]Provider   `yaml:"providers,omitempty"`
+	Embedding *Embedding            `yaml:"embedding,omitempty"`
+	Egress    Egress                `yaml:"egress,omitempty"`
+	// Defaults are the repository settings written at the file's root.
+	Defaults Defaults `yaml:",inline"`
+	// Repositories are the owner/* and owner/name entries.
+	Repositories map[string]Overrides  `yaml:"repositories,omitempty"`
+	Accounts     map[string]accountDoc `yaml:"accounts,omitempty"`
+}
+
+// accountDoc is an entry of the file's accounts: what is an account's
+// alone.
+type accountDoc struct {
+	Limits    LimitsSpec          `yaml:"limits,omitempty"`
+	Providers map[string]Provider `yaml:"providers,omitempty"`
+}
+
+// Load reads, decodes, resolves and validates the configuration file at
+// name, overlaid with the environment. The file is optional: name "" loads
+// the environment alone.
 func Load(name string) (*File, error) {
-	raw, err := os.ReadFile(name)
-	if err != nil {
-		return nil, fmt.Errorf("configfile: %w", err)
+	var raw []byte
+	if name != "" {
+		var err error
+		if raw, err = os.ReadFile(name); err != nil {
+			return nil, fmt.Errorf("configfile: %w", err)
+		}
 	}
 	return Parse(raw)
 }
 
-// Parse is Load for bytes already in hand.
-func Parse(raw []byte) (*File, error) {
-	dec := yaml.NewDecoder(bytes.NewReader(raw))
-	dec.KnownFields(true)
-	var f File
-	if err := dec.Decode(&f); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil, errors.New("configfile: file is empty")
-		}
-		return nil, fmt.Errorf("configfile: parse: %w", err)
-	}
-	if err := f.resolve(); err != nil {
-		return nil, err
-	}
-	if err := f.validate(); err != nil {
-		return nil, err
-	}
-	sum := sha256.Sum256(raw)
-	f.hash = hex.EncodeToString(sum[:])
-	return &f, nil
+// overlayPrefixes start the environment variables that overlay the file;
+// their values are part of the configuration, and so of its hash.
+var overlayPrefixes = []string{
+	authEnvPrefix, connectionEnvPrefix, providerEnvPrefix, reviewEnvPrefix, confidenceEnvPrefix, triggerEnvPrefix, embeddingEnvPrefix,
 }
 
-// resolve reads every secret reference into memory and compiles every filter.
-func (f *File) resolve() error {
-	for name, p := range f.Providers {
-		v, err := p.APIKey.resolve(fileRefs)
+// configHash identifies a configuration: the file's bytes, the overlay
+// variables that change what it says, and the names of the secrets it
+// reads, so two replicas with the same file but another environment do not
+// compare equal. A secret's value stays out of it: the hash is stored and
+// logged, and a digest of a password invites guessing it offline. Two
+// replicas that read the same names with other values hash alike, which
+// the first sign-in or forge call on the odd one out tells apart.
+func configHash(raw []byte, environ, secretEnv []string) string {
+	h := sha256.New()
+	h.Write(raw)
+	var overlay []string
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if name == reviewWorkersEnv || !slices.ContainsFunc(overlayPrefixes, func(p string) bool { return strings.HasPrefix(name, p) }) {
+			continue
+		}
+		if slices.Contains(secretEnv, name) {
+			kv = name
+		}
+		overlay = append(overlay, kv)
+	}
+	slices.Sort(overlay)
+	for _, kv := range overlay {
+		h.Write([]byte("\x00" + kv))
+	}
+	for _, name := range secretEnv {
+		h.Write([]byte("\x00" + name))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// Parse is Load for bytes already in hand; nil or blank bytes are no file.
+func Parse(raw []byte) (*File, error) {
+	var doc fileDoc
+	if len(bytes.TrimSpace(raw)) > 0 {
+		dec := yaml.NewDecoder(bytes.NewReader(raw))
+		dec.KnownFields(true)
+		if err := dec.Decode(&doc); err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("configfile: parse: %w", err)
+		}
+		var extra any
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			return nil, errors.New("configfile: parse: the file must hold one document")
+		}
+	}
+	if doc.Apps == nil {
+		doc.Apps = map[string]Connection{}
+	}
+	environ := os.Environ()
+	if err := doc.Auth.overlayEnv(environ); err != nil {
+		return nil, err
+	}
+	envConnection, err := overlayConnectionEnv(doc.Apps, environ)
+	if err != nil {
+		return nil, err
+	}
+	envProvider, err := overlayProviderEnv(&doc.Providers, environ)
+	if err != nil {
+		return nil, err
+	}
+	envKeys := map[string]bool{}
+	if err := overlayDefaultsEnv(&doc.Defaults, environ, envKeys); err != nil {
+		return nil, err
+	}
+	if err := overlayEmbeddingEnv(&doc.Embedding, environ, envKeys); err != nil {
+		return nil, err
+	}
+	run, err := loadRun()
+	if err != nil {
+		return nil, err
+	}
+	accounts, err := accountsOf(doc.Accounts, doc.Repositories)
+	if err != nil {
+		return nil, err
+	}
+	f := &File{
+		Auth: doc.Auth, Connections: connectionsOf(doc.Apps), Providers: doc.Providers, Defaults: doc.Defaults, Egress: doc.Egress,
+		Embedding: doc.Embedding, Run: run, envConnection: envConnection, envProvider: envProvider, envKeys: envKeys,
+	}
+	s := &secrets{}
+	if err := f.Auth.resolve(s); err != nil {
+		return nil, err
+	}
+	if err := f.resolve(accounts, s); err != nil {
+		return nil, err
+	}
+	slices.Sort(s.env)
+	f.secretEnv = s.env
+	if err := f.Auth.validate(); err != nil {
+		return nil, err
+	}
+	if err := f.validate(accounts); err != nil {
+		return nil, err
+	}
+	f.Accounts, f.unserved = servedAccounts(f.Connections, accounts)
+	f.hash = configHash(raw, environ, s.env)
+	return f, nil
+}
+
+// resolve reads f's secrets and those of the account entries, and compiles
+// their filters.
+func (f *File) resolve(accounts []Account, s *secrets) error {
+	for _, name := range slices.Sorted(maps.Keys(f.Providers)) {
+		p := f.Providers[name]
+		v, err := s.read(p.APIKey)
 		if err != nil {
 			return fmt.Errorf("configfile: providers.%s.apiKey: %w", name, err)
 		}
 		p.apiKey = v
 		f.Providers[name] = p
 	}
-
 	f.Egress.credentials = make(map[string]Secret, len(f.Egress.Credentials))
-	for host, ref := range f.Egress.Credentials {
-		v, err := ref.resolve(fileRefs)
+	for _, host := range slices.Sorted(maps.Keys(f.Egress.Credentials)) {
+		v, err := s.read(f.Egress.Credentials[host])
 		if err != nil {
 			return fmt.Errorf("configfile: egress.credentials.%s: %w", host, err)
 		}
 		f.Egress.credentials[strings.ToLower(host)] = v
 	}
-
-	if err := f.Web.resolve(); err != nil {
+	if err := f.resolveEmbedding(); err != nil {
 		return err
 	}
-
-	if err := f.Defaults.compile(); err != nil {
-		return fmt.Errorf("configfile: defaults.filter: %w", err)
+	if err := f.Defaults.Trigger.Compile(); err != nil {
+		return fmt.Errorf("configfile: trigger.%w", err)
 	}
-
-	for ti := range f.Tenants {
-		if err := f.Tenants[ti].resolve(fmt.Sprintf("tenants[%d]", ti), fileRefs); err != nil {
+	for i := range f.Connections {
+		if err := f.Connections[i].resolve("apps."+f.Connections[i].Name, s); err != nil {
+			return err
+		}
+	}
+	for i := range accounts {
+		if err := accounts[i].resolve(s); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// resolve reads the tenant's secret references under refs and compiles its
-// filters; where prefixes every error.
-func (t *Tenant) resolve(where string, refs refPolicy) error {
-	if err := t.compile(); err != nil {
-		return fmt.Errorf("configfile: %s.filter: %w", where, err)
+// resolveEmbedding gives the embedder its provider's endpoint and key: an
+// openrouter or openai provider of the instance, since an account's own
+// keys pay for its reviews, not the instance's index.
+func (f *File) resolveEmbedding() error {
+	e := f.Embedding
+	if e == nil {
+		return nil
 	}
-	for ii := range t.Installations {
-		if err := t.Installations[ii].resolve(fmt.Sprintf("%s.installations[%d]", where, ii), refs); err != nil {
-			return err
+	name := e.Ref.Provider()
+	if name == "" || e.Ref.Model() == "" {
+		return fmt.Errorf("configfile: embedding.model must be \"<provider>/<model>\", got %q", e.Ref)
+	}
+	p, ok := f.Providers[name]
+	if !ok {
+		return fmt.Errorf("configfile: embedding.model references provider %q, which is not declared under providers", name)
+	}
+	switch p.Type {
+	case ProviderOpenRouter:
+		e.BaseURL = cmp.Or(p.BaseURL, model.OpenRouterBaseURL)
+	case ProviderOpenAI:
+		e.BaseURL = cmp.Or(p.BaseURL, model.OpenAIBaseURL)
+	default:
+		return fmt.Errorf("configfile: embedding.model names a %s provider; embeddings need an %s or %s one",
+			p.Type, ProviderOpenRouter, ProviderOpenAI)
+	}
+	e.Model, e.apiKey = e.Ref.Model(), p.apiKey
+	return nil
+}
+
+// accountsOf gathers each account's entries, in the order of their
+// names: its accounts entry, and its owner/* and owner/name entries under
+// repositories.
+func accountsOf(entries map[string]accountDoc, repos map[string]Overrides) ([]Account, error) {
+	byKey := map[string]*Account{}
+	get := func(name string) *Account {
+		key := AccountKey(ForgeGitHub, name)
+		if a, ok := byKey[key]; ok {
+			return a
+		}
+		a := &Account{Forge: ForgeGitHub, Name: name}
+		byKey[key] = a
+		return a
+	}
+	for _, name := range slices.Sorted(maps.Keys(entries)) {
+		where := "accounts." + name
+		if err := checkAccountName(where, name); err != nil {
+			return nil, err
+		}
+		a := get(name)
+		if a.entry != "" {
+			return nil, fmt.Errorf("configfile: %s duplicates %s", where, a.entry)
+		}
+		a.entry, a.Limits, a.Providers = where, entries[name].Limits, entries[name].Providers
+	}
+	seen := map[string]string{}
+	for _, key := range slices.Sorted(maps.Keys(repos)) {
+		where := "repositories." + key
+		owner, name, ok := strings.Cut(key, "/")
+		if !ok || checkAccountName(where, owner) != nil || strings.TrimSpace(name) == "" || strings.ContainsAny(name, "/ ") {
+			return nil, fmt.Errorf("configfile: %s: a repository entry is keyed owner/* or owner/name", where)
+		}
+		if prev, dup := seen[strings.ToLower(key)]; dup {
+			return nil, fmt.Errorf("configfile: %s duplicates %s", where, prev)
+		}
+		seen[strings.ToLower(key)] = where
+		a := get(owner)
+		if name == "*" {
+			a.Overrides, a.pattern = repos[key], where
+		} else {
+			a.Repositories = append(a.Repositories, Repository{Name: name, Overrides: repos[key], where: where})
 		}
 	}
-	for ri := range t.Repositories {
-		if err := t.Repositories[ri].compile(); err != nil {
-			return fmt.Errorf("configfile: %s.repositories[%d].filter: %w", where, ri, err)
+	out := make([]Account, 0, len(byKey))
+	for _, key := range slices.Sorted(maps.Keys(byKey)) {
+		out = append(out, *byKey[key])
+	}
+	return out, nil
+}
+
+// resolve reads the account's secret references and compiles its filters.
+func (a *Account) resolve(s *secrets) error {
+	if err := a.Trigger.Compile(); err != nil {
+		return fmt.Errorf("configfile: %s.trigger.%w", a.pattern, err)
+	}
+	for _, name := range slices.Sorted(maps.Keys(a.Providers)) {
+		p := a.Providers[name]
+		v, err := s.read(p.APIKey)
+		if err != nil {
+			return fmt.Errorf("configfile: %s.providers.%s.apiKey: %w", a.entry, name, err)
+		}
+		p.apiKey = v
+		a.Providers[name] = p
+	}
+	for ri := range a.Repositories {
+		if err := a.Repositories[ri].Trigger.Compile(); err != nil {
+			return fmt.Errorf("configfile: %s.trigger.%w", a.Repositories[ri].where, err)
 		}
 	}
 	return nil
 }
 
-func (in *Installation) resolve(where string, refs refPolicy) error {
+func (i *Connection) resolve(where string, s *secrets) error {
 	var err error
-	if in.App != nil {
-		in.App.clientID = in.App.ClientID
-		if !in.App.ClientIDFrom.empty() {
-			v, err := in.App.ClientIDFrom.resolve(refs)
-			if err != nil {
-				return fmt.Errorf("configfile: %s.app.clientIdFrom: %w", where, err)
-			}
-			in.App.clientID = v.Value()
-		}
-		if in.App.privateKey, err = in.App.PrivateKey.resolve(refs); err != nil {
-			return fmt.Errorf("configfile: %s.app.privateKey: %w", where, err)
-		}
-		if in.App.webhookSecret, err = in.App.WebhookSecret.resolve(refs); err != nil {
-			return fmt.Errorf("configfile: %s.app.webhookSecret: %w", where, err)
-		}
+	if i.App.webhookSecret, err = s.read(i.App.WebhookSecret); err != nil {
+		return fmt.Errorf("configfile: %s.webhookSecret: %w", where, err)
 	}
-	for _, s := range []struct {
-		name string
-		ref  SecretRef
-		dst  *Secret
-	}{
-		{"token", in.Token, &in.token},
-		{"webhookSecret", in.WebhookSecret, &in.webhookSecret},
-		{"gitToken", in.GitToken, &in.gitToken},
-	} {
-		if s.ref.empty() {
-			continue
+	if i.Forge != ForgeGitHub && !i.Forge.SelfHosted() {
+		return nil // validate names the forge
+	}
+	if i.Forge.SelfHosted() {
+		// The keys of the other forge are refused by validate; reading them
+		// here would name a missing variable instead.
+		if i.token, err = s.read(i.Token); err != nil {
+			return fmt.Errorf("configfile: %s.token: %w", where, err)
 		}
-		if *s.dst, err = s.ref.resolve(refs); err != nil {
-			return fmt.Errorf("configfile: %s.%s: %w", where, s.name, err)
+		if !i.GitToken.empty() {
+			if i.gitToken, err = s.read(i.GitToken); err != nil {
+				return fmt.Errorf("configfile: %s.gitToken: %w", where, err)
+			}
 		}
+		return nil
+	}
+	if i.App.clientID, err = i.App.ClientID.resolve(s); err != nil {
+		return fmt.Errorf("configfile: %s.clientId: %w", where, err)
+	}
+	if i.App.privateKey, err = s.read(i.App.PrivateKey); err != nil {
+		return fmt.Errorf("configfile: %s.privateKey: %w", where, err)
 	}
 	return nil
 }
 
-// validate checks every invariant the rest of kritique relies on.
-func (f *File) validate() error {
+// validate checks every invariant the rest of kritique relies on, over f and
+// the account entries.
+func (f *File) validate(accounts []Account) error {
 	if err := f.validateProviders(); err != nil {
 		return err
 	}
 	if err := f.validateEgress(); err != nil {
 		return err
 	}
-	if err := f.validateRetention(); err != nil {
+	if err := f.validateEmbedding(); err != nil {
 		return err
 	}
-	if err := f.validateTuning(); err != nil {
+	if err := validateConnections(f.Connections); err != nil {
 		return err
 	}
-	if err := f.validateTools(); err != nil {
-		return err
-	}
-	if err := f.Web.validate(); err != nil {
-		return err
-	}
-	return f.validateTenants()
-}
-
-// repositoryInstallation is the installation a repository entry binds to,
-// or an error saying why it binds to none: the installation it names does
-// not own it, no installation owns it, or several do and it names none.
-func (t *Tenant) repositoryInstallation(r *Repository, where string) (*Installation, error) {
-	owner, _, _ := strings.Cut(r.Name, "/")
-	var owners []*Installation
-	for i := range t.Installations {
-		in := &t.Installations[i]
-		if !strings.EqualFold(in.Account, owner) {
-			continue
-		}
-		if in.Name == r.Installation {
-			return in, nil
-		}
-		owners = append(owners, in)
-	}
-	switch {
-	case r.Installation != "":
-		return nil, fmt.Errorf("configfile: %s.installation %q is not an installation of tenant %q with account %q",
-			where, r.Installation, t.Slug, owner)
-	case len(owners) == 0:
-		return nil, fmt.Errorf("configfile: %s.name %q: no installation in tenant %q has account %q", where, r.Name, t.Slug, owner)
-	case len(owners) > 1:
-		names := make([]string, len(owners))
-		for i, in := range owners {
-			names[i] = in.Name
-		}
-		return nil, fmt.Errorf("configfile: %s.name %q: installations %s of tenant %q all have account %q; set installation to one of them",
-			where, r.Name, strings.Join(names, ", "), t.Slug, owner)
-	}
-	return owners[0], nil
+	return f.validateAccounts(accounts)
 }
 
 // validateTools checks the tool catalog: unique volume-safe names, an
 // image each, a clean absolute path, and bare command names no two tools
 // both provide.
-func (f *File) validateTools() error {
+func validateTools(tools []Tool) error {
 	names, commands := map[string]bool{}, map[string]string{}
-	for i, t := range f.Tools {
-		where := fmt.Sprintf("tools[%d]", i)
+	for i, t := range tools {
+		where := fmt.Sprintf("KRITIQUE_RUNNER_TOOLS[%d]", i)
 		if !toolNameRe.MatchString(t.Name) {
 			return fmt.Errorf("configfile: %s.name %q must be lowercase alphanumerics and hyphens, 1 to 58 characters", where, t.Name)
 		}
@@ -246,257 +400,206 @@ func (f *File) validateTools() error {
 	return nil
 }
 
-// validateTuning checks defaults.runner, polling and indexing.
-func (f *File) validateTuning() error {
-	if r := f.Defaults.Runner; r != nil {
-		if err := validateRunnerDeadline("defaults", r.ActiveDeadlineSeconds); err != nil {
-			return err
-		}
+// validateEmbedding checks the embedder's dimension fits the index column
+// and its bounds are not negative; its provider is checked with the rest.
+func (f *File) validateEmbedding() error {
+	e := f.Embedding
+	if e == nil {
+		return nil
 	}
-	if (f.Polling.Interval != nil && *f.Polling.Interval < 0) || f.Polling.Lookback < 0 {
-		return errors.New("configfile: polling.interval and polling.lookback must not be negative")
+	if e.Dims <= 0 || e.Dims > MaxEmbedDims {
+		return fmt.Errorf("configfile: embedding.dims must be between 1 and %d (the index's halfvec limit), got %d", MaxEmbedDims, e.Dims)
 	}
-	if f.Indexing.OnboardWindow < 0 {
-		return errors.New("configfile: indexing.onboardWindow must not be negative")
+	if e.MaxBatch < 0 || e.MaxBatchChars < 0 || e.MaxItemChars < 0 {
+		return errors.New("configfile: embedding.maxBatch, maxBatchChars and maxItemChars must not be negative")
 	}
-	return nil
-}
-
-func (f *File) validateRetention() error {
-	if f.Retention.DisabledIndexGrace < 0 {
-		return errors.New("configfile: retention.disabledIndexGrace must not be negative")
-	}
-	if f.Retention.Transcripts != 0 && f.Retention.Transcripts < minTranscripts {
-		return fmt.Errorf("configfile: retention.transcripts must be at least %s", minTranscripts)
+	if e.SimilarFloor < 0 || e.SimilarFloor > 1 {
+		return fmt.Errorf("configfile: embedding.similarFloor must be between 0 and 1 (a cosine similarity), got %g", e.SimilarFloor)
 	}
 	return nil
 }
 
 func (f *File) validateProviders() error {
-	for name, p := range f.Providers {
-		if !p.Type.Valid() {
-			return fmt.Errorf("configfile: providers.%s.type must be %s, %s or %s, got %q",
-				name, ProviderOpenRouter, ProviderOpenAI, ProviderAnthropic, p.Type)
+	for _, name := range slices.Sorted(maps.Keys(f.Providers)) {
+		if !nameRe.MatchString(name) {
+			return fmt.Errorf("configfile: providers.%s: a provider name must be lowercase alphanumerics and hyphens, 1 to 63 characters", name)
 		}
-		if p.BaseURL != "" {
-			if u, err := url.Parse(p.BaseURL); err != nil || u.Scheme == "" || u.Host == "" {
-				return fmt.Errorf("configfile: providers.%s.baseUrl %q must be an absolute URL", name, p.BaseURL)
-			}
-		}
-		if p.apiKey.Value() == "" {
-			return fmt.Errorf("configfile: providers.%s.apiKey resolved to an empty value", name)
-		}
-		for id, price := range p.Pricing {
-			if price.Input < 0 || price.Output < 0 || price.CacheRead < 0 || price.CacheWrite < 0 {
-				return fmt.Errorf("configfile: providers.%s.pricing.%s: prices must not be negative", name, id)
-			}
-		}
-	}
-	return nil
-}
-
-// validateRunnerDeadline checks that a tenant's runner.activeDeadlineSeconds is
-// non-negative and, once converted to a job timeout, does not exceed River's cap.
-func validateRunnerDeadline(where string, seconds int64) error {
-	if seconds < 0 {
-		return fmt.Errorf("configfile: %s.runner.activeDeadlineSeconds must not be negative", where)
-	}
-	deadline := time.Duration(seconds) * time.Second
-	if deadline > jobtimeout.MaxRunnerDeadline {
-		return fmt.Errorf("configfile: %s.runner.activeDeadlineSeconds must not exceed %d (%s),"+
-			" or River's %s job timeout cap would cut the runner off early",
-			where, int64(jobtimeout.MaxRunnerDeadline.Seconds()), jobtimeout.MaxRunnerDeadline, jobtimeout.MaxJobTimeout)
-	}
-	return nil
-}
-
-func (f *File) validateTenants() error {
-	if err := checkLimits("defaults.limits", f.Defaults.Limits); err != nil {
-		return err
-	}
-	if err := f.validateOverrides("defaults", &f.Defaults.Overrides); err != nil {
-		return err
-	}
-
-	if len(f.Tenants) == 0 {
-		return errors.New("configfile: tenants must list at least one tenant")
-	}
-	slugs := map[string]string{}
-	installations := map[string]string{}
-	for ti := range f.Tenants {
-		t := &f.Tenants[ti]
-		if err := f.validateTenant(t.where(ti), t, slugs, installations); err != nil {
-			if t.Origin() == OriginDashboard {
-				return &MergeError{Slug: t.Slug, Err: err}
-			}
+		if err := f.Providers[name].validate("providers." + name); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// validateTenant checks one tenant. slugs and installations record the
-// slugs and installation names already seen, so duplicates across tenants
-// are caught whichever origin each has.
-func (f *File) validateTenant(where string, t *Tenant, slugs, installations map[string]string) error {
-	if !nameRe.MatchString(t.Slug) {
-		return fmt.Errorf("configfile: %s.slug %q must be lowercase alphanumerics and hyphens, 1 to 63 characters", where, t.Slug)
-	}
-	if prev, dup := slugs[t.Slug]; dup {
-		return fmt.Errorf("configfile: %s.slug %q duplicates %s", where, t.Slug, prev)
-	}
-	slugs[t.Slug] = where
-	if err := checkLimits(where+".limits", t.Limits); err != nil {
+// validateAccounts checks the file's own settings and every account's entries,
+// served or not, so an entry is judged when it is written rather than when
+// a connection first serves it.
+func (f *File) validateAccounts(accounts []Account) error {
+	if err := checkLimits("limits", f.Defaults.Limits); err != nil {
 		return err
 	}
-	if err := f.validateOverrides(where, &t.Overrides); err != nil {
+	if err := f.validateOverrides("", nil, &f.Defaults.Overrides); err != nil {
 		return err
 	}
-	if t.Runner != nil {
-		if err := validateRunnerDeadline(where, t.Runner.ActiveDeadlineSeconds); err != nil {
+	for i := range accounts {
+		if err := f.validateAccount(&accounts[i]); err != nil {
 			return err
 		}
 	}
-	if len(t.Installations) == 0 {
-		return fmt.Errorf("configfile: %s (%s) must list at least one installation", where, t.Slug)
-	}
-	for ii, in := range t.Installations {
-		iwhere := fmt.Sprintf("%s.installations[%d]", where, ii)
-		if !nameRe.MatchString(in.Name) {
-			return fmt.Errorf("configfile: %s.name %q must be lowercase alphanumerics and hyphens, 1 to 63 characters", iwhere, in.Name)
-		}
-		if owner, dup := installations[in.Name]; dup {
-			return fmt.Errorf("configfile: %s.name %q duplicates an installation in tenant %q; names are hook paths and must be unique",
-				iwhere, in.Name, owner)
-		}
-		installations[in.Name] = t.Slug
-		if in.Account == "" {
-			return fmt.Errorf("configfile: %s.account is required", iwhere)
-		}
-		if err := in.validate(iwhere); err != nil {
-			return err
-		}
-	}
-	repos := map[string]int{}
-	for ri, r := range t.Repositories {
-		rwhere := fmt.Sprintf("%s.repositories[%d]", where, ri)
-		if r.Name == "" || !strings.Contains(r.Name, "/") {
-			return fmt.Errorf("configfile: %s.name must be \"owner/repo\", got %q", rwhere, r.Name)
-		}
-		in, err := t.repositoryInstallation(&r, rwhere)
-		if err != nil {
-			return err
-		}
-		key := in.Name + "\x00" + r.Name
-		if prev, dup := repos[key]; dup {
-			return fmt.Errorf("configfile: %s.name %q duplicates repositories[%d] of installation %q", rwhere, r.Name, prev, in.Name)
-		}
-		repos[key] = ri
-		if err := f.validateOverrides(rwhere, &r.Overrides); err != nil {
-			return err
-		}
-		if err := checkWithinAllow(rwhere, f.Settings(t, in.Name, r.Name)); err != nil {
-			return err
-		}
-	}
-	return checkWithinAllow(where, f.Settings(t, "", ""))
+	return nil
 }
 
-// compile compiles the filter the scope writes, if any; an empty one
-// compiles to no restriction.
-func (o *Overrides) compile() (err error) {
-	if o.Filter != nil {
-		o.filter, err = compileFilter(*o.Filter)
+// validateAccount checks an account's entries: its accounts entry, its
+// owner/* entry, and its owner/name entries, which may not say where a
+// repository starts.
+func (f *File) validateAccount(a *Account) error {
+	if a.entry != "" {
+		if err := checkLimits(a.entry+".limits", a.Limits); err != nil {
+			return err
+		}
+		if err := f.validateAccountProviders(a.entry, a); err != nil {
+			return err
+		}
 	}
-	return err
+	if a.pattern != "" {
+		if err := f.validateOverrides(a.pattern+".", a, &a.Overrides); err != nil {
+			return err
+		}
+	}
+	for _, r := range a.Repositories {
+		if r.Enabled != nil {
+			return fmt.Errorf("configfile: %s.enabled: turn a repository on or off in the dashboard", r.where)
+		}
+		if err := f.validateOverrides(r.where+".", a, &r.Overrides); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// validateOverrides checks the settings one scope writes: its models name
-// declared providers, and its settle, ignore globs, mode, agent, incremental
-// and review keys are in range.
-func (f *File) validateOverrides(where string, r *Overrides) error {
-	if err := f.checkModels(where+".models", r.Models); err != nil {
-		return err
+// validateOverrides checks the settings one scope writes, named in errors
+// under where, "" for the file's own or an entry's name and a dot: its
+// models name providers declared for account t (nil for the file's own),
+// and its trigger, agent, review and comments keys are in range.
+func (f *File) validateOverrides(where string, t *Account, r *Overrides) error {
+	for _, m := range []struct {
+		key string
+		ref *ModelRef
+	}{
+		{keyModel, r.Review.Model}, {keyFallback, r.Review.Fallback},
+		{keyScorer, r.Confidence.Model}, {keyScorerFallback, r.Confidence.Fallback},
+	} {
+		if m.ref == nil || *m.ref == "" {
+			continue
+		}
+		if err := f.checkModelRef(where+m.key, t, *m.ref); err != nil {
+			return err
+		}
 	}
-	if r.Settle != nil && *r.Settle < 0 {
-		return fmt.Errorf("configfile: %s.settle must not be negative", where)
+	for _, e := range []struct {
+		key    string
+		effort *model.Effort
+	}{{keyEffort, r.Review.Effort}, {keyScorerEffort, r.Confidence.Effort}} {
+		if e.effort != nil && *e.effort != "" && !e.effort.Valid() {
+			return fmt.Errorf("configfile: %s%s must be %s, got %q", where, e.key, model.EffortLevels, *e.effort)
+		}
+	}
+	if th := r.Confidence.Threshold; th != nil && !ValidConfidence(*th) {
+		return fmt.Errorf("configfile: %s%s must be between 0 and %d, got %d", where, keyThreshold, MaxConfidence, *th)
+	}
+	if risk := r.Confidence.Risk; risk != nil && !risk.Valid() {
+		return fmt.Errorf("configfile: %s%s must be %s, got %q", where, keyRisk, review.RiskLevels, *risk)
+	}
+	if r.Trigger.Settle != nil && *r.Trigger.Settle < 0 {
+		return fmt.Errorf("configfile: %strigger.settle must not be negative", where)
+	}
+	if r.Trigger.Limit != nil && *r.Trigger.Limit < 0 {
+		return fmt.Errorf("configfile: %strigger.limit must not be negative", where)
 	}
 	for gi, g := range r.Ignore {
-		if !doublestar.ValidatePattern(g) || strings.TrimSpace(g) == "" {
-			return fmt.Errorf("configfile: %s.ignore[%d] %q is not a valid glob", where, gi, g)
+		if !ValidGlob(g) {
+			return fmt.Errorf("configfile: %signore[%d] %q is not a valid glob", where, gi, g)
 		}
-	}
-	if r.Mode != "" && !r.Mode.Valid() {
-		return fmt.Errorf("configfile: %s.mode must be %s or %s, got %q", where, ReviewSingle, ReviewAgentic, r.Mode)
 	}
 	for _, c := range []struct {
 		name string
 		v    *int
 	}{
-		{keyMaxSteps, r.Agent.MaxSteps},
-		{keyMaxToolOutputBytes, r.Agent.MaxToolOutputBytes},
-		{"incremental.maxDeltaFiles", r.Incremental.MaxDeltaFiles},
+		{keySteps, r.Agent.Steps},
+		{keyOutput, r.Agent.Output},
+		{keyParts, r.Agent.Parts},
+		{keyIncremental, r.Review.Incremental},
 	} {
 		if c.v != nil && *c.v <= 0 {
-			return fmt.Errorf("configfile: %s.%s must be positive", where, c.name)
+			return fmt.Errorf("configfile: %s%s must be positive", where, c.name)
 		}
 	}
-	if r.Agent.MaxTokens != nil && *r.Agent.MaxTokens <= 0 {
-		return fmt.Errorf("configfile: %s.agent.maxTokens must be positive", where)
+	if err := validateAgent(where, r.Agent); err != nil {
+		return err
 	}
-	if r.Agent.Timeout != nil && *r.Agent.Timeout <= 0 {
-		return fmt.Errorf("configfile: %s.agent.timeout must be positive", where)
+	if err := f.validateTasks(where, t, r.Tasks); err != nil {
+		return err
 	}
-	if r.Agent.Timeout != nil && *r.Agent.Timeout > jobtimeout.MaxAgentTimeout {
-		return fmt.Errorf("configfile: %s.agent.timeout must not exceed %s, or River's %s job timeout cap would cut the review short",
+	if err := validateTaskBounds(where+"taskBounds", r.TaskBounds); err != nil {
+		return err
+	}
+	return validateReview(where, r)
+}
+
+// validateAgent checks the agent bounds one scope writes beyond its steps
+// and output.
+func validateAgent(where string, a Agent) error {
+	if a.Tokens != nil && *a.Tokens <= 0 {
+		return fmt.Errorf("configfile: %sagent.tokens must be positive", where)
+	}
+	if a.Prompt != nil && *a.Prompt < MinPromptTokens {
+		return fmt.Errorf("configfile: %sagent.prompt must be at least %d", where, MinPromptTokens)
+	}
+	if a.Timeout != nil && *a.Timeout <= 0 {
+		return fmt.Errorf("configfile: %sagent.timeout must be positive", where)
+	}
+	if a.Timeout != nil && *a.Timeout > jobtimeout.MaxAgentTimeout {
+		return fmt.Errorf("configfile: %sagent.timeout must not exceed %s, or River's %s job timeout cap would cut the review short",
 			where, jobtimeout.MaxAgentTimeout, jobtimeout.MaxJobTimeout)
 	}
 	// The job document carries whole seconds.
-	if r.Agent.CommandTimeout != nil && *r.Agent.CommandTimeout < time.Second {
-		return fmt.Errorf("configfile: %s.agent.commandTimeout must be at least 1s", where)
+	if a.CommandTimeout != nil && *a.CommandTimeout < time.Second {
+		return fmt.Errorf("configfile: %sagent.commandTimeout must be at least 1s", where)
 	}
-	for i, c := range r.Agent.Commands {
+	for i, c := range a.Commands {
 		if !commandRe.MatchString(c) {
-			return fmt.Errorf("configfile: %s.agent.commands[%d] %q must be a bare command name, not a path", where, i, c)
+			return fmt.Errorf("configfile: %sagent.commands[%d] %q must be a bare command name, not a path", where, i, c)
 		}
-		if slices.Contains(r.Agent.Commands[:i], c) {
-			return fmt.Errorf("configfile: %s.agent.commands[%d] %q is listed twice", where, i, c)
+		if slices.Contains(a.Commands[:i], c) {
+			return fmt.Errorf("configfile: %sagent.commands[%d] %q is listed twice", where, i, c)
 		}
 	}
-	if err := validateReview(where+".review", &r.Review); err != nil {
-		return err
-	}
-	if err := f.validateTasks(where, r.Tasks); err != nil {
-		return err
-	}
-	return f.validateAllow(where+".allow", &r.Allow)
+	return nil
 }
 
-// validateReview checks the review block one scope writes: its paths stay
-// inside the repository and its severity floor is one of the two.
-func validateReview(where string, r *ReviewSpec) error {
-	for i, p := range r.Instructions {
-		if err := checkRepoPath(p); err != nil {
-			return fmt.Errorf("configfile: %s.instructions[%d]: %w", where, i, err)
-		}
-	}
-	if m := r.MinSeverity; m != nil && !ValidMinSeverity(*m) {
-		return fmt.Errorf("configfile: %s.minSeverity must be %s or %s, got %q", where, SeverityNit, SeverityImportant, *m)
-	}
+// validateReview checks what one scope writes of a review's context, rules
+// and comment templates: the paths stay inside the repository.
+func validateReview(where string, r *Overrides) error {
 	for i, c := range r.Context {
 		if err := c.Check(); err != nil {
-			return fmt.Errorf("configfile: %s.context[%d]: %w", where, i, err)
+			return fmt.Errorf("configfile: %scontext[%d]: %w", where, i, err)
 		}
+	}
+	if err := CheckRules(r.Rules); err != nil {
+		return fmt.Errorf("configfile: %s%w", where, err)
+	}
+	if err := CheckSkills(deref(r.Skills.Paths), r.Skills.Scope); err != nil {
+		return fmt.Errorf("configfile: %s%w", where, err)
 	}
 	for _, t := range []struct {
 		name string
 		path *string
-	}{{"summary", r.Templates.Summary}, {"inline", r.Templates.Inline}} {
+	}{{"summary", r.Comments.Summary}, {"finding", r.Comments.Finding}} {
 		if t.path == nil || *t.path == "" {
 			continue
 		}
-		if err := checkRepoPath(*t.path); err != nil {
-			return fmt.Errorf("configfile: %s.templates.%s: %w", where, t.name, err)
+		if err := CheckRepoPath(*t.path); err != nil {
+			return fmt.Errorf("configfile: %scomments.%s: %w", where, t.name, err)
 		}
 	}
 	return nil
@@ -505,27 +608,30 @@ func validateReview(where string, r *ReviewSpec) error {
 // Check rejects a context file with no description, a path outside the
 // repository, or a glob that is not valid.
 func (c ContextFile) Check() error {
-	if err := checkRepoPath(c.Path); err != nil {
+	if err := CheckRepoPath(c.Path); err != nil {
 		return err
 	}
 	if strings.TrimSpace(c.Description) == "" {
 		return errors.New("description is required")
 	}
 	for i, g := range c.Paths {
-		if strings.TrimSpace(g) == "" || !doublestar.ValidatePattern(g) {
+		if !ValidGlob(g) {
 			return fmt.Errorf("paths[%d] %q is not a valid glob", i, g)
 		}
 	}
 	return nil
 }
 
-// ValidMinSeverity reports whether s is an inline severity floor; empty is
-// none.
-func ValidMinSeverity(s string) bool { return s == "" || s == SeverityNit || s == SeverityImportant }
+// ValidGlob reports whether g is a doublestar glob a setting may take.
+func ValidGlob(g string) bool { return strings.TrimSpace(g) != "" && doublestar.ValidatePattern(g) }
 
-// checkRepoPath rejects a repository path that is empty, absolute or
-// escapes the repository root.
-func checkRepoPath(p string) error {
+// ValidConfidence reports whether n is a confidence score.
+func ValidConfidence(n int) bool { return n >= 0 && n <= MaxConfidence }
+
+// CheckRepoPath rejects a repository path that is empty, absolute or
+// escapes the repository root: every path a configuration names is read
+// in a checkout, so an unbounded one would read outside the repository.
+func CheckRepoPath(p string) error {
 	if strings.TrimSpace(p) == "" {
 		return errors.New("path must not be empty")
 	}
@@ -538,142 +644,74 @@ func checkRepoPath(p string) error {
 	return nil
 }
 
-func (in Installation) validate(where string) error {
-	switch in.Forge {
+func (i *Connection) validate(where string) error {
+	if i.App.webhookSecret.Value() == "" {
+		return fmt.Errorf("configfile: %s.webhookSecret is required", where)
+	}
+	switch i.Forge {
 	case ForgeGitHub:
-		if in.App == nil {
-			return fmt.Errorf("configfile: %s: a github installation needs an app", where)
+		for _, k := range []struct {
+			key string
+			set bool
+		}{{"url", i.URL != ""}, {"token", !i.Token.empty()}, {"gitToken", !i.GitToken.empty()}} {
+			if k.set {
+				return fmt.Errorf("configfile: %s.%s is for a forgejo or gitea app; a github app takes clientId and privateKey", where, k.key)
+			}
 		}
-		if !in.Token.empty() || !in.WebhookSecret.empty() || !in.GitToken.empty() {
-			return fmt.Errorf("configfile: %s: a github installation takes app credentials, not token, gitToken or webhookSecret", where)
+		if i.App.clientID == "" {
+			return fmt.Errorf("configfile: %s.clientId is required", where)
 		}
-		if (in.App.ClientID == "") == in.App.ClientIDFrom.empty() {
-			return fmt.Errorf("configfile: %s.app: set exactly one of clientId or clientIdFrom", where)
+		if i.App.privateKey.Value() == "" {
+			return fmt.Errorf("configfile: %s.privateKey is required", where)
 		}
-		if in.App.clientID == "" {
-			return fmt.Errorf("configfile: %s.app.clientIdFrom resolved to an empty value", where)
-		}
-		if in.App.privateKey.Value() == "" {
-			return fmt.Errorf("configfile: %s.app.privateKey is required", where)
-		}
-		if in.App.webhookSecret.Value() == "" {
-			return fmt.Errorf("configfile: %s.app.webhookSecret is required", where)
-		}
-	case ForgeGitLab:
-		return fmt.Errorf("configfile: %s.forge gitlab is not supported yet: its webhooks parse, but nothing can review its pull requests", where)
 	case ForgeForgejo, ForgeGitea:
-		if in.App != nil {
-			return fmt.Errorf("configfile: %s: a %s installation takes a token, not an app", where, in.Forge)
+		if i.App.ClientID != (ValueOrRef{}) || !i.App.PrivateKey.empty() {
+			return fmt.Errorf("configfile: %s: a %s app takes url, token and gitToken, not clientId or privateKey", where, i.Forge)
 		}
-		if in.token.Value() == "" {
+		if err := checkForgeURL(i.URL); err != nil {
+			return fmt.Errorf("configfile: %s.url: %w", where, err)
+		}
+		if i.token.Value() == "" {
 			return fmt.Errorf("configfile: %s.token is required", where)
 		}
-		if in.webhookSecret.Value() == "" {
-			return fmt.Errorf("configfile: %s.webhookSecret is required", where)
-		}
-		if !in.GitToken.empty() && in.gitToken.Value() == "" {
+		if !i.GitToken.empty() && i.gitToken.Value() == "" {
 			return fmt.Errorf("configfile: %s.gitToken resolved to an empty value", where)
 		}
 	default:
-		return fmt.Errorf("configfile: %s.forge must be %s, %s or %s, got %q", where, ForgeGitHub, ForgeForgejo, ForgeGitea, in.Forge)
+		return fmt.Errorf("configfile: %s.forge must be %s, %s or %s, got %q", where, ForgeGitHub, ForgeForgejo, ForgeGitea, i.Forge)
 	}
 	return nil
 }
 
-func (f *File) checkModels(where string, m ModelsSpec) error {
-	for role, r := range map[string]*ModelRef{"review": m.Review, "fallback": m.Fallback} {
-		if r == nil || *r == "" {
-			continue
-		}
-		if err := f.checkModelRef(where+"."+role, *r); err != nil {
-			return err
-		}
+// checkForgeURL accepts a Forgejo or Gitea base URL: http or https, with a
+// host, and nothing past its path, which an instance served under a
+// subpath has.
+func checkForgeURL(raw string) error {
+	if raw == "" {
+		return errors.New("is required")
+	}
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%q is not a URL: %w", raw, err)
+	case u.Scheme != "https" && u.Scheme != "http", u.Host == "":
+		return fmt.Errorf("%q must be an http or https URL with a host", raw)
+	case u.User != nil, u.RawQuery != "", u.Fragment != "":
+		return fmt.Errorf("%q must not carry credentials, a query or a fragment", raw)
 	}
 	return nil
 }
 
 // checkModelRef rejects a model reference that is not
-// "<provider>/<model>" of a declared provider.
-func (f *File) checkModelRef(where string, ref ModelRef) error {
+// "<provider>/<model>" of a provider declared for account t or the
+// instance.
+func (f *File) checkModelRef(where string, t *Account, ref ModelRef) error {
 	p := ref.Provider()
 	if p == "" || ref.Model() == "" {
 		return fmt.Errorf("configfile: %s must be \"<provider>/<model>\", got %q", where, ref)
 	}
-	if _, ok := f.Providers[p]; !ok {
+	if _, ok := f.Provider(t, p); !ok {
 		return fmt.Errorf("configfile: %s references provider %q, which is not declared under providers", where, p)
-	}
-	return nil
-}
-
-// validateAllow checks one scope's bounds name what a repository could
-// choose: review modes, models of declared providers, bare command names,
-// positive limits and a settle time that is not negative.
-func (f *File) validateAllow(where string, a *Allow) error {
-	for i, m := range a.Modes {
-		if !m.Valid() {
-			return fmt.Errorf("configfile: %s.modes[%d] must be %s or %s, got %q", where, i, ReviewSingle, ReviewAgentic, m)
-		}
-	}
-	for i, ref := range a.Models {
-		if err := f.checkModelRef(fmt.Sprintf("%s.models[%d]", where, i), ref); err != nil {
-			return err
-		}
-	}
-	for i, c := range a.Commands {
-		if !commandRe.MatchString(c) {
-			return fmt.Errorf("configfile: %s.commands[%d] %q must be a bare command name, not a path", where, i, c)
-		}
-	}
-	ag := a.Agent
-	if (ag.MaxSteps != nil && *ag.MaxSteps <= 0) || (ag.MaxToolOutputBytes != nil && *ag.MaxToolOutputBytes <= 0) ||
-		(ag.MaxTokens != nil && *ag.MaxTokens <= 0) || (ag.Timeout != nil && *ag.Timeout <= 0) {
-		return fmt.Errorf("configfile: %s.agent bounds must be positive", where)
-	}
-	if ag.Timeout != nil && *ag.Timeout > jobtimeout.MaxAgentTimeout {
-		return fmt.Errorf("configfile: %s.agent.timeout must not exceed %s", where, jobtimeout.MaxAgentTimeout)
-	}
-	if a.Settle != nil && *a.Settle < 0 {
-		return fmt.Errorf("configfile: %s.settle must not be negative", where)
-	}
-	return validateTaskBounds(where+".tasks", a.Tasks)
-}
-
-// checkWithinAllow rejects resolved settings whose own values lie outside
-// the bounds they give the repository: the repository would be refused
-// the operator's own choice.
-func checkWithinAllow(where string, s Settings) error {
-	a := s.Allow
-	if a.Modes != nil && !slices.Contains(a.Modes, s.Mode) {
-		return fmt.Errorf("configfile: %s: mode %s is outside allow.modes", where, s.Mode)
-	}
-	for _, m := range []struct {
-		role string
-		ref  ModelRef
-	}{{"review", s.Models.Review}, {"fallback", s.Models.Fallback}} {
-		if a.Models != nil && m.ref != "" && !slices.Contains(a.Models, m.ref) {
-			return fmt.Errorf("configfile: %s: models.%s %q is outside allow.models", where, m.role, m.ref)
-		}
-	}
-	for _, c := range s.Agent.Commands {
-		if a.Commands != nil && !slices.Contains(a.Commands, c) {
-			return fmt.Errorf("configfile: %s: agent.commands %q is outside allow.commands", where, c)
-		}
-	}
-	var over string
-	switch ag, bound := s.Agent, a.Agent; {
-	case bound.MaxSteps != nil && ag.MaxSteps > *bound.MaxSteps:
-		over = keyMaxSteps
-	case bound.MaxToolOutputBytes != nil && ag.MaxToolOutputBytes > *bound.MaxToolOutputBytes:
-		over = keyMaxToolOutputBytes
-	case bound.MaxTokens != nil && ag.MaxTokens > *bound.MaxTokens:
-		over = keyMaxTokens
-	case bound.Timeout != nil && ag.Timeout > *bound.Timeout:
-		over = keyTimeout
-	case a.Settle != nil && s.Settle > *a.Settle:
-		over = "settle"
-	}
-	if over != "" {
-		return fmt.Errorf("configfile: %s: %s is above allow.%s; set it at or below the bound", where, over, over)
 	}
 	return nil
 }
@@ -707,8 +745,9 @@ func compileFilter(expr string) (*prfilter.Program, error) {
 }
 
 // SamplePR is the pull request every filter is evaluated against at load. It
-// is also the documented shape of the `pr` variable: every key here is always
-// present at runtime.
+// is also the documented shape of the `pr` variable: every key here is
+// present at runtime, lines for a trigger condition alone, which is then
+// judged once the diff is fetched.
 func SamplePR() map[string]any {
 	return map[string]any{
 		"event":     "opened",
@@ -727,59 +766,28 @@ func SamplePR() map[string]any {
 		"createdAt": time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		"labels":    []any{map[string]any{"name": "sample", "color": "ffffff"}},
 		"body":      "sample body",
+		linesVar:    10,
 	}
 }
 
-func (r SecretRef) empty() bool { return r.Env == "" && r.File == "" && r.Sealed == "" }
+func (r SecretRef) empty() bool { return r.Env == "" }
 
-// refPolicy is where a SecretRef may come from. The operator's file may read
-// the environment and filesystem but carries no sealed values; a
-// dashboard-managed tenant carries only sealed values, opened with open.
-type refPolicy struct {
-	dashboard bool
-	open      Opener
-}
+// secrets reads the secrets one Parse resolves, and records the variables
+// they came from in env.
+type secrets struct{ env []string }
 
-var fileRefs = refPolicy{}
-
-// resolve reads the referenced value. Exactly one of env, file or sealed
-// must be set; an unset variable, an unreadable file or an unopenable sealed
-// value is an error, never an empty value, so a typo cannot silently disable
-// authentication.
-func (r SecretRef) resolve(refs refPolicy) (Secret, error) {
-	switch {
-	case r.Sealed != "" && (r.Env != "" || r.File != ""):
-		return Secret{}, errors.New("set exactly one of env, file or sealed")
-	case r.Env != "" && r.File != "":
-		return Secret{}, errors.New("set either env or file, not both")
-	case r.Sealed != "" && !refs.dashboard:
-		return Secret{}, errors.New("sealed values are only valid in dashboard-managed tenants")
-	case refs.dashboard && (r.Env != "" || r.File != ""):
-		return Secret{}, errors.New("dashboard-managed tenants take sealed values, not env or file references")
-	case r.Sealed != "":
-		if refs.open == nil {
-			return Secret{}, errors.New("no key to open sealed values is configured")
-		}
-		b, err := refs.open.Open(r.Sealed)
-		if err != nil {
-			return Secret{}, fmt.Errorf("open sealed value: %w", err)
-		}
-		return Secret{value: strings.TrimRight(string(b), "\r\n")}, nil
-	case r.Env != "":
-		v, ok := os.LookupEnv(r.Env)
-		if !ok {
-			return Secret{}, fmt.Errorf("environment variable %s is not set", r.Env)
-		}
-		return Secret{value: strings.TrimRight(v, "\r\n")}, nil
-	case r.File != "":
-		b, err := os.ReadFile(r.File)
-		if err != nil {
-			return Secret{}, err
-		}
-		return Secret{value: strings.TrimRight(string(b), "\r\n")}, nil
-	case refs.dashboard:
-		return Secret{}, errors.New("reference must set sealed")
-	default:
-		return Secret{}, errors.New("reference must set env or file")
+// read resolves r. An unset variable is an error, never an empty value, so
+// a typo cannot silently disable authentication.
+func (s *secrets) read(r SecretRef) (Secret, error) {
+	if r.Env == "" {
+		return Secret{}, errors.New("reference must set env")
 	}
+	v, ok := os.LookupEnv(r.Env)
+	if !ok {
+		return Secret{}, fmt.Errorf("environment variable %s is not set", r.Env)
+	}
+	if !slices.Contains(s.env, r.Env) {
+		s.env = append(s.env, r.Env)
+	}
+	return Secret{value: strings.TrimRight(v, "\r\n")}, nil
 }

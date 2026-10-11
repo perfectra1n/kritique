@@ -2,7 +2,7 @@
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 .btn-danger {
   color: var(--danger);
@@ -11,20 +11,17 @@
 .btn-primary.btn-danger {
   background: var(--danger);
   border-color: var(--danger);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .dialog {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel);
-  color: var(--text);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
   padding: 16px 20px;
   width: min(560px, calc(100vw - 32px));
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 15%, transparent);
 }
-.dialog::backdrop {
-  background: color-mix(in srgb, var(--bg) 60%, transparent);
+.dialog-wide {
+  width: min(820px, calc(100vw - 32px));
 }
 .dialog-title {
   margin: 0 0 12px;
@@ -35,7 +32,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  font-size: 13px;
+  font-size: var(--type-md);
 }
 .dialog-body p {
   margin: 0;
@@ -51,7 +48,7 @@
   position: fixed;
   right: 16px;
   bottom: 16px;
-  z-index: 20;
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -63,10 +60,10 @@
   justify-content: space-between;
   gap: 10px;
   padding: 8px 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   border: 1px solid color-mix(in srgb, var(--tone, var(--border)) 45%, var(--border));
   background: var(--panel);
-  font-size: 13px;
+  font-size: var(--type-md);
   box-shadow: 0 4px 12px color-mix(in srgb, var(--text) 12%, transparent);
 }
 
@@ -77,7 +74,7 @@
 }
 .form fieldset {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   padding: 10px 12px 12px;
   margin: 0;
   display: flex;
@@ -86,7 +83,7 @@
   min-width: 0;
 }
 .form legend {
-  font-size: 12px;
+  font-size: var(--type-sm);
   font-weight: 600;
   color: var(--muted);
   padding: 0 4px;
@@ -100,7 +97,7 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 12px;
+  font-size: var(--type-sm);
   min-width: 0;
 }
 .field > span:first-child {
@@ -108,28 +105,22 @@
 }
 .field input,
 .field select,
-.field textarea,
-.json-edit {
+.field textarea {
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--panel);
   color: var(--text);
   padding: 6px 8px;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--type-md);
   min-width: 0;
 }
-.field textarea,
-.json-edit {
+.field textarea {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--type-sm);
   resize: vertical;
 }
-.json-edit {
-  width: 100%;
-  min-height: 320px;
-  box-sizing: border-box;
-}
+
 .field input:disabled,
 .field select:disabled,
 .field textarea:disabled {
@@ -137,113 +128,98 @@
 }
 .field input:focus-visible,
 .field select:focus-visible,
-.field textarea:focus-visible,
-.json-edit:focus-visible {
+.field textarea:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
-.field-check {
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-}
+
 .invalid input,
 .invalid select,
 .invalid textarea,
 [aria-invalid='true'] {
   border-color: var(--danger) !important;
 }
-.field-hint {
-  font-size: 11px;
-  color: var(--muted);
-}
-.field-error {
-  font-size: 11px;
-  color: var(--danger);
-}
-.secret-modes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  border: none;
-  padding: 0;
-  margin: 0;
-}
-.secret-modes label {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.item-card {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.item-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-}
-.form-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-.form-alert {
-  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
-  border-radius: 6px;
-  padding: 8px 12px;
-  font-size: 13px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
+
 .notice {
   border: 1px solid var(--border);
   background: var(--panel-alt);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: var(--type-md);
 }
-.secret-once {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  word-break: break-all;
+
+/* In the audit table a closed detail is a word in its cell and not a box,
+   so a row with one is as tall as a row without. */
+table.audit .collapsible {
+  border: none;
+  background: none;
 }
-.spec-tree {
-  font-size: 12px;
-  margin: 0;
-  padding-left: 14px;
+table.audit .collapsible-head {
+  width: auto;
+  padding: 0;
+  gap: 4px;
 }
-.spec-tree > li {
-  list-style: none;
-  padding: 2px 0;
+table.audit .collapsible-head:hover {
+  background: none;
+  text-decoration: underline;
 }
-.spec-key {
-  color: var(--muted);
-}
-.inline-form {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 10px;
-  padding: 10px 12px;
+table.audit .collapsible-body {
+  padding: 6px 0 2px;
+  border-top: none;
 }
 .detail-json {
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-xs);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.setup-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 16px 0;
+  border: 1px solid var(--border);
+  background: var(--panel-alt);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  font-size: var(--type-md);
+}
+/* The Configuration page's setup steps, each done or with what to set. */
+.checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  list-style: none;
+  font-size: var(--type-md);
+}
+.checklist li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.check-mark {
+  display: inline-flex;
+  flex: none;
+  margin-top: 2px;
+  color: var(--muted);
+}
+.checklist li.done .check-mark {
+  color: var(--ok);
+}
+.check-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.forge-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
 }

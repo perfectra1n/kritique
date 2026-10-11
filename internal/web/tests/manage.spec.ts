@@ -4,333 +4,25 @@ import * as g from './golden';
 import type * as T from '../src/lib/types';
 
 const S = g.SLUG;
-const API = `/api/v1/tenants/${S}`;
-const ADMIN = `#/t/${S}/admin`;
+const API = `/api/v1/accounts/${S}`;
+const ADMIN = `#/a/${S}/admin`;
 
-const adminMe: T.Me = { ...g.me, operator: false, tenants: [{ slug: S, role: 'admin', managedBy: 'dashboard' }] };
-const memberMe: T.Me = { ...g.me, operator: false, tenants: [{ slug: S, role: 'member', managedBy: 'dashboard' }] };
-const operatorMe: T.Me = { ...g.me, operator: true };
-
-// The golden config, with enough spec to exercise every part of the form.
-const inst0 = g.tenantConfig.spec.installations as Record<string, unknown>[];
-const dashboardConfig: T.TenantConfig = {
-  ...g.tenantConfig,
-  spec: {
-    ...g.tenantConfig.spec,
-    limits: { concurrency: 2 },
-    installations: [
-      { ...inst0[0], forge: 'forgejo', host: 'https://code.example', account: 'bot', webhookSecret: { set: true } },
-    ],
-    repositories: [{ name: 'alpha/one', mode: 'agentic', agent: { maxSteps: 10 }, konflate: 'keep-me' }],
-  },
-};
+const adminMe: T.Me = { ...g.me, admin: true };
+const memberMe: T.Me = { ...g.me, admin: false, accounts: [S] };
 
 async function setup(page: Page, who: T.Me, rows: [RegExp, unknown][] = []): Promise<URL[]> {
   return g.mockApi(page, [[/\/api\/v1\/me$/, who], ...rows, ...g.defaultApi()]);
 }
 
-function configRow(cfg: T.TenantConfig | ((u: URL) => T.TenantConfig)): [RegExp, unknown] {
-  return [new RegExp(`${API}/config$`), cfg];
-}
-
-test.describe('tenant configuration', () => {
-  test('a file tenant renders read-only with secrets as set/not set', async ({ page }) => {
-    const file: T.TenantConfig = { ...dashboardConfig, managedBy: 'file', revision: null, editable: false };
-    await setup(page, adminMe, [configRow(file)]);
-    await page.goto(`/${ADMIN}/config`);
-    await expect(page.getByRole('note')).toContainText('declared in the configuration file');
-    await expect(page.locator('.spec-view')).toContainText('alpha-bot');
-    await expect(page.locator('.spec-view .pill').first()).toHaveText('set');
-    await expect(page.getByRole('button', { name: 'Save' })).toHaveCount(0);
-  });
-
-  test('keep, replace and generate secret controls shape the PUT, and the generated secret shows once', async ({ page }) => {
-    let reads = 0;
-    const seen = await setup(page, adminMe, [
-      configRow(() => (reads++ === 0 ? dashboardConfig : { ...dashboardConfig, revision: 4 })),
-    ]);
-    const sent = await g.mockWrites(page, [['PUT', new RegExp(`${API}/config$`), { status: 200, body: g.tenantWriteResult }]]);
-    await page.goto(`/${ADMIN}/config`);
-
-    const token = page.locator('[data-path="installations[0].token"]');
-    await expect(token.getByLabel('Keep current')).toBeChecked();
-    // A password field is never pre-filled, including after switching away and back.
-    await token.getByLabel('Replace with a new value').check();
-    await token.getByLabel('Token: new value').fill('typed-then-dropped');
-    await token.getByLabel('Keep current').check();
-    await token.getByLabel('Replace with a new value').check();
-    await expect(token.getByLabel('Token: new value')).toHaveValue('');
-    await token.getByLabel('Token: new value').fill('tok-new');
-    await page.locator('[data-path="installations[0].webhookSecret"]').getByLabel('Generate').check();
-
-    await page.getByRole('button', { name: 'Save' }).click();
-    await expect.poll(() => sent.length).toBe(1);
-    const body = sent[0]!.body as T.UpdateTenantRequest;
-    expect(body.revision).toBe(3);
-    const inst = (body.spec.installations as Record<string, unknown>[])[0]!;
-    expect(inst.token).toEqual({ value: 'tok-new' });
-    expect(inst.webhookSecret).toEqual({ generate: true });
-    expect(inst).not.toHaveProperty('gitToken');
-    expect(body.spec.limits).toEqual({ concurrency: 2 });
-    expect(body.spec.repositories).toEqual([{ name: 'alpha/one', mode: 'agentic', agent: { maxSteps: 10 }, konflate: 'keep-me' }]);
-
-    const dialog = page.getByRole('dialog', { name: 'Generated webhook secrets' });
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText('only time');
-    await expect(dialog.getByTestId('generated-secret')).toHaveText('00ff');
-    await expect(dialog).toContainText('/hooks/alpha-bot');
-    await dialog.getByRole('button', { name: 'I have copied them' }).click();
-    await expect(dialog).toBeHidden();
-    await expect(page.getByTestId('generated-secret')).toHaveCount(0);
-    // The Save button that opened it was remounted away; focus lands on the panel heading.
-    await expect(page.locator('#admin-config')).toBeFocused();
-    // Saved: the config reloads and the typed secret is gone with the old draft.
-    await expect(page.locator('#admin-config').locator('..')).toContainText('revision 4');
-    expect(seen.filter((u) => u.pathname.endsWith('/config')).length).toBeGreaterThanOrEqual(2);
-    await expect(page.locator('[data-path="installations[0].token"]').getByLabel('Keep current')).toBeChecked();
-    await expect(page.locator('input[type=password]')).toHaveCount(0);
-  });
-
-  test('the fields the policy keeps for operators are disabled for a tenant admin and enabled for an operator', async ({ page }) => {
-    await setup(page, adminMe, [configRow(dashboardConfig)]);
-    await page.goto(`/${ADMIN}/config`);
-    await expect(page.getByLabel('Concurrency')).toBeDisabled();
-    await expect(page.locator('[data-path="repositories[0].mode"]')).toBeDisabled();
-    await expect(page.locator('[data-path="repositories[0].agent"]')).toBeDisabled();
-    await expect(page.locator('[data-path="runner"]')).toBeDisabled();
-    await expect(page.locator('[data-path="models.review"]')).toBeDisabled();
-    await expect(page.locator('[data-path="models.fallback"]')).toBeDisabled();
-    await expect(page.locator('[data-path="forks"]')).toBeDisabled();
-    await expect(page.getByText('(operator only)').first()).toBeVisible();
-
-    // The server says what an operator may change; the page renders that.
-    const asOperator: T.TenantConfig = { ...dashboardConfig, policy: dashboardConfig.policy.map((p) => ({ ...p, editable: true })) };
-    await setup(page, operatorMe, [configRow(asOperator)]);
-    await page.reload();
-    await expect(page.getByLabel('Concurrency')).toBeEnabled();
-    await expect(page.locator('[data-path="repositories[0].mode"]')).toBeEnabled();
-    await expect(page.locator('[data-path="models.review"]')).toBeEnabled();
-    await expect(page.locator('[data-path="forks"]')).toBeEnabled();
-  });
-
-  test('fields left empty show what they inherit, and from where', async ({ page }) => {
-    await setup(page, adminMe, [configRow(dashboardConfig)]);
-    await page.goto(`/${ADMIN}/config`);
-    const inh = g.tenantConfig.inherited;
-    await expect(page.locator('[data-path="models.review"]')).toHaveAttribute('placeholder', `inherits ${inh.tenant.models.review} from the config file`);
-    await expect(page.locator('[data-path="settle"]')).toHaveAttribute('placeholder', "inherits 30s from kritique's default");
-    await expect(page.locator('[data-path="repositories[0].mode"] option[value=""]')).toHaveText(`default: ${inh.repository.mode}`);
-    await expect(page.locator('[data-path="repositories[0].filter"]')).toHaveAttribute('placeholder', `inherits ${inh.repository.filter} from kritique's default`);
-  });
-
-  test('a 422 highlights and focuses the field its path names', async ({ page }) => {
-    await setup(page, adminMe, [configRow(dashboardConfig)]);
-    const host = 'installations[0].host';
-    const sent = await g.mockWrites(page, [
-      [
-        'PUT',
-        new RegExp(`${API}/config$`),
-        () =>
-          sent.length <= 2
-            ? g.apiError(422, 'invalid_spec', `${host}: the host is not allowed`, { path: host })
-            : g.apiError(422, 'reenter_secret', 'enter this secret again', { path: 'installations[0].token' }),
-      ],
-    ]);
-    await page.goto(`/${ADMIN}/config`);
-    await page.getByLabel('Host').fill('https://elsewhere.example');
-    await page.getByRole('button', { name: 'Save' }).click();
-    await expect(page.getByRole('alert')).toContainText('the host is not allowed');
-    await expect(page.locator(`[data-path="${host}"]`)).toHaveAttribute('aria-invalid', 'true');
-    await expect(page.locator(`[data-path="${host}"]`)).toBeFocused();
-    // The same error again still moves focus back to the field.
-    await page.getByLabel('Filter').first().focus();
-    await page.getByRole('button', { name: 'Save' }).click();
-    await expect.poll(() => sent.length).toBe(2);
-    await expect(page.locator(`[data-path="${host}"]`)).toBeFocused();
-
-    await page.getByRole('button', { name: 'Save' }).click();
-    await expect(page.getByRole('alert')).toContainText('must be entered again');
-    await expect(page.locator('[data-path="installations[0].token"]')).toHaveClass(/invalid/);
-    await expect(page.locator(`[data-path="${host}"]`)).not.toHaveAttribute('aria-invalid', 'true');
-    // Adding or removing an item shifts indexes, so it dismisses a path error.
-    await page.getByRole('button', { name: 'Add repository' }).click();
-    await expect(page.locator('[data-path="installations[0].token"]')).not.toHaveClass(/invalid/);
-    await expect(page.locator('.form-alert')).toHaveCount(0);
-  });
-
-  test('a renamed installation cannot keep the secrets stored under its new name', async ({ page }) => {
-    const b = (dashboardConfig.spec.installations as Record<string, unknown>[])[0]!;
-    const two: T.TenantConfig = {
-      ...dashboardConfig,
-      spec: { ...dashboardConfig.spec, installations: [b, { ...b, name: 'beta-bot' }] },
-    };
-    await setup(page, adminMe, [configRow(two)]);
-    const sent = await g.mockWrites(page, [['PUT', new RegExp(`${API}/config$`), { status: 200, body: { slug: S, revision: 4 } }]]);
-    await page.goto(`/${ADMIN}/config`);
-    await page.getByRole('button', { name: 'Remove installation' }).first().click();
-    await page.locator('[data-path="installations[0].name"]').fill('alpha-bot');
-    await expect(page.getByRole('note').filter({ hasText: 'Renamed from' })).toContainText('beta-bot');
-    const token = page.locator('[data-path="installations[0].token"]');
-    await expect(token.getByLabel('Keep current')).toHaveCount(0);
-    await expect(page.locator('[data-path="installations[0].webhookSecret"]').getByLabel('Generate')).toBeChecked();
-    await token.getByLabel('Token: new value').fill('fresh');
-    await page.getByRole('button', { name: 'Save' }).click();
-    await expect.poll(() => sent.length).toBe(1);
-    const insts = (sent[0]!.body as T.UpdateTenantRequest).spec.installations as Record<string, unknown>[];
-    expect(insts).toHaveLength(1);
-    expect(insts[0]!.name).toBe('alpha-bot');
-    expect(insts[0]!.token).toEqual({ value: 'fresh' });
-    expect(insts[0]!.webhookSecret).toEqual({ generate: true });
-    expect(JSON.stringify(insts[0])).not.toContain('keep');
-  });
-
-  test('switching to JSON with a typed secret is refused, so the typed value is still what saves', async ({ page }) => {
-    await setup(page, adminMe, [configRow(dashboardConfig)]);
-    const sent = await g.mockWrites(page, [['PUT', new RegExp(`${API}/config$`), { status: 200, body: { slug: S, revision: 4 } }]]);
-    await page.goto(`/${ADMIN}/config`);
-    const token = page.locator('[data-path="installations[0].token"]');
-    await token.getByLabel('Replace with a new value').check();
-    await token.getByLabel('Token: new value').fill('typed');
-    await page.getByRole('button', { name: 'Advanced: edit JSON' }).click();
-    await expect(page.locator('.form-alert')).toContainText('JSON view never shows them');
-    await expect(page.getByLabel('Spec JSON')).toHaveCount(0);
-    await page.getByRole('button', { name: 'Save' }).click();
-    await expect.poll(() => sent.length).toBe(1);
-    const inst = ((sent[0]!.body as T.UpdateTenantRequest).spec.installations as Record<string, unknown>[])[0]!;
-    expect(inst.token).toEqual({ value: 'typed' });
-  });
-
-  test('a revision conflict offers to reload the latest', async ({ page }) => {
-    let reads = 0;
-    await setup(page, adminMe, [configRow(() => (reads++ === 0 ? dashboardConfig : { ...dashboardConfig, revision: 9 }))]);
-    await g.mockWrites(page, [['PUT', new RegExp(`${API}/config$`), g.apiError(409, 'revision_conflict', 'the tenant was changed')]]);
-    await page.goto(`/${ADMIN}/config`);
-    await page.getByLabel('Filter').first().fill('changed');
-    await page.getByRole('button', { name: 'Save' }).click();
-    await expect(page.getByRole('alert')).toContainText('Someone else saved this tenant');
-    await page.getByRole('button', { name: /Reload the latest/ }).click();
-    await expect(page.locator('#admin-config').locator('..')).toContainText('revision 9');
-    await expect(page.getByLabel('Filter').first()).toHaveValue('');
-    await expect(page.getByRole('alert')).toHaveCount(0);
-  });
-
-  test('the JSON editor shows secrets as keep and saves the JSON as written', async ({ page }) => {
-    await setup(page, adminMe, [configRow(dashboardConfig)]);
-    const sent = await g.mockWrites(page, [['PUT', new RegExp(`${API}/config$`), { status: 200, body: { slug: S, revision: 4 } }]]);
-    await page.goto(`/${ADMIN}/config`);
-    const token = page.locator('[data-path="installations[0].token"]');
-    await token.getByLabel('Replace with a new value').check();
-    await page.getByRole('button', { name: 'Advanced: edit JSON' }).click();
-    const box = page.getByLabel('Spec JSON');
-    const text = await box.inputValue();
-    const spec = JSON.parse(text) as Record<string, unknown>;
-    expect((spec.installations as Record<string, unknown>[])[0]!.token).toEqual({ keep: true });
-
-    await box.fill('{ not json');
-    await page.getByRole('button', { name: 'Save' }).click();
-    await expect(page.locator('.form-alert')).toContainText('does not parse');
-    expect(sent).toHaveLength(0);
-
-    await box.fill(JSON.stringify({ ...spec, filter: 'from-json' }));
-    await page.getByRole('button', { name: 'Save' }).click();
-    await expect.poll(() => sent.length).toBe(1);
-    expect((sent[0]!.body as T.UpdateTenantRequest).spec.filter).toBe('from-json');
-  });
-
-  test('unsaved edits ask before leaving', async ({ page }) => {
-    await setup(page, adminMe, [configRow(dashboardConfig), [new RegExp(`${API}/members$`), g.members]]);
-    await page.goto(`/${ADMIN}/config`);
-    await page.getByLabel('Filter').first().fill('draft');
-    page.once('dialog', (d) => void d.dismiss());
-    await page.getByRole('link', { name: 'Members' }).click();
-    await expect(page).toHaveURL(new RegExp(`${ADMIN}/config$`));
-    await expect(page.getByLabel('Filter').first()).toHaveValue('draft');
-    page.once('dialog', (d) => void d.accept());
-    await page.getByRole('link', { name: 'Members' }).click();
-    await expect(page).toHaveURL(new RegExp(`${ADMIN}/members$`));
-  });
-
-  test('management disabled makes the config read-only and hides tenant creation', async ({ page }) => {
-    await setup(page, operatorMe, [[/\/api\/v1\/meta$/, { ...g.meta, management: false }], configRow(dashboardConfig)]);
-    await page.goto(`/${ADMIN}/config`);
-    await expect(page.getByRole('note')).toContainText('no sealing key configured');
-    await expect(page.getByRole('button', { name: 'Save' })).toHaveCount(0);
-    await page.goto('/#/operator');
-    await expect(page.getByRole('note')).toContainText('no sealing key configured');
-    await expect(page.getByRole('button', { name: 'New tenant' })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: /Delete tenant/ })).toHaveCount(0);
-  });
-
-  test('a tenant member cannot open the admin page', async ({ page }) => {
-    await setup(page, memberMe);
-    await page.goto(`/${ADMIN}/config`);
-    await expect(page.getByRole('alert')).toContainText('Only a tenant admin');
-    await expect(page.getByRole('link', { name: 'Admin' })).toHaveCount(0);
-  });
-});
-
-test.describe('members and invites', () => {
-  const forgeOnly: T.Member = {
-    account: { ...g.members.members[0]!.account, id: 'acct-2', displayName: 'Bea', email: 'bea@example.com' },
-    role: 'member',
-    sources: [{ source: 'forge', role: 'member' }],
-  };
-  const list: T.Members = { ...g.members, members: [...g.members.members, forgeOnly] };
-
-  test('change an invite role, remove invite access, and surface last_admin', async ({ page }) => {
-    await setup(page, adminMe, [[new RegExp(`${API}/members$`), list]]);
-    const member = new RegExp(`${API}/members/acct-1$`);
-    const sent = await g.mockWrites(page, [
-      ['PATCH', member, () => (sent.length === 1 ? { status: 200, body: g.members.members[0] } : g.apiError(409, 'last_admin', 'no admin'))],
-      ['DELETE', member, { status: 200, body: g.memberRemoved }],
-    ]);
-    await page.goto(`/${ADMIN}/members`);
-    const rows = page.locator('#admin-members').locator('../..').locator('tbody tr');
-    await expect(rows).toHaveCount(2);
-    await expect(rows.nth(1)).toContainText('from the forge at sign-in');
-    await expect(rows.nth(1).getByRole('combobox')).toHaveCount(0);
-
-    const role = page.getByLabel('Invite role for Ada');
-    await role.selectOption('member');
-    await expect.poll(() => sent.length).toBe(1);
-    expect(sent[0]!.body).toEqual({ role: 'member' });
-    await expect(page.getByRole('status')).toContainText('Ada is now member');
-
-    await role.selectOption('member');
-    await expect(page.locator('.state-error')).toContainText('left with no admin');
-
-    await page.getByRole('button', { name: 'Remove', exact: true }).click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Remove access' }).click();
-    await expect.poll(() => sent.filter((s) => s.method === 'DELETE').length).toBe(1);
-    await expect(page.getByRole('status')).toContainText(g.memberRemoved.note);
-  });
-
-  test('create and revoke invites', async ({ page }) => {
-    await setup(page, adminMe, [[new RegExp(`${API}/members$`), g.members]]);
-    const invite = g.members.invites![0]!;
-    const sent = await g.mockWrites(page, [
-      ['POST', new RegExp(`${API}/invites$`), { status: 201, body: { ...invite, id: 'inv-2', email: 'cy@example.com', role: 'admin' } }],
-      ['DELETE', new RegExp(`${API}/invites/inv-1$`), { status: 204 }],
-    ]);
-    await page.goto(`/${ADMIN}/members`);
-    await expect(page.locator('#admin-invites').locator('../..')).toContainText(invite.email);
-
-    await page.getByLabel('Email').fill('cy@example.com');
-    await page.locator('.inline-form').getByRole('combobox').selectOption('admin');
-    await page.getByLabel(/Expires after/).fill('24');
-    await page.getByRole('button', { name: 'Invite', exact: true }).click();
-    await expect.poll(() => sent.length).toBe(1);
-    expect(sent[0]!.body).toEqual({ email: 'cy@example.com', role: 'admin', ttlHours: 24 });
-    await expect(page.getByRole('status')).toContainText('Invited cy@example.com as admin');
-
-    await page.getByRole('button', { name: `Revoke the invite for ${invite.email}` }).click();
-    await expect.poll(() => sent.filter((s) => s.method === 'DELETE').length).toBe(1);
-    await expect(page.getByRole('status')).toContainText(`Revoked the invite for ${invite.email}`);
-  });
+test('an account member cannot open the audit log', async ({ page }) => {
+  await setup(page, memberMe);
+  await page.goto(`/${ADMIN}/audit`);
+  await expect(page.getByRole('alert')).toContainText('Only an admin');
+  await expect(page.getByRole('navigation', { name: 'Settings' }).getByRole('link')).toHaveText(['Repositories']);
 });
 
 test('the audit log pages and expands detail', async ({ page }) => {
-  const older: T.AuditEvent = { ...g.auditEvent, id: '6', action: 'invite.create', target: 'inv-1', detail: {} };
+  const older: T.AuditEvent = { ...g.auditEvent, id: '6', action: 'review.rerun', target: 'rev-1', detail: {} };
   const seen = await setup(page, adminMe, [
     [new RegExp(`${API}/audit$`), (u: URL) => (u.searchParams.get('cursor') ? g.pageOf([older]) : g.pageOf([g.auditEvent], 'c1'))],
   ]);
@@ -339,14 +31,69 @@ test('the audit log pages and expands detail', async ({ page }) => {
   await expect(rows).toHaveCount(1);
   await expect(rows.first()).toContainText(g.auditEvent.action);
   await rows.first().getByRole('button', { name: 'detail' }).click();
-  await expect(rows.first().locator('.detail-json')).toContainText('secretsChanged');
+  await expect(rows.first().locator('.detail-json')).toContainText('jobId');
   await page.getByRole('button', { name: 'Load more' }).click();
   await expect(rows).toHaveCount(2);
   expect(seen.some((u) => u.pathname.endsWith('/audit') && u.searchParams.get('cursor') === 'c1')).toBe(true);
   await expect(page.getByRole('button', { name: 'Load more' })).toHaveCount(0);
 });
 
+test('an audit row with detail is as tall as one without, until the detail is opened', async ({ page }) => {
+  const plain: T.AuditEvent = { ...g.auditEvent, id: '6', action: 'review.rerun', target: 'rev-1', detail: {} };
+  await setup(page, adminMe, [[new RegExp(`${API}/audit$`), g.pageOf([g.auditEvent, plain])]]);
+  await page.goto(`/${ADMIN}/audit`);
+  const rows = page.locator('table.audit tbody > tr');
+  await expect(rows).toHaveCount(2);
+  const height = async (i: number) => (await rows.nth(i).boundingBox())!.height;
+  expect(await height(0)).toBe(await height(1));
+  await rows.first().getByRole('button', { name: 'detail' }).click();
+  await expect(rows.first().locator('.detail-json')).toBeVisible();
+  expect(await height(0)).toBeGreaterThan(await height(1));
+});
+
 test.describe('actions', () => {
+  test('an admin picks pull requests and re-runs them together', async ({ page }) => {
+    const second = { ...g.pull, number: 9, title: 'Second', url: g.pull.url.replace(/\d+$/, '9') };
+    await setup(page, adminMe, [[new RegExp(`${API}/pulls$`), g.pageOf([g.pull, second])]]);
+    const sent = await g.mockWrites(page, [
+      ['POST', new RegExp(`${API}/pulls/alpha/one/7/rerun$`), { status: 202, body: g.accepted }],
+      ['POST', new RegExp(`${API}/pulls/alpha/one/9/rerun$`), g.apiError(409, 'already_queued', 'a review of this head is already queued or running')],
+    ]);
+    await page.goto(`/#/a/${S}/pulls`);
+    await expect(page.getByRole('group', { name: 'Selected pull requests' })).toHaveCount(0);
+    await page.getByRole('checkbox', { name: `Select ${g.pull.repository}#7` }).check();
+    // Space picks the row the keyboard is on.
+    await page.locator('.key-hints').click();
+    await page.keyboard.press('j');
+    await page.keyboard.press('j');
+    await page.keyboard.press(' ');
+    const bulk = page.getByRole('group', { name: 'Selected pull requests' });
+    await expect(bulk).toContainText('2 selected');
+    await expect(page.getByRole('checkbox', { name: 'Select every pull request shown' })).toBeChecked();
+
+    await bulk.getByRole('button', { name: 'Re-run…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Re-run 2 pull requests?' });
+    await dialog.getByRole('button', { name: 'Re-run' }).click();
+    await expect.poll(() => sent.length).toBe(2);
+    await expect(page.getByRole('status')).toContainText('Re-run queued for 1 pull request, 1 already queued or running');
+    await expect(bulk).toHaveCount(0);
+
+    // A pick holds under its filter only.
+    await page.getByRole('checkbox', { name: `Select ${g.pull.repository}#7` }).check();
+    await expect(bulk).toContainText('1 selected');
+    await page.getByRole('radio', { name: 'All' }).click();
+    await expect(bulk).toHaveCount(0);
+    await expect(page.getByRole('checkbox', { name: `Select ${g.pull.repository}#7` })).not.toBeChecked();
+  });
+
+  test('a member has no picking on the pull list', async ({ page }) => {
+    await setup(page, memberMe);
+    await page.goto(`/#/a/${S}/pulls`);
+    await expect(page.locator('.pull-rows .pull-row')).toHaveCount(1);
+    await expect(page.getByRole('checkbox')).toHaveCount(0);
+    await expect(page.locator('.key-hints')).not.toContainText('select');
+  });
+
   test('re-run and cancel on a review, re-run on a pull, reindex on a repository', async ({ page }) => {
     const running: T.ReviewDetail = { ...g.reviewDetail, review: { ...g.reviewDetail.review, status: 'running' } };
     await setup(page, adminMe, [[new RegExp(`${API}/reviews/rev-1$`), running]]);
@@ -357,18 +104,24 @@ test.describe('actions', () => {
         () =>
           sent.filter((s) => s.url.pathname.endsWith('/rerun')).length <= 1
             ? { status: 202, body: g.accepted }
-            : g.apiError(409, 'already_queued', 'a review of this head is already queued or running'),
+            : g.apiError(409, 'already_queued', 'review job #42 failed attempt 2 of 5 and will run again: the forge did not answer'),
       ],
       ['POST', new RegExp(`${API}/reviews/rev-1/cancel$`), g.apiError(409, 'not_cancelable', 'the review is not running')],
-      ['POST', new RegExp(`${API}/repos/alpha/one/reindex$`), g.apiError(503, 'actions_disabled', 'this process does not queue dashboard actions')],
+      ['POST', new RegExp(`${API}/repos/alpha/one/reindex$`), g.apiError(409, 'already_queued', 'a reindex is already queued for this repository')],
     ]);
 
-    await page.goto(`/#/t/${S}/reviews/rev-1`);
+    await page.goto(`/#/a/${S}/reviews/rev-1`);
     await page.getByRole('button', { name: 'Re-run' }).click();
     const dialog = page.getByRole('dialog', { name: 'Re-run the review?' });
     await expect(dialog).toBeVisible();
+    // Tab stays inside the dialog, and Escape hands focus back to what opened it.
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    expect(await dialog.evaluate((el) => el.contains(document.activeElement))).toBe(true);
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Re-run' })).toBeFocused();
     expect(sent).toHaveLength(0);
     await page.getByRole('button', { name: 'Re-run' }).click();
     await dialog.getByRole('button', { name: 'Re-run' }).click();
@@ -378,113 +131,160 @@ test.describe('actions', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel review' }).click();
     await expect(page.getByRole('status')).toContainText('no longer running');
 
-    await page.goto(`/#/t/${S}/pulls/alpha/one/7`);
+    await page.goto(`/#/a/${S}/pulls/alpha/one/7`);
     await page.getByRole('button', { name: 'Re-run' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Re-run' }).click();
     await expect.poll(() => sent.filter((s) => s.url.pathname.endsWith('/rerun')).length).toBe(2);
     await expect(page.getByRole('status')).toContainText('already queued or running');
+    await expect(page.getByRole('status')).toContainText('review job #42 failed attempt 2 of 5 and will run again: the forge did not answer');
 
-    await page.goto(`/#/t/${S}/repos/alpha/one`);
+    await page.goto(`/#/a/${S}/repos/alpha/one`);
     await page.getByRole('button', { name: 'Reindex' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Reindex' }).click();
-    await expect(page.getByRole('status')).toContainText('cannot queue dashboard actions');
+    await expect(page.getByRole('status')).toContainText('already queued or running');
   });
 
-  test('are hidden from a tenant member', async ({ page }) => {
+  test('offer a re-run of a merged or closed pull request on its page alone, and say what it does', async ({ page }) => {
+    const merged: T.Pull = { ...g.pull, state: 'closed', merged: true };
+    const closed: T.Pull = { ...g.pull, number: 8, url: g.pull.url.replace(/\d+$/, '8'), state: 'closed' };
+    const open: T.Pull = { ...g.pull, number: 9, url: g.pull.url.replace(/\d+$/, '9') };
+    await setup(page, adminMe, [
+      [new RegExp(`${API}/pulls$`), g.pageOf([merged, closed, open])],
+      [new RegExp(`${API}/pulls/alpha/one/7$`), { ...g.pullDetail, pull: merged }],
+      [new RegExp(`${API}/reviews/rev-1$`), { ...g.reviewDetail, review: { ...g.reviewDetail.review, pullState: 'closed', pullMerged: true } }],
+    ]);
+    await page.goto(`/#/a/${S}/pulls?state=all`);
+    const rows = page.locator('.pull-rows tr');
+    await expect(rows).toHaveCount(3);
+    await expect(rows.nth(0).getByRole('checkbox')).toHaveCount(0);
+    await expect(rows.nth(0).getByTitle('Merged: reviewed again only when asked, from its page')).toBeVisible();
+    await expect(rows.nth(1).getByTitle('Closed: reviewed only when asked, from its page')).toBeVisible();
+    await page.getByRole('checkbox', { name: 'Select every pull request shown' }).check();
+    await expect(page.getByRole('group', { name: 'Selected pull requests' })).toContainText('1 selected');
+
+    const lookBack = 'Queue a look back at alpha/one#7, merged, at its last head. It sets no commit status and approves nothing.';
+    for (const path of ['pulls/alpha/one/7', 'reviews/rev-1']) {
+      await page.goto(`/#/a/${S}/${path}`);
+      await expect(page.locator('.no-more-reviews')).toHaveText('Merged: reviewed again only when asked.');
+      await page.getByRole('button', { name: 'Re-run' }).click();
+      await expect(page.getByRole('dialog', { name: 'Re-run the review?' })).toContainText(lookBack);
+      await page.keyboard.press('Escape');
+    }
+  });
+
+  test('offer no reindex of a repository that is off', async ({ page }) => {
+    await setup(page, adminMe, [[new RegExp(`${API}/repos/alpha/one$`), { ...g.repoDetail, enabled: false }]]);
+    await page.goto(`/#/a/${S}/repos/alpha/one`);
+    await expect(page.locator('#repo-settings')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Reindex' })).toHaveCount(0);
+  });
+
+  test('are hidden from an account member', async ({ page }) => {
     await setup(page, memberMe);
-    await page.goto(`/#/t/${S}/reviews/rev-1`);
+    await page.goto(`/#/a/${S}/reviews/rev-1`);
     await expect(page.locator('.page-head h1')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Re-run' })).toHaveCount(0);
-    await page.goto(`/#/t/${S}/repos/alpha/one`);
+    await page.goto(`/#/a/${S}/repos/alpha/one`);
     await expect(page.locator('#repo-settings')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Reindex' })).toHaveCount(0);
   });
 });
 
-test.describe('operator console', () => {
-  test('creates a tenant', async ({ page }) => {
-    await setup(page, operatorMe);
-    const sent = await g.mockWrites(page, [
-      ['POST', /\/api\/v1\/tenants$/, { status: 201, body: { ...g.tenantWriteResult, slug: 'beta', generated: { 'installations[beta-bot].webhookSecret': 'abcd' } } }],
+test.describe('configuration page', () => {
+  test('shows what setup still lacks, each with what to set in the configuration', async ({ page }) => {
+    const fresh: T.SetupStatus = { ...g.setupStatus, connections: [], forges: [], reviewModel: '', embedding: false };
+    await setup(page, adminMe, [
+      [/\/api\/v1\/admin\/setup$/, fresh],
+      [/\/api\/v1\/admin\/accounts$/, []],
+      [/\/api\/v1\/admin\/audit$/, g.pageOf([])],
     ]);
-    await page.goto('/#/operator');
-    await page.getByRole('button', { name: 'New tenant' }).click();
-    await page.getByLabel('Slug').fill('beta');
-    await page.getByRole('button', { name: 'Add installation' }).click();
-    await page.getByLabel('Name', { exact: true }).fill('beta-bot');
-    await page.getByLabel('Forge').selectOption('forgejo');
-    await page.getByLabel('Host').fill('https://code.example');
-    await page.locator('[data-path="installations[0].account"]').fill('bot');
-    await page.getByLabel('Token: new value').fill('tok');
-    await page.getByLabel('Concurrency').fill('3');
-    await page.getByRole('button', { name: 'Create tenant' }).click();
+    await page.goto('/#/admin');
+    const panel = page.locator('#op-setup').locator('../..');
+    await expect(panel).toContainText('0 of 4 done');
+    await expect(panel.getByRole('listitem')).toHaveText([
+      /A forge is connected Declare a GitHub App, or a Forgejo or Gitea connection/,
+      /A connection reaches a repository Install the App on GitHub/,
+      /A review model is set Set review.model/,
+      /An embedder is set \(optional\) Set embedding/,
+    ]);
+    await expect(panel.locator('li.done')).toHaveCount(0);
+    await expect(page.locator('input, select, textarea').and(page.locator('main *'))).toHaveCount(0);
+  });
 
+  test('marks each step done as the configuration covers it', async ({ page }) => {
+    await setup(page, adminMe, [
+      [/\/api\/v1\/admin\/accounts$/, [{ ...g.adminAccount, live: true, conflict: undefined }]],
+      [/\/api\/v1\/admin\/audit$/, g.pageOf([])],
+    ]);
+    await page.goto('/#/admin');
+    const panel = page.locator('#op-setup').locator('../..');
+    await expect(panel).toContainText('3 of 4 done');
+    await expect(panel.locator('li.done')).toHaveCount(3);
+    await expect(panel.getByRole('listitem').last()).toContainText('Set embedding');
+  });
+
+  test("lists an App's installations and uninstalls it from an account nobody serves", async ({ page }) => {
+    const conn = g.golden<T.AccountDetail>('account_detail').connection;
+    const path = `/api/v1/admin/connections/${conn.name}/installations`;
+    const served: T.AppInstallation = { ...g.appInstallation, id: 1, account: 'alpha', accountType: 'Organization', allRepositories: true, served: true };
+    let reads = 0;
+    await setup(page, adminMe, [
+      [/\/api\/v1\/admin\/audit$/, g.pageOf([])],
+      [new RegExp(`${path}$`), () => (reads++ === 0 ? [served, g.appInstallation] : [served])],
+    ]);
+    const sent = await g.mockWrites(page, [['DELETE', new RegExp(`${path}/${g.appInstallation.id}$`), { status: 204 }]]);
+    await page.goto('/#/admin');
+    const panel = page.locator('#op-connections').locator('../..');
+    await expect(panel.getByRole('row').filter({ hasText: conn.name })).toContainText(conn.accounts[0]);
+    await panel.getByRole('button', { name: 'Installations' }).click();
+    const table = panel.getByRole('table', { name: `Installations of ${conn.name}` });
+    const stranger = table.getByRole('row').filter({ hasText: g.appInstallation.account });
+    await expect(stranger).toContainText('not served');
+    await expect(table.getByRole('button', { name: 'Uninstall from alpha' })).toHaveCount(0);
+    await stranger.getByRole('button', { name: `Uninstall from ${g.appInstallation.account}` }).click();
+    const dialog = page.getByRole('dialog', { name: 'Uninstall the App?' });
+    await dialog.getByRole('button', { name: 'Uninstall' }).click();
     await expect.poll(() => sent.length).toBe(1);
-    const body = sent[0]!.body as T.CreateTenantRequest;
-    expect(body.slug).toBe('beta');
-    expect(body.spec).toEqual({
-      slug: 'beta',
-      installations: [
-        { name: 'beta-bot', forge: 'forgejo', host: 'https://code.example', account: 'bot', token: { value: 'tok' }, webhookSecret: { generate: true } },
-      ],
-      limits: { concurrency: 3 },
-    });
-    await expect(page.getByRole('dialog', { name: 'Generated webhook secrets' })).toContainText('/hooks/beta-bot');
+    await expect(page.getByRole('status')).toContainText(`Uninstalled from ${g.appInstallation.account}`);
+    await expect(stranger).toHaveCount(0);
   });
 
-  test('offers adopt only for a slug a gone tenant used, and sends it', async ({ page }) => {
-    await setup(page, operatorMe);
-    const sent = await g.mockWrites(page, [
-      [
-        'POST',
-        /\/api\/v1\/tenants$/,
-        (s) => {
-          const n = sent.length;
-          if (n === 1) return g.apiError(409, 'slug_taken', 'a dashboard tenant with this slug already exists', { path: 'slug' });
-          if (n === 2) return g.apiError(409, 'slug_taken', 'a tenant used this slug before', { path: 'slug', adoptable: true });
-          return (s.body as T.CreateTenantRequest).adopt ? { status: 201, body: g.tenantWriteResult } : g.apiError(409, 'slug_taken', 'again', { path: 'slug', adoptable: true });
-        },
-      ],
+  test("flags an App whose webhooks arrive unsigned", async ({ page }) => {
+    const conn = g.golden<T.AccountDetail>('account_detail').connection;
+    const later = new Date(Date.parse(conn.lastWebhookAt!) + 60_000).toISOString();
+    await setup(page, adminMe, [
+      [/\/api\/v1\/admin\/audit$/, g.pageOf([])],
+      [/\/api\/v1\/admin\/connections$/, [{ ...conn, lastUnsignedWebhookAt: later }]],
     ]);
-    await page.goto('/#/operator');
-    await page.getByRole('button', { name: 'New tenant' }).click();
-    await page.getByLabel('Slug').fill('beta');
-    const create = page.getByRole('button', { name: 'Create tenant' });
-    const adopt = page.getByLabel('Adopt this slug');
-    await create.click();
-    await expect(page.locator('.form-alert')).toContainText('already exists');
-    await expect(adopt).toHaveCount(0);
-    await create.click();
-    await expect(adopt).toBeVisible();
-    await adopt.check();
-    await create.click();
-    await expect.poll(() => sent.length).toBe(3);
-    expect((sent[2]!.body as T.CreateTenantRequest).adopt).toBe(true);
-    expect((sent[0]!.body as T.CreateTenantRequest).adopt).toBeUndefined();
+    await page.goto('/#/admin');
+    const row = page.locator('#op-connections').locator('../..').getByRole('row').filter({ hasText: conn.name });
+    await expect(row).toContainText('unsigned');
+    await expect(row).not.toContainText('receiving');
   });
 
-  test('refuses a plain-http installation host before sending', async ({ page }) => {
-    await setup(page, operatorMe);
-    const sent = await g.mockWrites(page, [['POST', /\/api\/v1\/tenants$/, { status: 201, body: g.tenantWriteResult }]]);
-    await page.goto('/#/operator');
-    await page.getByRole('button', { name: 'New tenant' }).click();
-    await page.getByLabel('Slug').fill('beta');
-    await page.getByRole('button', { name: 'Add installation' }).click();
-    await page.getByLabel('Name', { exact: true }).fill('beta-bot');
-    await expect(page.getByLabel('Forge').locator('option[value="gitlab"]')).toHaveCount(0);
-    await page.getByLabel('Forge').selectOption('forgejo');
-    await page.getByLabel('Host').fill('http://code.example');
-    await page.locator('[data-path="installations[0].account"]').fill('bot');
-    await page.getByLabel('Token: new value').fill('tok');
-    await page.getByRole('button', { name: 'Create tenant' }).click();
-    await expect(page.locator('.form-alert')).toContainText('https');
-    await expect(page.locator('[data-path="installations[0].host"]')).toBeFocused();
-    expect(sent).toHaveLength(0);
+  test('shows a Forgejo connection with its site, and no GitHub App to manage', async ({ page }) => {
+    const conn = g.golden<T.AccountDetail>('account_detail').connection;
+    const forgejo: T.Connection = { ...conn, name: 'acme-forgejo', forge: 'forgejo', webUrl: 'https://code.example', accounts: ['acme'] };
+    await setup(page, adminMe, [
+      [/\/api\/v1\/admin\/audit$/, g.pageOf([])],
+      [/\/api\/v1\/admin\/setup$/, { ...g.setupStatus, connections: [forgejo.name], forges: ['forgejo'] }],
+      [/\/api\/v1\/admin\/connections$/, [conn, forgejo]],
+    ]);
+    await page.goto('/#/admin');
+    await expect(page.locator('#op-setup').locator('../..').getByRole('listitem').first()).toHaveText('A forge is connected');
+    const panel = page.locator('#op-connections').locator('../..');
+    const row = panel.getByRole('row').filter({ hasText: forgejo.name });
+    await expect(row).toContainText('Forgejo');
+    await expect(row.getByRole('link', { name: 'code.example' })).toHaveAttribute('href', 'https://code.example/');
+    await expect(row.getByRole('button', { name: 'Installations' })).toHaveCount(0);
+    const github = panel.getByRole('row').filter({ hasText: conn.name });
+    await expect(github).toContainText('GitHub');
+    await expect(github.getByRole('button', { name: 'Installations' })).toHaveCount(1);
   });
 
   test('lists the instance settings read-only with their sources', async ({ page }) => {
-    await setup(page, operatorMe, [[/\/api\/v1\/operator\/audit$/, g.pageOf([])]]);
-    await page.goto('/#/operator');
+    await setup(page, adminMe, [[/\/api\/v1\/admin\/audit$/, g.pageOf([])]]);
+    await page.goto('/#/admin');
     const panel = page.locator('#op-instance').locator('../..');
     const row = panel.getByRole('row').filter({ hasText: g.instanceSetting.key });
     await expect(row).toContainText(g.instanceSetting.value);
@@ -492,44 +292,164 @@ test.describe('operator console', () => {
     await expect(panel.locator('input, select, textarea')).toHaveCount(0);
   });
 
-  test('shows why a file tenant is left out, beside the dashboard tenant holding its slug', async ({ page }) => {
-    const conflict = `dashboard tenant "${S}" already holds the slug`;
-    await setup(page, operatorMe, [
-      [/\/api\/v1\/operator\/audit$/, g.pageOf([])],
-      [/\/api\/v1\/operator\/tenants$/, [{ ...g.operatorTenant, live: true }, { ...g.operatorTenant, managedBy: 'file', live: false, revision: 0, conflict }]],
+  test('lists an account no connection serves without a link, and why', async ({ page }) => {
+    await setup(page, adminMe, [
+      [/\/api\/v1\/admin\/audit$/, g.pageOf([])],
+      [/\/api\/v1\/admin\/accounts$/, [{ ...g.adminAccount, live: true, conflict: undefined }, { ...g.adminAccount, slug: 'github/beta', connection: '' }]],
     ]);
-    await page.goto('/#/operator');
-    const rows = page.getByRole('row').filter({ hasText: S });
-    await expect(rows).toHaveCount(2);
-    await expect(rows.filter({ hasText: conflict })).toHaveCount(1);
-    await expect(page.getByRole('button', { name: `Delete tenant ${S}` })).toHaveCount(1);
+    await page.goto('/#/admin');
+    const live = page.getByRole('row').filter({ hasText: S });
+    await expect(live).toHaveCount(1);
+    await expect(live.getByRole('link', { name: S })).toBeVisible();
+    await expect(live).toContainText(g.adminAccount.connection);
+    const unserved = page.getByRole('row').filter({ hasText: 'github/beta' });
+    await expect(unserved).toContainText(g.adminAccount.conflict!);
+    await expect(unserved.getByRole('link')).toHaveCount(0);
+  });
+});
+
+test.describe('settings search', () => {
+  test('the palette finds a section of the Configuration page only when searching, and focuses it', async ({ page }) => {
+    await setup(page, adminMe, [[/\/api\/v1\/admin\/audit$/, g.pageOf([])]]);
+    await page.goto('/#/');
+    await page.keyboard.press('ControlOrMeta+k');
+    await expect(page.locator('.palette-row').filter({ hasText: 'Admin audit log' })).toHaveCount(0);
+    await page.keyboard.type('installations');
+    await expect(page.locator('.palette-row')).toHaveCount(1);
+    await expect(page.locator('.palette-row')).toContainText('configuration');
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/#\/admin$/);
+    await expect(page.locator('#op-connections')).toBeFocused();
   });
 
-  test('deletes a tenant after the slug is typed, reloading the revision on a conflict', async ({ page }) => {
-    let lists = 0;
-    await setup(page, operatorMe, [
-      [/\/api\/v1\/operator\/audit$/, g.pageOf([g.auditEvent])],
-      [/\/api\/v1\/operator\/tenants$/, () => [lists++ === 0 ? g.operatorTenant : { ...g.operatorTenant, revision: 5 }]],
+  test("a repository's settings filter to what matches", async ({ page }) => {
+    await setup(page, adminMe);
+    await page.goto(`/#/a/${S}/repos/alpha/one`);
+    const settings = page.locator('#repo-settings').locator('../..');
+    await expect(settings.getByText('Review model')).toBeVisible();
+    await settings.getByLabel('Filter settings').fill('settle');
+    await expect(settings.locator('dt')).toHaveText(['Settle']);
+    await expect(page.locator('#repo-agent').locator('../..').locator('dt')).toHaveCount(0);
+    await settings.getByLabel('Filter settings').fill('vendor/');
+    await expect(settings.locator('dt')).toHaveText(['Ignore']);
+    await settings.getByLabel('Filter settings').fill('nothing-like-it');
+    await expect(settings).toContainText('No setting matches');
+  });
+});
+
+test.describe('repository switches', () => {
+  const REPOS = `#/a/${S}/repos`;
+  const second: T.Repository = { ...g.repoPage.items[0]!, id: 'repo-2', fullName: 'alpha/two', enabled: false };
+  const repos = [new RegExp(`${API}/repos$`), g.pageOf([g.repoPage.items[0]!, second])] as [RegExp, unknown];
+
+  test('a member sees whether a repository is on, and nothing to change it', async ({ page }) => {
+    await setup(page, memberMe, [repos]);
+    await page.goto(`/${REPOS}`);
+    await expect(page.locator('tbody tr')).toHaveCount(2);
+    await expect(page.getByRole('switch')).toHaveCount(0);
+    await expect(page.getByRole('checkbox')).toHaveCount(0);
+  });
+
+  // turnable serves the repository list with each switch's last PUT applied,
+  // as the server's list reflects a choice at once.
+  async function turnable(page: Page, list: T.Repository[]) {
+    const rows = list.map((r) => ({ ...r }));
+    await setup(page, adminMe, [[new RegExp(`${API}/repos$`), () => g.pageOf(rows)]]);
+    return g.mockWrites(page, [
+      [
+        'PUT',
+        /\/turned-on$/,
+        (s) => {
+          const name = decodeURIComponent(s.url.pathname.split('/repos/')[1]!.replace(/\/turned-on$/, ''));
+          const r = rows.find((x) => x.fullName === name)!;
+          const on = (s.body as T.TurnOnRequest).on;
+          Object.assign(r, { turnedOn: on, enabled: on && !r.archived });
+          return { status: 204 };
+        },
+      ],
+      ['POST', /\/reindex$/, { status: 202, body: { jobId: 9 } }],
     ]);
-    const sent = await g.mockWrites(page, [
-      ['DELETE', new RegExp(`/api/v1/tenants/${S}$`), () => (sent.length === 1 ? g.apiError(409, 'revision_conflict', 'changed') : { status: 204 })],
-    ]);
-    await page.goto('/#/operator');
-    await expect(page.locator('#op-audit').locator('../..')).toContainText(g.auditEvent.action);
-    await page.getByRole('button', { name: `Delete tenant ${S}` }).click();
-    const dialog = page.getByRole('dialog');
-    const confirm = dialog.getByRole('button', { name: 'Delete tenant' });
-    await expect(confirm).toBeDisabled();
-    await dialog.getByLabel('Type the slug to confirm').fill('wrong');
-    await expect(confirm).toBeDisabled();
-    await dialog.getByLabel('Type the slug to confirm').fill(S);
-    await confirm.click();
-    await expect.poll(() => sent.length).toBe(1);
-    expect(sent[0]!.url.searchParams.get('revision')).toBe(String(g.operatorTenant.revision));
-    await expect(dialog.getByRole('alert')).toContainText('confirm again');
-    await confirm.click();
+  }
+
+  test('a switch turns the repository on or off, one request each', async ({ page }) => {
+    const sent = await turnable(page, [g.repoPage.items[0]!, second]);
+    await page.goto(`/${REPOS}`);
+    const one = page.getByRole('switch', { name: 'Review and index alpha/one' });
+    await expect(one).toBeChecked();
+    await one.uncheck();
+    await expect(page.getByRole('status')).toContainText('1 repository turned off');
+    await expect(one).not.toBeChecked();
+    await page.getByRole('switch', { name: 'Review and index alpha/two' }).check();
     await expect.poll(() => sent.length).toBe(2);
-    expect(sent[1]!.url.searchParams.get('revision')).toBe('5');
-    await expect(page.getByRole('status')).toContainText(`Deleted tenant ${S}`);
+    expect(sent.map((s) => `${s.method} ${s.url.pathname} ${JSON.stringify(s.body)}`)).toEqual([
+      `PUT ${API}/repos/alpha/one/turned-on {"on":false}`,
+      `PUT ${API}/repos/alpha/two/turned-on {"on":true}`,
+    ]);
+    await expect(page.getByRole('switch', { name: 'Review and index alpha/two' })).toBeChecked();
+  });
+
+  test("a row's switch leaves the other rows picked for a bulk action as they are", async ({ page }) => {
+    await turnable(page, [g.repoPage.items[0]!, second]);
+    await page.goto(`/${REPOS}`);
+    await page.getByRole('checkbox', { name: 'Select alpha/one' }).check();
+    await page.getByRole('switch', { name: 'Review and index alpha/two' }).check();
+    await expect(page.getByRole('status')).toContainText('1 repository turned on');
+    await expect(page.getByRole('checkbox', { name: 'Select alpha/one' })).toBeChecked();
+    await expect(page.getByRole('group', { name: 'Selected repositories' })).toContainText('1 selected');
+  });
+
+  test('a fork is turned on like any repository, and an archived repository cannot be', async ({ page }) => {
+    const copy: T.Repository = { ...g.repoPage.items[0]!, id: 'repo-3', fullName: 'alpha/copy', fork: true, enabled: false };
+    const old: T.Repository = { ...g.repoPage.items[0]!, id: 'repo-4', fullName: 'alpha/old', archived: true, enabled: false };
+    const sent = await turnable(page, [copy, old]);
+    await page.goto(`/${REPOS}`);
+    await expect(page.getByRole('switch', { name: 'Review and index alpha/old' })).toBeDisabled();
+    await expect(page.getByRole('checkbox', { name: 'Select alpha/old' })).toHaveCount(0);
+    await page.getByRole('switch', { name: 'Review and index alpha/copy' }).check();
+    await expect.poll(() => sent.length).toBe(1);
+    expect(sent[0]!.url.pathname).toBe(`${API}/repos/alpha/copy/turned-on`);
+    expect(sent[0]!.body).toEqual({ on: true });
+  });
+
+  test('the list shows forks or archived repositories only when asked, and an admin can resync it', async ({ page }) => {
+    const seen = await setup(page, adminMe, [repos]);
+    const sent = await g.mockWrites(page, [['POST', /\/api\/v1\/admin\/connections\/[^/]+\/repositories$/, { status: 200, body: { added: 2 } }]]);
+    await page.goto(`/${REPOS}`);
+    const lists = () => seen.filter((u) => u.pathname.endsWith('/repos')).map((u) => u.searchParams.get('type'));
+    await expect.poll(lists).toEqual([null]);
+    await page.getByRole('combobox', { name: 'Type' }).selectOption('forks');
+    await expect.poll(() => lists().at(-1)).toBe('forks');
+    await expect(page.getByText('A fork is only reviewed and indexed once turned on here.')).toBeVisible();
+    await page.getByRole('combobox', { name: 'Type' }).selectOption('archived');
+    await expect.poll(() => lists().at(-1)).toBe('archived');
+
+    await page.getByRole('button', { name: 'Resync from GitHub' }).click();
+    await expect(page.getByRole('status')).toContainText('Resynced from GitHub: 2 repositories added');
+    const detail = g.golden<T.AccountDetail>('account_detail');
+    expect(sent.map((s) => s.url.pathname)).toEqual([`/api/v1/admin/connections/${detail.connection.name}/repositories`]);
+  });
+
+  test('selected repositories are turned off together, and the ones on reindexed', async ({ page }) => {
+    const sent = await turnable(page, [g.repoPage.items[0]!, second]);
+    await page.goto(`/${REPOS}`);
+    await page.getByRole('checkbox', { name: 'Select every repository shown' }).check();
+    const bulk = page.getByRole('group', { name: 'Selected repositories' });
+    await expect(bulk).toContainText('2 selected');
+
+    await bulk.getByRole('button', { name: 'Reindex…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Reindex 1 repository?' });
+    await expect(dialog).toContainText('1 repository that is off is skipped.');
+    await dialog.getByRole('button', { name: 'Reindex' }).click();
+    await expect(page.getByRole('status')).toContainText('Reindex queued for 1 repository');
+    expect(sent.map((s) => `${s.method} ${s.url.pathname}`)).toEqual([`POST ${API}/repos/alpha/one/reindex`]);
+
+    await page.getByRole('checkbox', { name: 'Select every repository shown' }).check();
+    await bulk.getByRole('button', { name: 'Turn off' }).click();
+    await expect(page.getByRole('status')).toContainText('2 repositories turned off');
+    expect(sent.slice(1).map((s) => `${s.url.pathname} ${JSON.stringify(s.body)}`)).toEqual([
+      `${API}/repos/alpha/one/turned-on {"on":false}`,
+      `${API}/repos/alpha/two/turned-on {"on":false}`,
+    ]);
+    await expect(page.getByRole('switch', { name: 'Review and index alpha/one' })).not.toBeChecked();
   });
 });

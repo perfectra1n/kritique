@@ -24,7 +24,7 @@ permissions:
 
 env:
   # renovate: datasource=github-releases depName=helm-unittest/helm-unittest
-  HELM_UNITTEST_VERSION: "v1.1.2"
+  HELM_UNITTEST_VERSION: "v1.2.1"
 
 jobs:
   go-lint:
@@ -42,7 +42,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           experimental: true
           install_args: --locked
@@ -85,7 +85,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           experimental: true
           install_args: --locked
@@ -120,7 +120,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           experimental: true
           install_args: --locked
@@ -139,6 +139,34 @@ jobs:
       - name: Run integration tests
         run: mise run test-integration
 
+  smoke:
+    if: >-
+      ${{ !(startsWith(github.head_ref, 'release-please--')
+      && github.event.pull_request.head.repo.full_name == github.repository) }}
+    name: Serve Smoke
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Mise
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          experimental: true
+          install_args: --locked
+
+      # Boots kritique serve as the chart deploys it: two replicas in a kind
+      # cluster (the runner image ships kind, kubectl and helm) against a
+      # CloudNativePG Postgres with VectorChord, and checks readiness, helm
+      # test, one leader and the applied configuration. The only job that
+      # runs the binary end to end.
+      - name: Run smoke test
+        run: mise run smoke
+
   go-vulncheck:
     if: >-
       ${{ !(startsWith(github.head_ref, 'release-please--')
@@ -154,7 +182,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           experimental: true
           install_args: --locked
@@ -177,13 +205,16 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           experimental: true
           install_args: --locked
 
       - name: Run helm lint
         run: mise run helm-lint
+
+      - name: Lint the Grafana dashboards
+        run: mise run dashboard-lint
 
       - name: Check generated chart files are current
         run: mise run generate-check
@@ -203,7 +234,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           experimental: true
           install_args: --locked
@@ -228,7 +259,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           experimental: true
           install_args: --locked
@@ -264,7 +295,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           experimental: true
           install_args: --locked
@@ -315,7 +346,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           install: false
 
@@ -341,6 +372,7 @@ jobs:
       - go-vulncheck
       - helm-lint
       - helm-unittest
+      - smoke
       - ui-e2e
       - ui-test
       - workflow-lint

@@ -13,10 +13,7 @@ import (
 
 // Spec is one runner invocation.
 type Spec struct {
-	// RunID is the runner_runs row; it becomes the Job and Secret name
-	// suffix.
-	RunID string
-	// Labels are put on the Job for kubectl and Grafana: tenant, repository,
+	// Labels are put on the Job for kubectl and Grafana: account, repository,
 	// pr, kind.
 	Labels map[string]string
 	// Annotations carry the River job id and head SHA.
@@ -29,12 +26,12 @@ type Spec struct {
 	Secrets runner.Secrets
 	// Deadline bounds the whole run.
 	Deadline time.Duration
-	// Resources overrides the pod's resource requirements, as the tenant's
+	// Resources overrides the pod's resource requirements, as the account's
 	// runner block in the configuration file spells them.
 	Resources map[string]any
 	// Tools are mounted read-only from their images and put first on the
-	// runner's PATH, for the agent's run tool (ADR-0011). The local
-	// executor has no images to mount and leaves them out.
+	// runner's PATH, for the agent's run tool. The local executor has no
+	// images to mount and leaves them out.
 	Tools []configfile.Tool
 }
 
@@ -45,7 +42,11 @@ type Result struct {
 	ExitCode                   int
 	TerminationReason          string
 	DeadlineExceeded           bool
-	LogTail                    string
+	// NeverStarted is set when the run was given up on before its
+	// container ran. StartedAt is no sign either way: the kubelet sets a
+	// pod's start time before it pulls the pod's images.
+	NeverStarted bool
+	LogTail      string
 	// Err is set when the run did not complete successfully.
 	Err error
 }

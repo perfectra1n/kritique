@@ -1,6 +1,6 @@
 {
   "repoFiles": {
-    ".kritique.yaml": "mode: agentic\n"
+    ".kritique.yaml": "review: { approve: true }\n"
   },
   "stages": [
     {

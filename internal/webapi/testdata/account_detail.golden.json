@@ -1,0 +1,47 @@
+{
+  "slug": "github/alpha",
+  "connection": {
+    "name": "alpha-bot",
+    "forge": "github",
+    "webUrl": "https://github.com",
+    "accounts": ["alpha"],
+    "credentials": {
+      "clientId": true,
+      "privateKey": true,
+      "webhookSecret": true
+    },
+    "hookPath": "/hooks/alpha-bot",
+    "lastWebhookAt": "2026-09-01T12:00:00Z",
+    "lastUnsignedWebhookAt": null
+  },
+  "models": {
+    "review": "openrouter/acme-large",
+    "fallback": "openrouter/acme-small",
+    "effort": "high"
+  },
+  "limits": {
+    "concurrency": 2,
+    "reviewsPerDay": 50,
+    "tokensPerMonth": 1000000
+  },
+  "filters": {
+    "include": [],
+    "exclude": [
+      {
+        "name": "drafts",
+        "expr": "pr.draft"
+      }
+    ]
+  },
+  "usage": {
+    "tokens": 5000,
+    "costUsd": 1.5,
+    "tokensPerMonth": 1000000,
+    "reviewsToday": 2,
+    "reviewsPerDay": 50,
+    "reviews": 12,
+    "reviewCostUsd": 1.2,
+    "medianReviewCostUsd": 0.08
+  },
+  "lastPolledAt": "2026-09-01T12:01:30Z"
+}

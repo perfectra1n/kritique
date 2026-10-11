@@ -3,18 +3,22 @@ package webapi
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"flag"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/perfectra1n/kritique/internal/auth"
+	"github.com/riverqueue/river/rivertype"
+
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/model"
 	"github.com/perfectra1n/kritique/internal/repoconfig"
 	"github.com/perfectra1n/kritique/internal/review"
 	"github.com/perfectra1n/kritique/internal/store"
+	"github.com/perfectra1n/kritique/internal/tasks"
 	"github.com/perfectra1n/kritique/internal/transcript"
 )
 
@@ -26,44 +30,58 @@ var (
 )
 
 var goldenReview = Review{
-	ID: "rev-1", Status: store.ReviewCompleted, Trigger: "push", Mode: configfile.ReviewAgentic, Scope: review.ScopeIncremental,
+	ID: "rev-1", Status: store.ReviewCompleted, Trigger: "push", Scope: review.ScopeIncremental,
 	Model: "acme/large", HeadSHA: "abc123", CostUSD: 0.42, Tokens: TokenCounts{Input: 1000, Output: 200}, DurationMs: new(int64(90000)),
-	CreatedAt: t0, FinishedAt: &t1, SkipReason: repoconfig.SkipFiltered, Error: "",
+	CreatedAt: t0, FinishedAt: &t1, SkipReason: string(repoconfig.SkipFiltered), Error: "",
+	Confidence: &Confidence{Score: 3, Threshold: 5, Reason: "The unchecked error stands.", Risk: review.RiskMedium, Model: "acme/judge"},
 }
 
-var goldenTaskRun = TaskRun{
-	ID: "tr-1", Repository: "alpha/one", Task: "triage", SubjectKind: "issue", SubjectNumber: 12, Trigger: "issue.opened",
-	Mode: "single", Status: store.TaskSucceeded, Reason: "", Model: "acme/large", ConfigSHA: "def456", CommentID: new(int64(77)),
-	Error: "", DroppedCount: 1, CreatedAt: t0, StartedAt: &t0, FinishedAt: &t1, DurationMs: new(int64(90000)),
+var goldenJob = Job{
+	ID: 42, Kind: "review", State: rivertype.JobStateRetryable, Attempt: 2, MaxAttempts: 5, CreatedAt: t0, ScheduledAt: t1,
+	AttemptedAt: &t0, FinalizedAt: nil, LastError: "github: list files: context deadline exceeded", Cause: CauseForgeUnavailable,
+	Args: JobArgs{Repository: "alpha/one", Number: 7, Head: "abc123", Trigger: "push", CommentID: 0},
 }
 
-var goldenSummary = TenantSummary{
-	Slug: "alpha", ManagedBy: configfile.OriginDashboard, Role: auth.RoleAdmin, Installations: 1, Repositories: 3, Reviews7d: 9,
-	Usage: MonthUsage{Tokens: 5000, CostUSD: 1.5, TokensPerMonth: 1000000, ReviewsToday: 2, ReviewsPerDay: 50},
+var goldenPullRef = PullRef{Repository: "alpha/one", Number: 7, Title: "Add widgets", URL: "https://git.example/alpha/one/pulls/7"}
+
+var goldenSummary = AccountSummary{
+	Slug: "github/alpha", Forge: configfile.ForgeGitHub, Connection: "alpha-bot", Repositories: 3, Reviews7d: 9,
+	Usage: MonthUsage{
+		Tokens: 5000, CostUSD: 1.5, TokensPerMonth: 1000000, ReviewsToday: 2, ReviewsPerDay: 50,
+		Reviews: 12, ReviewCostUSD: 1.2, MedianReviewCostUSD: new(0.08),
+	},
+	Attention: Attention{Failed: 1, Blocking: 2}, LastWebhookAt: &t0, LastPolledAt: &t1,
 }
 
 var goldenRepo = Repository{
-	ID: "repo-1", FullName: "alpha/one", Installation: "alpha-bot", Enabled: true, ManagedBy: "file", DefaultBranch: "main",
+	ID: "repo-1", FullName: "alpha/one", Enabled: true, ManagedBy: "file", DefaultBranch: "main",
 	Index:      IndexState{ActiveCommit: "def456", ActiveAt: &t0, LastRunStatus: store.IndexCompleted, LastRunAt: &t1},
 	LastReview: &ReviewRef{ID: "rev-1", Status: store.ReviewCompleted, CreatedAt: t0},
 }
 
 var goldenRepoSettings = RepoSettings{
-	Enabled: true, Mode: configfile.ReviewAgentic, Models: Models{Review: "openrouter/acme-large"}, Filter: "true", Forks: false,
+	Enabled: true, Models: configfile.Models{Review: "openrouter/acme-large", Effort: "high"}, Filters: configfile.Filters{
+		Include: []configfile.Filter{{Expr: `pr.author.startsWith("renovate")`}, {Name: "wanted", Expr: `pr.labels.exists(l, l.name == "needs-review")`}},
+		Exclude: []configfile.Filter{{Name: "drafts", Expr: "pr.draft"}},
+	},
 	Ignore: []string{"vendor/**"}, SettleSeconds: 30, MaxDeltaFiles: 40,
-	Review: ReviewBlock{
-		Instructions: []string{"docs/review.md"}, RequireSuggestedFix: true,
-		Templates: configfile.ReviewTemplates{Summary: "docs/summary.tmpl"}, MinSeverity: configfile.SeverityImportant, InlineComments: true,
+	Confidence: configfile.Confidence{
+		Model: "openrouter/acme-judge", Fallback: "openrouter/acme-judge-small", Effort: "low", Threshold: 5, Risk: review.RiskLow,
+		Instructions: "Image bumps are low.",
+	},
+	Review: configfile.Review{
+		RequireSuggestedFix: true,
+		Templates:           configfile.ReviewTemplates{Summary: "docs/summary.tmpl"}, InlineComments: true,
 		Context: []configfile.ContextFile{{Path: "db/schema.sql", Description: "the schema", Paths: []string{"**/*.sql"}}},
 	},
-	Agent: AgentLimits{
-		MaxSteps: 60, MaxToolOutputBytes: 32768, MaxTokens: 4000000, TimeoutSeconds: 1200, Commands: []string{"go"},
-		CommandTimeoutSeconds: 30,
+	Agent: configfile.AgentSettings{
+		MaxSteps: 60, MaxToolOutputBytes: 32768, MaxTokens: 4000000, MaxPromptTokens: 24000, MaxParts: 8, Timeout: 20 * time.Minute,
+		Commands: []string{"go"}, CommandTimeout: 30 * time.Second,
 	},
-	Limits: Limits{Concurrency: 2},
-	Allow: AllowBounds{
-		Modes: []configfile.ReviewMode{configfile.ReviewAgentic}, Models: []configfile.ModelRef{"openrouter/acme-large", "openrouter/acme-small"},
-		Agent: AllowAgentBounds{MaxSteps: new(60)}, SettleSeconds: new(int64(600)),
+	Limits: configfile.Limits{Concurrency: 2},
+	Skills: configfile.Skills{
+		Paths: []string{".agents/skills", ".claude/skills"},
+		Scope: map[string]configfile.SkillScope{"review-renovate-pr": {When: []configfile.When{{Expr: `pr.headRef.startsWith("renovate/")`}}}},
 	},
 }
 
@@ -77,14 +95,22 @@ var goldenPull = Pull{
 	HeadSHA: "abc123", HeadRef: "widgets", BaseRef: "main", URL: "https://git.example/alpha/one/pulls/7", OpenedAt: &t0,
 	UpdatedAt: t1, Labels: []Label{{Name: "bug", Color: "ff0000"}},
 	LastReview: &ReviewBrief{
-		ID: "rev-1", Status: store.ReviewCompleted, Mode: configfile.ReviewSingle, Scope: review.ScopeFull,
+		ID: "rev-1", Status: store.ReviewCompleted, Scope: review.ScopeFull,
 		Findings: SeverityCounts{Blocking: 1, Important: 2, Nit: 3}, CreatedAt: t0,
 	},
+	ReviewCount: 2, CostUSD: 0.84,
 }
 
 var goldenFollowup = Followup{
-	ID: "fu-1", CommentID: 99, Repository: "alpha/one", Number: 7, Author: "bob", Inline: true, Path: "a.go", Line: 4,
-	Status: store.FollowupAnswered, Reason: "", ReplyCommentID: new(int64(100)), Model: "acme/large", CreatedAt: t0,
+	ID: "fu-1", CommentID: 99, Repository: "alpha/one", Number: 7, PullURL: goldenPullRef.URL, Author: "bob", Inline: true, Path: "a.go", Line: 4,
+	Status: store.FollowupAnswered, Reason: "", ReplyCommentID: new(int64(100)),
+	CommentURL: goldenPullRef.URL + "#discussion_r99", ReplyURL: goldenPullRef.URL + "#discussion_r100", Model: "acme/large", CreatedAt: t0,
+}
+
+var goldenTaskRun = TaskRun{
+	ID: "tr-1", Repository: "alpha/one", Task: "triage", SubjectKind: "issue", SubjectNumber: 12, Trigger: "issue.opened",
+	Mode: "single", Status: store.TaskSucceeded, Reason: "", Model: "acme/large", ConfigSHA: "def456", CommentID: new(int64(77)),
+	Error: "", DroppedCount: 1, CreatedAt: t0, StartedAt: &t0, FinishedAt: &t1, DurationMs: new(int64(90000)),
 }
 
 var goldenTools = []ToolDef{{Name: "grep", Description: "search", InputSchema: json.RawMessage(`{"type":"object"}`)}}
@@ -93,29 +119,30 @@ var goldenTools = []ToolDef{{Name: "grep", Description: "search", InputSchema: j
 var goldens = map[string]any{
 	"page": Page[Repository]{Items: []Repository{goldenRepo}, NextCursor: new("opaque")},
 	"me": Me{
-		Account:  Account{ID: "acct-1", DisplayName: "Ada", Email: "ada@example.com", AvatarURL: "https://img.example/a.png"},
-		Operator: true, Tenants: []TenantMembership{{Slug: "alpha", Role: auth.RoleMember, ManagedBy: configfile.OriginFile}},
+		User:  User{ID: "acct-1", DisplayName: "Ada", Email: "ada@example.com", AvatarURL: "https://img.example/a.png"},
+		Admin: true, Accounts: []string{"github/alpha"},
+		Settings: UserSettings{TimeZone: "Europe/Amsterdam", Clock: "24", Theme: "dark"},
 	},
-	"tenant_summary":  goldenSummary,
-	"operator_tenant": OperatorTenant{TenantSummary: goldenSummary, Live: false, Revision: 3},
-	"tenant_detail": TenantDetail{
-		Slug: "alpha", ManagedBy: configfile.OriginFile, Role: auth.RoleMember,
-		Installations: []Installation{{
-			Name: "alpha-bot", Forge: configfile.ForgeGitHub, Host: "github.com", Account: "alpha", CredentialKind: CredentialApp,
-			Credentials: CredentialsSet{ClientID: true, PrivateKey: true, Token: false, GitToken: false, WebhookSecret: true},
-			HookPath:    "/hooks/alpha-bot",
-		}},
-		Models: Models{Review: "openrouter/acme-large", Fallback: "openrouter/acme-small"},
-		Limits: Limits{Concurrency: 2, ReviewsPerDay: 50, TokensPerMonth: 1000000}, Filter: "!pr.draft",
-		Usage: goldenSummary.Usage,
+	"account_summary": goldenSummary,
+	"admin_account":   AdminAccount{AccountSummary: goldenSummary, Live: false, Conflict: "no connection serves this account"},
+	"account_detail": AccountDetail{
+		Slug: "github/alpha",
+		Connection: Connection{
+			Name: "alpha-bot", Forge: configfile.ForgeGitHub, WebURL: configfile.GitHubWebURL, Accounts: []string{"alpha"},
+			Credentials: CredentialsSet{ClientID: true, PrivateKey: true, WebhookSecret: true},
+			HookPath:    "/hooks/alpha-bot", LastWebhookAt: &t0,
+		},
+		Models: configfile.Models{Review: "openrouter/acme-large", Fallback: "openrouter/acme-small", Effort: "high"},
+		Limits: configfile.Limits{Concurrency: 2, ReviewsPerDay: 50, TokensPerMonth: 1000000}, Filters: configfile.Filters{Include: []configfile.Filter{}, Exclude: []configfile.Filter{{Name: "drafts", Expr: "pr.draft"}}},
+		Usage: goldenSummary.Usage, LastPolledAt: &t1,
 	},
 	"repository":       goldenRepo,
-	"instance_setting": InstanceSetting{Section: "polling", Key: "interval", Value: "2m0s", Source: configfile.SourceFile},
+	"instance_setting": InstanceSetting{Section: "connections", Key: "alpha-bot", Value: "alpha, webhook /hooks/alpha-bot", Source: configfile.SourceFile},
 	"repo_detail": RepoDetail{
 		Repository: goldenRepo,
 		Settings:   goldenRepoSettings,
 		Sources: map[string]configfile.Source{
-			"mode": configfile.SourceDashboard, "models.review": configfile.SourceFile, "settle": configfile.SourceDefault,
+			"trigger.exclude": configfile.SourceAccount, "review.model": configfile.SourceDefaults, "trigger.settle": configfile.SourceDefault,
 		},
 		RepoConfig: &RepoConfig{
 			ReviewID: "rev-1", Commit: "def456", Found: true,
@@ -124,38 +151,29 @@ var goldens = map[string]any{
 				s.Models.Review = "openrouter/acme-small"
 				return s
 			}(),
-			Filter: "!pr.draft", SkipPaths: []string{"docs/**"},
-			Dropped: []string{`.kritique.yaml: mode "single" was dropped; allowed: agentic`},
+			Filters: configfile.Filters{Include: []configfile.Filter{}, Exclude: []configfile.Filter{{Name: "skip-label", Expr: `pr.labels.exists(l, l.name == "skip-review")`}}},
+			Dropped: []string{`.kritique.yaml: review.model "q/big" was dropped; allowed: a model of openrouter`},
 		},
 		IndexRuns: []IndexRun{goldenIndexRun},
-		Tasks: []TaskDef{
-			{Name: "welcome", Source: configfile.SourceFile, Triggers: []string{"pull_request.opened"}, Mode: "single", Actions: []string{"comment"}},
-			{
-				Name: "triage", Source: configfile.SourceRepository, Triggers: []string{"issue.opened", "issue.reopened"},
-				If: `!("triaged" in subject.labels)`, Mode: "agentic", Actions: []string{"comment", "labels"},
-			},
-		},
-		TaskNotes:   []TaskNote{{Task: "triage", What: "actions.state", Reason: "the action is not allowed"}},
-		TasksSource: TasksSourceDefaultBranch, TasksCommit: "c0ffee",
-		TasksIgnored: "repoconfig: tasks[1]: name \"Bad\" must be lowercase letters, digits and dashes, at most 63, starting with a letter or digit",
 	},
 	"index_run": goldenIndexRun,
 	"pull":      goldenPull,
 	"review":    goldenReview,
 	"followup":  goldenFollowup,
 	"pull_detail": PullDetail{
-		Pull: goldenPull, Reviews: []Review{goldenReview}, Followups: []Followup{goldenFollowup},
+		Pull: goldenPull, Reviews: []Review{goldenReview}, Followups: []Followup{goldenFollowup}, Job: &goldenJob,
 	},
 	"review_detail": ReviewDetail{
 		Review: ReviewInfo{
-			Review: goldenReview, Pull: PullRef{Repository: "alpha/one", Number: 7, Title: "Add widgets"}, ScopeReason: "delta",
+			Review: goldenReview, Pull: goldenPullRef, PullState: "open", ScopeReason: "delta",
 			MergeBaseSHA: "base1", PatchID: "patch1", PriorReviewID: new("rev-0"), CancelRequestedAt: nil,
 		},
-		Summary: &Summary{Take: "Looks fine.", Praise: []string{"tests"}},
+		Summary: &Summary{Take: "Looks fine.", Praise: []string{"tests"}, Diagram: "flowchart TD\n  A --> B"},
 		Findings: []Finding{{
 			ID: "f-1", Path: "a.go", Line: 3, EndLine: 5, Severity: review.SeverityBlocking, Title: "nil deref",
 			Explanation: "x may be nil", SuggestedFix: "check x", Replacement: "if x != nil {}", AgentPrompt: "fix it",
-			Fingerprint: "fp", PostedInline: true, ForgeCommentID: new(int64(55)), CreatedAt: t0,
+			Fingerprint: "fp", PostedInline: true, ForgeCommentID: new(int64(55)), ThreadURL: goldenPullRef.URL + "#discussion_r55", CreatedAt: t0, ReactionsUp: 2, ReactionsDown: 1,
+			Rules: []string{"wrap-errors"}, Status: store.FindingOpen,
 		}},
 		RunnerRun: &RunnerRun{
 			ID: "run-1", Phase: "done", JobName: "job", PodName: "pod", NodeName: "node", CreatedAt: t0, ScheduledAt: &t0,
@@ -164,14 +182,18 @@ var goldens = map[string]any{
 		},
 		AgentRun: &AgentRun{
 			StopReason: "submitted", Steps: 3, ToolCalls: map[string]int{"grep": 2},
-			Timeline: []TimelineStep{{Index: 0, Tools: []string{"grep"}, DurationMs: 1200, OutputBytes: 300, InputTokens: 100, OutputTokens: 20}},
-			Sources:  []string{"https://docs.example"}, Usage: Usage{Input: 100, CacheRead: 50, CacheWrite: 10, Output: 20},
+			Timeline: []TimelineStep{{Index: 0, Part: 1, Tools: []string{"grep"}, DurationMs: 1200, OutputBytes: 300, InputTokens: 100, OutputTokens: 20}},
+			Sources:  []string{"https://docs.example"}, SkillsOffered: []string{"renovate-review", "go-style"}, SkillsOpened: []string{"renovate-review"},
+			CommandsOffered: []string{"gh", "helm"}, CommandsRun: []string{"helm"},
+			Usage:   Usage{Input: 100, CacheRead: 50, CacheWrite: 10, Output: 20},
 			CostUSD: 0.1, Model: "acme/large", Error: "", CreatedAt: t1, Result: json.RawMessage(`{"findings":[]}`),
+			CarriedReviewID: new("rev-0"),
+			Parts:           []AgentPart{{Paths: []string{"a.go"}, Stop: "submitted", Error: "", Steps: 3}},
 		},
 		Usage: []UsageRow{{Role: "review", Model: "acme/large", Upstream: "acme", InputTokens: 100, OutputTokens: 20, CostUSD: 0.1, CreatedAt: t1}},
 		ContextPack: &ContextPack{
 			HeadSHA: "abc123", BaseSHA: "base1", PatchID: "patch1", ChangedPaths: []string{"a.go"}, DeltaPaths: []string{"a.go"},
-			PriorHeadSHA: new("abc000"),
+			PriorHeadSHA: new("abc000"), RuleIDs: []string{"wrap-errors", "no-tokens"},
 			Stages: []Stage{{
 				Stage: "definitions", Path: "b.go", Language: "go", Symbol: "F", Kind: "func", Scope: "pkg", StartLine: 1,
 				EndLine: 9, Ref: "F", Bytes: 120,
@@ -179,9 +201,18 @@ var goldens = map[string]any{
 			RepoNotes: []string{"docs/missing.md: not found"}, RepoFiles: []RepoFile{{Path: ".kritique.yaml", Size: 42}}, CreatedAt: t0,
 		},
 	},
+	"account_finding": AccountFinding{
+		Finding: Finding{
+			ID: "f-1", Path: "a.go", Line: 3, EndLine: 5, Severity: review.SeverityBlocking, Title: "nil deref",
+			Explanation: "x may be nil", SuggestedFix: "check x", Replacement: "", AgentPrompt: "", Fingerprint: "fp",
+			PostedInline: true, ForgeCommentID: new(int64(55)), ThreadURL: goldenPullRef.URL + "#discussion_r55", CreatedAt: t0, ReactionsUp: 2, ReactionsDown: 1,
+			Rules: []string{"wrap-errors"}, Status: store.FindingAddressed,
+		},
+		ReviewID: "rev-1", Pull: goldenPullRef, FirstSeenAt: t0, LastSeenAt: t1,
+	},
 	"review_diff": ReviewDiff{Diff: "diff --git a/a.go b/a.go\n", DeltaDiff: ""},
 	"review_raw": ReviewRaw{
-		RepoFiles: map[string]string{".kritique.yaml": "mode: agentic\n"},
+		RepoFiles: map[string]string{".kritique.yaml": "review: { approve: true }\n"},
 		Stages: []ContextChunk{{
 			Stage: "definitions", Path: "b.go", Language: "go", Symbol: "F", Kind: "func", Scope: "pkg", StartLine: 1, EndLine: 9,
 			Ref: "F", Text: "func F() {}",
@@ -192,7 +223,7 @@ var goldens = map[string]any{
 		System: "You review code.", Tools: goldenTools,
 		Turns: []Turn{{
 			Index: 0, ID: "mc-1", Kind: transcript.KindAgentStep, Step: 0, Model: "acme/large", Upstream: "acme",
-			System: new("You review code, again."), Tools: goldenTools, Reset: false, MessagesFrom: 0,
+			System: new("You review code, again."), Tools: new(goldenTools), Reset: false, MessagesFrom: 0,
 			Messages: []Message{{
 				Role: model.RoleUser, Text: "review this",
 				ToolCalls:   []ToolCall{{ID: "c1", Name: "grep", Input: json.RawMessage(`{"q":"x"}`)}},
@@ -207,10 +238,29 @@ var goldens = map[string]any{
 		Group: store.UsageByDay, From: t0, To: t1,
 		Rows: []UsagePoint{{Key: "2026-09-01", InputTokens: 100, CacheReadTokens: 50, CacheWriteTokens: 5, OutputTokens: 20, CostUSD: 0.1, Calls: 2}},
 	},
-	"job": Job{
-		ID: 42, Kind: "review", State: store.JobRetryable, Attempt: 2, MaxAttempts: 5, CreatedAt: t0, ScheduledAt: t1,
-		AttemptedAt: &t0, FinalizedAt: nil, LastError: "boom",
-		Args: JobArgs{Repository: "alpha/one", Number: 7, Head: "abc123", Trigger: "push", CommentID: 0},
+	"attention": Attention{Failed: 2, Capped: 1, Blocking: 3, Paused: 1},
+	"analytics": Analytics{
+		Group: store.AnalyticsByDay, From: t0, To: t1,
+		Current: AnalyticsTotals{
+			PullRequests: 3, Reviews: 5, Failed: 1, Findings: SeverityCounts{Blocking: 1, Important: 2, Nit: 3}, Addressed: 2,
+			Categories:  map[review.Category]int{review.CategoryCorrectness: 2, review.CategorySecurity: 1, review.CategoryPerformance: 0, review.CategoryReliability: 1, review.CategoryMaintainability: 2, review.CategoryTests: 0},
+			ReactionsUp: 4, ReactionsDown: 1, CostUSD: 1.25, MedianReviewMs: new(int64(90000)), MedianMergeMs: new(int64(129600000)),
+		},
+		Previous: AnalyticsTotals{Findings: SeverityCounts{}, Categories: categoryCounts(nil)},
+		Series:   []AnalyticsPoint{{Key: "2026-09-01", Reviews: 5, Findings: SeverityCounts{Blocking: 1, Important: 2, Nit: 3}, CostUSD: 1.25}},
+		Repositories: []RepoActivity{
+			{Repository: "alpha/one", Reviews: 5, Findings: SeverityCounts{Blocking: 1, Important: 2, Nit: 3}, Addressed: 2},
+		},
+	},
+	"rule": Rule{
+		Kind: RuleWritten, ID: "wrap-errors", Text: "Wrap an error with the package name before returning it.", Paths: []string{"**/*.go"},
+		When:   []configfile.When{},
+		Source: RuleFromEntry, Repositories: []string{"alpha/one"}, Findings: 3, Addressed: 1,
+	},
+	"job": goldenJob,
+	"instance_queue": InstanceQueue{
+		Jobs:  []InstanceJob{{Job: goldenJob, Account: "github/alpha"}},
+		Slots: []ModelSlots{{Account: "github/alpha", Model: "openrouter/acme-large", Held: 2, Slots: 2}},
 	},
 	"task_run": goldenTaskRun,
 	"task_run_detail": TaskRunDetail{
@@ -228,16 +278,30 @@ var goldens = map[string]any{
 			Inline: []TaskInline{{Path: "a.go", Line: 3, EndLine: 5, Body: "here"}}, Comment: "sticky",
 		},
 		Dropped:    []TaskDrop{{Action: "labels.add", Value: "wontfix", Reason: "it is not a label the task lets the model add"}},
+		Notes:      []string{"context.related: the index is not built yet"},
 		ModelCalls: 1, CostUSD: 0.02, Tokens: TokenCounts{Input: 300, Output: 40},
 	},
-	"event": Event{Kind: store.EventReview, Tenant: "alpha", ID: "rev-1", ReviewID: new("rev-1")},
-	"error": ErrorBody{Code: CodeNotFound, Message: "tenant not found", Details: json.RawMessage(`{"slug":"x"}`)},
+	"repo_tasks": RepoTasks{
+		Enabled: true, Source: TasksSourceDefaultBranch, Commit: "c0ffee", ResolvedAt: &t1, Found: true,
+		Ignored: `repoconfig: tasks[1]: name "Bad" must be lowercase letters, digits and dashes, at most 63, starting with a letter or digit`,
+		Tasks: []TaskDef{
+			{Name: "welcome", Source: TaskFromFile, Triggers: []string{"pull_request.opened"}, When: []tasks.When{}, Mode: tasks.ModeSingle, Actions: []string{tasks.ActionComment}},
+			{
+				Name: "triage", Source: TaskFromRepository, Triggers: []string{"issue.opened", "issue.reopened"},
+				When: []tasks.When{{Expr: `!("triaged" in subject.labels)`}}, Mode: tasks.ModeAgentic,
+				Actions: []string{tasks.ActionComment, tasks.ActionLabels},
+			},
+		},
+		Notes: []TaskNote{{Task: "triage", What: "actions.state", Reason: "the action is not allowed"}},
+	},
+	"event": Event{Kind: store.EventReview, Account: "alpha", ID: "rev-1", ReviewID: new("rev-1")},
+	"error": ErrorBody{Code: CodeNotFound, Message: "account not found"},
 }
 
 func TestDTOGolden(t *testing.T) {
 	for name, v := range goldens {
 		t.Run(name, func(t *testing.T) {
-			got, err := json.MarshalIndent(v, "", "  ")
+			got, err := jsonv2.Marshal(v, jsonOptions, jsontext.WithIndent("  "))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -264,6 +328,30 @@ func TestDTOGolden(t *testing.T) {
 			}
 			if !bytes.Equal(gotC.Bytes(), wantC.Bytes()) {
 				t.Errorf("%s changed; the UI's types.ts mirrors it. got:\n%s", path, got)
+			}
+		})
+	}
+}
+
+// TestTurnTools: a turn that kept its tools says null, which the UI tells
+// apart from a turn that cleared them.
+func TestTurnTools(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tools *[]ToolDef
+		want  string
+	}{
+		{name: "unchanged", tools: nil, want: `"tools":null`},
+		{name: "cleared", tools: new([]ToolDef{}), want: `"tools":[]`},
+		{name: "changed", tools: new(goldenTools), want: `"tools":[{`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := jsonv2.Marshal(Turn{Tools: tc.tools}, jsonOptions)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(got, []byte(tc.want)) {
+				t.Errorf("got %s, want %s", got, tc.want)
 			}
 		})
 	}

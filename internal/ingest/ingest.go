@@ -1,6 +1,6 @@
 // Package ingest is the only surface a forge reaches. It looks the
-// installation up by hook path, verifies the signature with that
-// installation's secret, parses the payload into a forge-neutral event, and
+// connection up by hook path, verifies the signature with that
+// connection's secret, parses the payload into a forge-neutral event, and
 // hands it to a Dispatcher. It never does work itself.
 package ingest
 
@@ -10,7 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
+	"time"
 
 	"github.com/perfectra1n/kritique/internal/configfile"
 	"github.com/perfectra1n/kritique/internal/metrics"
@@ -19,19 +19,22 @@ import (
 
 // Request is a verified, parsed webhook with the configuration it applies to.
 type Request struct {
-	File         *configfile.File
-	Tenant       *configfile.Tenant
-	Installation *configfile.Installation
-	Event        webhook.Event
+	File    *configfile.File
+	Account *configfile.Account
+	// Connection is the connection the delivery came through, nil for an
+	// event the poller made.
+	Connection *configfile.Connection
+	Event      webhook.Event
 }
 
 // Outcome is what the dispatcher did with a request, for the response and
 // the log line.
 type Outcome struct {
-	// Status is enqueued, skipped or ignored.
+	// Status is enqueued, recorded, skipped or ignored.
 	Status string
-	// Reason explains a skip or ignore: filter, fork, disabled, duplicate,
-	// not-default-branch, no-mention, action.
+	// Reason explains a skip or ignore, such as filter, disabled,
+	// duplicate, not-default-branch, no-mention or action, and for an
+	// installation event is its action.
 	Reason string
 	Job    string
 }
@@ -39,6 +42,8 @@ type Outcome struct {
 // Outcome statuses.
 const (
 	Enqueued = "enqueued"
+	// Recorded is an event applied as it arrived, with no job queued.
+	Recorded = "recorded"
 	Skipped  = "skipped"
 	Ignored  = "ignored"
 )
@@ -49,13 +54,26 @@ type Dispatcher interface {
 	Dispatch(ctx context.Context, req Request) (Outcome, error)
 }
 
-// Handler serves POST /hooks/{installation}.
+// DeliveryRecorder notes that a connection's webhook delivered a request
+// kritique verified, or one with no signature, which a GitHub App with no
+// webhook secret sends. The store-backed implementation is Service.
+type DeliveryRecorder interface {
+	RecordDelivery(ctx context.Context, connectionID string) error
+	RecordUnsigned(ctx context.Context, connectionID string) error
+}
+
+// dispatchTimeout bounds one dispatch, which does not end with its request.
+const dispatchTimeout = 30 * time.Second
+
+// Handler serves POST /hooks/{connection}.
 type Handler struct {
 	current *configfile.Current
 	disp    Dispatcher
 	logger  *slog.Logger
 	// Metrics may be nil.
 	Metrics *metrics.Metrics
+	// Deliveries may be nil.
+	Deliveries DeliveryRecorder
 }
 
 // NewHandler builds the hook handler over the current configuration.
@@ -64,23 +82,23 @@ func NewHandler(current *configfile.Current, disp Dispatcher, logger *slog.Logge
 }
 
 // ServeHTTP verifies, parses and dispatches. Status codes: 404 for an
-// unknown installation, 401 for a bad signature, 400 for an unparsable
+// unknown connection, 401 for a missing or bad signature, 400 for an unparsable
 // payload, 413 for an oversized one, 204 for a ping, 202 for anything
 // accepted (enqueued, skipped or ignored: the forge only needs to know the
 // delivery landed), 500 when the dispatcher failed and the forge should
 // redeliver.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("installation")
+	name := r.PathValue("connection")
 	file := h.current.Get()
-	in, tenant, ok := file.Installation(name)
+	in, ok := file.Connection(name)
 	if !ok {
 		// The name is the caller's, not ours: labelling by it would let any
 		// request mint a new series.
-		h.Metrics.Webhook("", "unknown_installation")
-		http.Error(w, "unknown installation", http.StatusNotFound)
+		h.Metrics.Webhook("", "unknown_connection")
+		http.Error(w, "unknown connection", http.StatusNotFound)
 		return
 	}
-	logger := h.logger.With("installation", name, "tenant", tenant.Slug)
+	logger := h.logger.With("connection", name)
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, webhook.MaxBody))
 	if err != nil {
@@ -95,9 +113,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := webhook.Verify(in.Forge, in.WebhookSecretValue().Value(), r.Header, body); err != nil {
 		logger.Warn("webhook rejected", "error", err, "remote", r.RemoteAddr)
-		h.Metrics.Webhook(name, "unauthorized")
+		outcome := "unauthorized"
+		// A delivery with no signature at all comes from an App with no
+		// webhook secret, which the dashboard says to set. Only one the forge
+		// sent says so: the hook path is public, and a bare POST from anyone
+		// else must not raise that alarm.
+		if errors.Is(err, webhook.ErrMissingSignature) && webhook.Delivered(in.Forge, r.Header) {
+			outcome = "unsigned"
+			if h.Deliveries != nil {
+				if err := h.Deliveries.RecordUnsigned(r.Context(), in.ID()); err != nil {
+					logger.Warn("unsigned webhook not recorded", "error", err)
+				}
+			}
+		}
+		h.Metrics.Webhook(name, outcome)
 		http.Error(w, "signature verification failed", http.StatusUnauthorized)
 		return
+	}
+	// Any verified delivery shows the forge's webhook is set up, whatever
+	// becomes of the event.
+	if h.Deliveries != nil {
+		if err := h.Deliveries.RecordDelivery(r.Context(), in.ID()); err != nil {
+			logger.Warn("webhook delivery not recorded", "error", err)
+		}
 	}
 	ev, err := webhook.Parse(in.Forge, r.Header, body)
 	if err != nil {
@@ -108,6 +146,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	logger = logger.With("delivery", ev.Delivery, "event", ev.RawEvent, "kind", ev.Kind, "action", ev.Action)
 
+	var account *configfile.Account
+	if ev.Account != "" && in.Serves(ev.Account) {
+		account, _ = file.Account(in.Forge, ev.Account)
+	}
 	switch {
 	case ev.Kind == webhook.KindPing:
 		h.Metrics.Webhook(name, "ping")
@@ -120,10 +162,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.Metrics.Webhook(name, Ignored)
 		w.WriteHeader(http.StatusAccepted)
 		return
-	case ev.Account != "" && !strings.EqualFold(ev.Account, in.Account):
+	case account == nil:
 		// A public App can be installed by anyone; only the declared
-		// account is served. Accepted, so the forge does not retry. A
-		// kind kritique would not act on for anyone is noise at Warn.
+		// accounts are served. Accepted, so the forge does not retry. A kind
+		// kritique would not act on for anyone is noise at Warn.
 		level := slog.LevelWarn
 		if ev.Kind == webhook.KindIgnored {
 			level = slog.LevelDebug
@@ -134,14 +176,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := h.disp.Dispatch(r.Context(), Request{File: file, Tenant: tenant, Installation: in, Event: ev})
+	logger = logger.With("account", account.Key())
+	// The forge gives up on a delivery after ten seconds and does not send
+	// it again, so a dispatch that outlasts the request still finishes: a
+	// comment or thread event that rolled back with it would be lost.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), dispatchTimeout)
+	defer cancel()
+	out, err := h.disp.Dispatch(ctx, Request{File: file, Account: account, Connection: in, Event: ev})
 	if err != nil {
 		logger.Error("webhook dispatch failed", "error", err)
 		h.Metrics.Webhook(name, "error")
 		http.Error(w, "dispatch failed", http.StatusInternalServerError)
 		return
 	}
-	logger.Info("webhook "+out.Status, "reason", out.Reason, "job", out.Job)
+	logger.Info("webhook handled", "status", out.Status, "reason", out.Reason, "job", out.Job)
 	h.Metrics.Webhook(name, out.Status)
 	w.WriteHeader(http.StatusAccepted)
 }

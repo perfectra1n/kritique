@@ -1,6 +1,6 @@
-// Command kritique reviews GitHub, GitLab and Forgejo pull requests against an
-// index of the repository. One binary serves every role; --role selects
-// which part of the service this process runs.
+// Command kritique reviews GitHub pull requests against an index of the
+// repository. "kritique serve" runs the service, and "kritique run" one review
+// or index run in a runner Job the service creates.
 package main
 
 import (
@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,19 +20,21 @@ import (
 	// is otherwise unaware of the cgroup limit, so a parse of a large repository
 	// could OOM-kill the pod before the GC reclaims.
 	_ "github.com/KimMachineGun/automemlimit"
-	"github.com/spf13/pflag"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivertype"
 
+	"github.com/perfectra1n/kritique/internal/adapter"
 	"github.com/perfectra1n/kritique/internal/auth"
 	"github.com/perfectra1n/kritique/internal/config"
 	"github.com/perfectra1n/kritique/internal/configfile"
-	"github.com/perfectra1n/kritique/internal/configsource"
 	"github.com/perfectra1n/kritique/internal/egress"
 	"github.com/perfectra1n/kritique/internal/executor"
+	"github.com/perfectra1n/kritique/internal/gateway"
 	"github.com/perfectra1n/kritique/internal/ingest"
 	"github.com/perfectra1n/kritique/internal/jobs"
 	"github.com/perfectra1n/kritique/internal/jobtimeout"
@@ -59,29 +62,16 @@ func main() {
 	}
 }
 
-func run() error {
-	roleFlag := pflag.String("role", string(config.RoleAll), "process role: all, ingest, worker, runner or web")
-	pflag.Parse()
-	role, err := config.ParseRole(*roleFlag)
+func run() (err error) {
+	command, err := config.ParseCommand(os.Args[1:])
 	if err != nil {
 		return err
 	}
-
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	var runSpec runner.Spec
-	switch role {
-	case config.RoleAll, config.RoleWorker:
-		err = cfg.ValidateWorker()
-	case config.RoleRunner:
-		if err = cfg.ValidateRunner(); err == nil {
-			runSpec, err = runner.ReadSpec(cfg.RunSpecFile)
-		}
-	case config.RoleWeb:
-		err = cfg.ValidateWeb()
-	}
+	runSpec, err := validate(command, cfg)
 	if err != nil {
 		return err
 	}
@@ -91,18 +81,18 @@ func run() error {
 		return err
 	}
 	slog.SetDefault(logger)
+	model.Version = version
 
 	logger.Info("starting kritique",
 		"version", version,
 		"commit", commit,
-		"role", role,
+		"command", command,
 		"addr", cfg.Addr,
 		"metrics_addr", cfg.MetricsAddr,
 		"gateway_addr", cfg.GatewayAddr,
 		"gateway_url", cfg.GatewayURL,
 		"config_file", cfg.ConfigFile,
 		"owner_dsn", cfg.DatabaseOwnerURL != "",
-		"embedding", cfg.EmbeddingEnabled(),
 	)
 
 	// Graceful shutdown on the usual termination signals. stop() runs as soon
@@ -110,226 +100,317 @@ func run() error {
 	// and force-terminates instead of being swallowed during a slow drain.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go func() {
-		<-ctx.Done()
-		stop()
-	}()
+	context.AfterFunc(ctx, stop)
 
 	// The management listener comes up first so liveness answers while the
-	// database is still starting; readiness stays false until the store is
-	// open, so the pod waits rather than being killed by its own probe.
+	// database is still starting.
 	mgmt := server.NewManagement(cfg.MetricsAddr, logger)
-	drift := server.NewConfigDriftGauge(mgmt.Registry())
-	configErrors := server.NewConfigErrorGauge(mgmt.Registry())
-	m := metrics.New(mgmt.Registry())
 	g, ctx := errgroup.WithContext(ctx)
+	// Whatever ends run ends the group's goroutines first, and run waits
+	// for them before the store closes: the close waits for every
+	// connection, and the leader holds its lock connection for its tenure,
+	// so an error returned while the group runs would otherwise hang it,
+	// liveness still answering. An error of the group's own that run does
+	// not return, a listener a runner's exit cut, is worth a line.
+	ctx, cancel := context.WithCancel(ctx)
+	var st *store.Store
+	defer func() {
+		cancel()
+		if werr := g.Wait(); werr != nil && !errors.Is(werr, context.Canceled) && !errors.Is(err, werr) {
+			logger.Warn("a listener or duty failed", "error", werr)
+		}
+		if st != nil {
+			st.Close()
+		}
+	}()
 	g.Go(func() error { return mgmt.Run(ctx) })
 
-	// Every role connects with the application DSN and refuses to start if
-	// that DSN could bypass row-level security or the vector extension is
-	// missing. Leader-eligible roles also open the owner DSN.
-	st, err := openStore(ctx, storeOptions(role, cfg, logger), logger)
+	// serve's public listener comes up next, before the database answers,
+	// so a request that reaches the pod directly meanwhile sees that
+	// kritique is starting. The replica is not ready until the database
+	// answers and the webhooks and the dashboard are served: a rollout
+	// takes the previous pod down only once this one can hold a delivery,
+	// since the forge does not send one again. The configuration file is
+	// read before that, so a file that does not load ends the process
+	// before the replica is ever ready, and a rollout stops at it with the
+	// previous pods serving.
+	var file *configfile.File
+	var public *server.Switch
+	if command == config.CommandServe {
+		if file, err = loadConfig(cfg.ConfigFile); err != nil {
+			return err
+		}
+		public = server.NewSwitch(server.Starting())
+		g.Go(func() error {
+			return server.Serve(server.Lingering(ctx, linger), cfg.Addr, public, publicDrain, logger.With("listener", "public"))
+		})
+	}
+
+	// Both commands connect with the application DSN and refuse to start if
+	// it could bypass row-level security or the vector extension is
+	// missing; serve also opens the owner DSN, to lead.
+	st, err = openStore(ctx, storeOptions(command, cfg, logger), logger)
 	if err != nil {
 		return err
 	}
-	defer st.Close()
 
-	// The runner gets everything it needs from its Job spec; every other role
-	// is driven by the configuration file, merged with the dashboard's
-	// tenants, and must not start without it.
-	var current *configfile.Current
-	var exec executor.Executor
-	if role != config.RoleRunner {
-		// current is the last good merged file; the leader applies it on
-		// election and on every reload, followers only compare hashes.
-		src := &configsource.Source{Store: st, Keyring: cfg.DashboardKeyring(), Logger: logger, Errors: configErrors}
-		file, err := src.Load(ctx, cfg.ConfigFile)
-		if err != nil {
-			return err
-		}
-		logConfig(logger, file, "configuration loaded")
-		current = src.Current
-		g.Go(func() error { return src.Run(ctx, cfg.ConfigFile, cfg.ConfigReloadInterval) })
-		g.Go(func() error {
-			return reportDrift(ctx, st, current, drift, cfg.ConfigReloadInterval)
-		})
-		if st.LeaderEligible() {
-			// Only an all or worker role holds the owner DSN, so a leader
-			// always has the executor it would sweep up after.
-			exec, err = newExecutor(ctx, cfg, logger)
-			if err != nil {
-				return err
-			}
-			sweeper, _ := exec.(*executor.Kube)
-			hostname, _ := os.Hostname()
-			// Insert-only client: the leader enqueues onboarding index jobs.
-			leaderQueue, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{Logger: logger})
-			if err != nil {
-				return fmt.Errorf("river: %w", err)
-			}
-			g.Go(func() error {
-				return st.RunAsLeader(ctx, cfg.LeaderRetryInterval, func(ctx context.Context) error {
-					return lead(ctx, st, cfg, current, leaderQueue, sweeper, m, configErrors, hostname, logger)
-				})
-			})
-		} else if role != config.RoleIngest && role != config.RoleWeb {
-			logger.Warn("no owner DSN configured; this replica can never migrate or apply configuration")
-		}
-	}
-
-	if role == config.RoleRunner {
+	if command == config.CommandRun {
 		// A runner does one thing and exits; it never becomes ready.
 		return runner.Run(ctx, st, runSpec, runner.Secrets{GitToken: cfg.GitToken, GatewayToken: cfg.GatewayToken}, logger)
 	}
-
-	if role == config.RoleAll || role == config.RoleIngest {
-		// Insert-only River client: ingest enqueues, it never works jobs.
-		queue, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{Logger: logger})
-		if err != nil {
-			return fmt.Errorf("river: %w", err)
-		}
-		handler := ingest.NewHandler(current, ingest.NewService(st, queue), logger)
-		handler.Metrics = m
-		hooks := server.NewHooks(cfg.Addr, handler, logger)
-		g.Go(func() error { return hooks.Run(ctx) })
-	}
-	if err := startWeb(ctx, g, role, st, cfg, current, logger); err != nil {
+	if err := serve(ctx, g, st, cfg, file, public, mgmt.Registry(), logger); err != nil {
 		return err
-	}
-	if role == config.RoleAll || role == config.RoleWorker {
-		if exec == nil {
-			if exec, err = newExecutor(ctx, cfg, logger); err != nil {
-				return err
-			}
-		}
-		embedder := newEmbedder(cfg)
-		forges := &worker.ForgeCache{Build: worker.BuildForge}
-		workers := river.NewWorkers()
-		base := worker.Base{Store: st, Current: current, Forges: forges, Logger: logger, Metrics: m}
-		completers := &worker.Completers{Build: worker.BuildStepper}
-		// The gateway: runner pods' one route out, allowed by the hosts the
-		// current configuration names (ADR-0008), and the model endpoint an
-		// agentic runner calls with its run token (ADR-0004).
-		gatewayLogger := logger.With("listener", "gateway")
-		gateway := &worker.Gateway{
-			Store: st, Current: current, Logger: gatewayLogger, Metrics: m,
-			Proxy: &egress.Proxy{
-				Rules:   func() egress.Rules { return current.Get().EgressRules() },
-				Observe: m.Egress, Logger: gatewayLogger,
-			},
-			Steppers: completers,
-		}
-		g.Go(func() error {
-			return server.ServeDrain(ctx, cfg.GatewayAddr, gateway, worker.GatewayDrain, gatewayLogger)
-		})
-		river.AddWorker(workers, &worker.Review{
-			Base: base, Executor: exec, Completers: completers, Embedder: embedder, EmbedModel: cfg.EmbedModel,
-			GatewayURL: cfg.GatewayURL, GatewayTokenTTL: cfg.GatewayTokenTTL,
-		})
-		river.AddWorker(workers, &worker.FollowUp{Base: base, Completers: completers})
-		river.AddWorker(workers, &worker.TaskDispatch{Base: base})
-		river.AddWorker(workers, &worker.Task{
-			Base: base, Completers: completers, Executor: exec, GatewayURL: cfg.GatewayURL, GatewayTokenTTL: cfg.GatewayTokenTTL,
-			Embedder: embedder, EmbedModel: cfg.EmbedModel,
-		})
-		river.AddWorker(workers, &worker.Index{
-			Base: base, Executor: exec, Embedder: embedder, EmbedModel: cfg.EmbedModel, EmbedDims: cfg.EmbedDims,
-		})
-		queue, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{
-			Logger: logger,
-			// Review and index workers set their own timeouts from the
-			// runner deadline; rescue must wait out the longest of them.
-			RescueStuckJobsAfter: jobtimeout.RescueStuckJobsAfter,
-			Queues: map[string]river.QueueConfig{
-				jobs.QueueReview:   {MaxWorkers: cfg.ReviewWorkers},
-				jobs.QueueFollowUp: {MaxWorkers: cfg.ReviewWorkers},
-				jobs.QueueTask:     {MaxWorkers: cfg.ReviewWorkers},
-				jobs.QueueIndex:    {MaxWorkers: cfg.IndexWorkers},
-			},
-			Workers: workers,
-		})
-		if err != nil {
-			return fmt.Errorf("river: %w", err)
-		}
-		// The queue's tables come from migrations, which the leader runs;
-		// on a fresh database that may be this very process a moment from
-		// now, or another replica. Wait for the schema rather than racing it.
-		g.Go(func() error {
-			if err := st.WaitForSchema(ctx, 2*time.Second); err != nil {
-				return nil // shutdown while waiting
-			}
-			if err := startQueue(ctx, queue, logger); err != nil {
-				return err
-			}
-			logger.Info("working the queues", "review_workers", cfg.ReviewWorkers, "index_workers", cfg.IndexWorkers, "executor", cfg.Executor)
-			<-ctx.Done()
-			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			return queue.Stop(stopCtx)
-		})
 	}
 	mgmt.SetReady(true)
 
 	if err := g.Wait(); err != nil {
-		return fmt.Errorf("%s: %w", role, err)
+		return fmt.Errorf("%s: %w", command, err)
 	}
+	// The signal that ended serve, which the context carries as its cause.
+	logger.Info("kritique stopped", "cause", context.Cause(ctx))
 	return nil
 }
 
-// storeOptions is how role connects to the database. Only a
-// leader-eligible role, all or worker, is given the owner DSN; the web role
-// in particular never is (ADR-0009 §3).
-func storeOptions(role config.Role, cfg *config.Config, logger *slog.Logger) store.Options {
-	opts := store.Options{
-		AppURL: cfg.DatabaseURL, Logger: logger,
+// serve starts the service on g: the configuration read at startup, the
+// leader duties on the replica holding the leader lock, the webhooks and
+// the dashboard on public, the gateway and the job queues. When it
+// returns, public serves the webhooks and the dashboard.
+func serve(
+	ctx context.Context, g *errgroup.Group, st *store.Store, cfg *config.Config, file *configfile.File, public *server.Switch,
+	reg *prometheus.Registry, logger *slog.Logger,
+) error {
+	drift := server.NewConfigDriftGauge(reg)
+	configErrors := server.NewConfigErrorGauge(reg)
+	m := metrics.New(reg)
+	reg.MustRegister(metrics.NewPoolCollector(st.PoolStats()))
+	logConfig(logger, file, "configuration loaded")
+	// Once read, a secret's variable is dropped, so no later lookup or
+	// child process sees it.
+	for _, name := range file.SecretEnv() {
+		if err := os.Unsetenv(name); err != nil {
+			return fmt.Errorf("unset %s: %w", name, err)
+		}
 	}
-	if role == config.RoleAll || role == config.RoleWorker {
-		opts.OwnerURL = cfg.DatabaseOwnerURL
+	// current is the configuration read at startup; the leader applies it
+	// on election, the other replica only compares hashes.
+	current := configfile.NewCurrent(file)
+	g.Go(func() error {
+		return reportDrift(ctx, st, current, drift, driftInterval, logger)
+	})
+	_, resources := file.RunnerFor()
+	exec, err := newExecutor(ctx, cfg, resources, logger)
+	if err != nil {
+		return err
 	}
-	return opts
+	// Insert-only client: the webhooks, the dashboard and the leader
+	// enqueue jobs with it; startWorker's own client works the queues.
+	inserter, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{Logger: logger})
+	if err != nil {
+		return fmt.Errorf("river: %w", err)
+	}
+	// One App per connection and one forge client per App and account,
+	// shared by the workers and the leader's poll, so an installation's
+	// token is minted once.
+	apps := &worker.Apps{Metrics: m}
+	forges := &worker.ForgeCache{Build: apps.Build}
+	svc := ingest.NewService(st, inserter)
+	if st.LeaderEligible() {
+		sweeper, _ := exec.(*executor.Kube)
+		g.Go(func() error {
+			return st.RunAsLeader(ctx, cfg.LeaderRetryInterval, func(ctx context.Context) error {
+				m.Leading(true)
+				defer m.Leading(false)
+				return lead(ctx, st, cfg, current, inserter, svc, apps, forges, sweeper, m, configErrors, logger)
+			})
+		})
+	} else {
+		logger.Warn("no owner DSN configured; this replica can never migrate or apply configuration")
+	}
+	if err := startPublic(ctx, g, st, cfg, current, inserter, svc, apps, m, public, logger); err != nil {
+		return err
+	}
+	return startWorker(ctx, g, st, cfg, current, exec, forges, m, logger)
 }
 
-// webDrain is how long a stopping web role lets requests finish. Event
-// streams end at once, when the API's Run returns.
-const webDrain = 10 * time.Second
+// errNoSignIn is a configuration that leaves the dashboard no way to sign
+// in, which serve refuses to start with.
+var errNoSignIn = errors.New("the dashboard has no way to sign in: set KRITIQUE_AUTH_ADMIN_PASSWORD, or auth in the configuration file")
 
-// startWeb serves the dashboard, its sign-in and its API on WebAddr until
-// ctx ends, when role serves it. Without a sealing key the dashboard still
-// serves, but cannot write dashboard tenants.
-func startWeb(
-	ctx context.Context, g *errgroup.Group, role config.Role, st *store.Store, cfg *config.Config, current *configfile.Current,
-	logger *slog.Logger,
+// loadConfig reads the configuration file at path, none when path is "",
+// for serve: it is read once, and a change takes a restart.
+func loadConfig(path string) (*configfile.File, error) {
+	f, err := configfile.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	if !f.Auth.Configured() {
+		return nil, errNoSignIn
+	}
+	return f, nil
+}
+
+// startPublic hands the public listener what it serves until ctx ends: the
+// webhooks, and the dashboard with its sign-in and API, in place of the
+// starting page.
+func startPublic(
+	ctx context.Context, g *errgroup.Group, st *store.Store, cfg *config.Config, current *configfile.Current,
+	inserter *river.Client[pgx.Tx], svc *ingest.Service, apps *worker.Apps, m *metrics.Metrics, public *server.Switch, logger *slog.Logger,
 ) error {
-	if !cfg.WebEnabled(role) {
-		return nil
-	}
-	if role == config.RoleWeb && st.LeaderEligible() {
-		return errors.New("the web role must never hold the owner DSN")
-	}
+	hooks := ingest.NewHandler(current, svc, logger.With("listener", "hooks"))
+	hooks.Metrics = m
+	hooks.Deliveries = svc
+
 	webLogger := logger.With("listener", "web")
 	authHandler, err := auth.New(auth.Config{Store: st, Current: current, WebURL: cfg.WebURLParsed(), Logger: webLogger})
 	if err != nil {
 		return err
 	}
-	// Insert-only River client: the dashboard enqueues re-runs, cancels and
-	// reindexes, it never works jobs.
-	queue, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{Logger: webLogger})
-	if err != nil {
-		return fmt.Errorf("river: %w", err)
-	}
 	api := webapi.New(webapi.Config{
-		Store: st, Current: current, Auth: authHandler, Keyring: cfg.DashboardKeyring(), UI: web.FS(),
-		WebURL: cfg.WebURLParsed(), Version: version, Logger: webLogger, Actions: webapi.JobActions{Queue: queue}, Env: cfg.Env(),
+		Store: st, Current: current, Auth: authHandler, UI: web.FS(),
+		WebURL: cfg.WebURLParsed(), Version: version, Logger: webLogger, Actions: webapi.JobActions{Queue: inserter}, Env: cfg.Env(),
+		Reach: apps.Reach,
 	})
-	g.Go(func() error { return api.Run(ctx) })
-	g.Go(func() error { return server.ServeDrain(ctx, cfg.WebAddr, api.Handler(), webDrain, webLogger) })
+	g.Go(func() error { return api.Run(server.Lingering(ctx, linger)) })
+	public.Set(server.Public(cfg.WebBasePath(), hooks, api.Handler()))
 	return nil
 }
 
-// startQueue starts the River client, retrying for a while when the
-// database is briefly unavailable: right after a fresh cluster's initdb the
-// first queue upsert can time out, and River cleans up after a failed
-// start, so trying again is safe and beats a crash loop.
+// startWorker serves the gateway and works the job queues until ctx ends.
+func startWorker(
+	ctx context.Context, g *errgroup.Group, st *store.Store, cfg *config.Config, current *configfile.Current, exec executor.Executor,
+	forges *worker.ForgeCache, m *metrics.Metrics, logger *slog.Logger,
+) error {
+	embedders := &adapter.Embedders{Build: adapter.BuildEmbedder}
+	steppers := &adapter.Steppers{Build: adapter.BuildStepper}
+	workers := river.NewWorkers()
+	base := worker.Base{Store: st, Current: current, Forges: forges, Logger: logger, Metrics: m}
+	// The gateway: runner pods' one route out, allowed by the hosts the
+	// current configuration names, and the model and similar-code endpoints
+	// a review's runner calls with its run token.
+	gatewayLogger := logger.With("listener", "gateway")
+	gw := &gateway.Server{
+		Store: st, Current: current, Logger: gatewayLogger, Metrics: m,
+		Proxy: &egress.Proxy{
+			Rules: current.Get().EgressRules, Observe: m.Egress, Logger: gatewayLogger,
+		},
+		Steppers: steppers, Embedders: embedders,
+	}
+	g.Go(func() error {
+		return server.Serve(server.Lingering(ctx, linger), cfg.GatewayAddr, gw, gateway.Drain, gatewayLogger)
+	})
+	river.AddWorker(workers, &worker.Review{
+		Base: base, Executor: exec, Steppers: steppers,
+		GatewayURL: cfg.GatewayURL, GatewayTokenTTL: cfg.GatewayTokenTTL, WebURL: cfg.WebURLParsed(),
+	})
+	river.AddWorker(workers, &worker.FollowUp{
+		Base: base, Executor: exec, GatewayURL: cfg.GatewayURL, GatewayTokenTTL: cfg.GatewayTokenTTL,
+	})
+	river.AddWorker(workers, &worker.Thread{Base: base})
+	river.AddWorker(workers, &worker.Index{
+		Base: base, Executor: exec, Embedders: embedders,
+	})
+	river.AddWorker(workers, &worker.TaskDispatch{Base: base})
+	river.AddWorker(workers, &worker.Task{
+		Base: base, Steppers: steppers, Embedders: embedders, Executor: exec,
+		GatewayURL: cfg.GatewayURL, GatewayTokenTTL: cfg.GatewayTokenTTL,
+	})
+	queue, err := river.NewClient(riverpgxv5.New(st.App()), &river.Config{
+		Logger: logger,
+		// Review and index workers set their own timeouts from the
+		// runner deadline; rescue must wait out the longest of them.
+		RescueStuckJobsAfter: jobtimeout.RescueStuckJobsAfter,
+		// ctx ending starts a soft stop: running jobs get this long before
+		// their contexts end.
+		SoftStopTimeout: queueDrain,
+		// Every job this replica works carries its heartbeat, so the
+		// leader can hand back the jobs of a replica that dies without
+		// a soft stop long before River's rescuer may.
+		Middleware: []rivertype.Middleware{&worker.JobHeartbeat{Store: st, Logger: logger}},
+		Queues: map[string]river.QueueConfig{
+			jobs.QueueReview:   {MaxWorkers: cfg.ReviewWorkers},
+			jobs.QueueFollowUp: {MaxWorkers: cfg.ReviewWorkers},
+			jobs.QueueIndex:    {MaxWorkers: cfg.IndexWorkers},
+			jobs.QueueTask:     {MaxWorkers: cfg.ReviewWorkers},
+		},
+		Workers: workers,
+	})
+	if err != nil {
+		return fmt.Errorf("river: %w", err)
+	}
+	g.Go(func() error { return workQueues(ctx, st, queue, cfg, logger) })
+	return nil
+}
+
+// queueDrain is how long a stopping serve lets running jobs finish; a
+// review still running then is cut and retried. queueStopHeadroom covers
+// what a cut review does before it hands its job back, each step at its
+// own bound: deleting the runner Job and reading its pod (20s each),
+// revoking its token (10s) and waiting for its agent row (40s). A job
+// still at it when the process is killed is not recorded by River and
+// waits on the rescuer instead. Both fit in the chart's 200s termination
+// grace period.
+const (
+	queueDrain        = 100 * time.Second
+	queueStopHeadroom = 90 * time.Second
+)
+
+// validate checks what command needs of cfg beyond the common set, and
+// reads a runner's spec.
+func validate(command config.Command, cfg *config.Config) (runner.Spec, error) {
+	if command == config.CommandServe {
+		return runner.Spec{}, cfg.ValidateServe()
+	}
+	if err := cfg.ValidateRunner(); err != nil {
+		return runner.Spec{}, err
+	}
+	return runner.ReadSpec(cfg.RunSpecFile)
+}
+
+// storeOptions is how command connects to the database: serve with the
+// owner DSN too, which leading needs, a runner never.
+func storeOptions(command config.Command, cfg *config.Config, logger *slog.Logger) store.Options {
+	opts := store.Options{
+		AppURL: cfg.DatabaseURL, Logger: logger,
+	}
+	if command == config.CommandServe {
+		opts.OwnerURL = cfg.DatabaseOwnerURL
+	}
+	return opts
+}
+
+// linger is how long the public listener and the gateway keep accepting
+// connections once serve is told to stop: Kubernetes and the proxies in
+// front of it take a moment to stop routing to a terminating pod, and a
+// connection refused meanwhile is a webhook lost, since GitHub does not
+// redeliver on its own, or a runner's model step retried.
+const linger = 5 * time.Second
+
+// publicDrain is how long a stopping serve lets webhook and dashboard
+// requests finish. Event streams end at once, when the API's Run returns.
+const publicDrain = 10 * time.Second
+
+// workQueues works the job queues until ctx ends, then waits for River's
+// soft stop to let running jobs finish or cut them. The queue's tables come
+// from migrations, which the leader runs; on a fresh database that may be
+// this very process a moment from now, or another replica, so it waits for
+// the schema rather than racing it.
+func workQueues(ctx context.Context, st *store.Store, queue *river.Client[pgx.Tx], cfg *config.Config, logger *slog.Logger) error {
+	if err := st.WaitForSchema(ctx, 2*time.Second); err != nil {
+		return nil // shutdown while waiting
+	}
+	if err := startQueue(ctx, queue, logger); err != nil {
+		return err
+	}
+	logger.Info("working the queues", "review_workers", cfg.ReviewWorkers, "index_workers", cfg.IndexWorkers, "executor", cfg.Executor)
+	<-ctx.Done()
+	select {
+	case <-queue.Stopped():
+	case <-time.After(queueDrain + queueStopHeadroom):
+		logger.Warn("the queues did not stop in time", "drain", queueDrain)
+	}
+	return nil
+}
+
 func startQueue(ctx context.Context, queue *river.Client[pgx.Tx], logger *slog.Logger) error {
 	const retry = 5 * time.Second
 	const attempts = 24
@@ -351,19 +432,16 @@ func startQueue(ctx context.Context, queue *river.Client[pgx.Tx], logger *slog.L
 	return fmt.Errorf("river: start: %w", err)
 }
 
-// newEmbedder builds the deployment embedder, or nil when indexing is off.
-func newEmbedder(cfg *config.Config) model.Embedder {
-	if !cfg.EmbeddingEnabled() {
-		return nil
+// newExecutor builds the runner executor the configuration selects, once
+// the resources every runner Job is given decode as a container's: the
+// Kubernetes types that read them are the executor's, not the
+// configuration's, so this is the earliest a bad value can be refused
+// rather than failing every Job.
+func newExecutor(ctx context.Context, cfg *config.Config, resources map[string]any, logger *slog.Logger) (executor.Executor, error) {
+	if err := executor.CheckResources(resources); err != nil {
+		return nil, fmt.Errorf("KRITIQUE_RUNNER_RESOURCES: %w", err)
 	}
-	e := model.NewOpenAIEmbedder(cfg.EmbedBaseURL, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.EmbedDims)
-	e.MaxBatch, e.MaxBatchChars, e.MaxItemChars = cfg.EmbedMaxBatch, cfg.EmbedMaxBatchChars, cfg.EmbedMaxItemChars
-	return e
-}
-
-// newExecutor builds the runner executor the configuration selects.
-func newExecutor(ctx context.Context, cfg *config.Config, logger *slog.Logger) (executor.Executor, error) {
-	if cfg.Executor == "local" {
+	if cfg.Executor == config.ExecutorLocal {
 		runnerStore, err := store.Open(ctx, store.Options{AppURL: cfg.RunnerDatabaseURL, Logger: logger})
 		if err != nil {
 			return nil, err
@@ -375,8 +453,8 @@ func newExecutor(ctx context.Context, cfg *config.Config, logger *slog.Logger) (
 		return nil, err
 	}
 	return &executor.Kube{
-		Client: client, Namespace: ns, Image: cfg.RunnerImage, ServiceAccount: cfg.RunnerServiceAccount,
-		DatabaseSecret: cfg.RunnerDatabaseSecret, DatabaseSecretKey: cfg.RunnerDatabaseSecretKey,
+		Client: client, Namespace: ns, Image: cfg.RunnerImage, ImagePullPolicy: cfg.RunnerImagePullPolicy,
+		ServiceAccount: cfg.RunnerServiceAccount, DatabaseSecret: cfg.RunnerDatabaseSecret, DatabaseSecretKey: cfg.RunnerDatabaseSecretKey,
 		GatewayURL: cfg.GatewayURL, RuntimeClass: cfg.RunnerRuntimeClass, TTL: cfg.RunnerTTL, Logger: logger,
 	}, nil
 }
@@ -409,186 +487,132 @@ func openStore(ctx context.Context, opts store.Options, logger *slog.Logger) (*s
 const secretSweepInterval = 5 * time.Minute
 
 // lead runs for as long as this replica holds the leader lock: migrate,
-// apply the current file, then re-apply whenever the file changes. With an
-// embedder configured it also owns the index schema and enqueues an
-// onboarding index job for every repository that has none.
+// apply the configuration and register the repositories its Apps reach,
+// then keep the backstop poll, the Secret sweep, onboarding and retention
+// going. While the configuration has an embedder it also keeps the index
+// schema to it and enqueues an onboarding index job for every repository
+// that has none.
 func lead(
 	ctx context.Context, st *store.Store, cfg *config.Config, current *configfile.Current, queue *river.Client[pgx.Tx],
-	sweeper *executor.Kube, m *metrics.Metrics, configErrors *server.ConfigErrorGauge, leader string, logger *slog.Logger,
+	svc *ingest.Service, apps *worker.Apps, forges *worker.ForgeCache, sweeper *executor.Kube, m *metrics.Metrics,
+	configErrors *server.ConfigErrorGauge, logger *slog.Logger,
 ) error {
 	if err := st.Migrate(ctx, cfg.DatabaseAppRole, cfg.DatabaseRunnerRole); err != nil {
 		return err
 	}
-	if cfg.EmbeddingEnabled() {
-		if err := st.EnsureIndexSchema(ctx, cfg.DatabaseAppRole, cfg.EmbedModel, cfg.EmbedDims, cfg.ReindexOnModelChange); err != nil {
-			return err
-		}
-	}
-	// The backstop poll is a leader duty: one lister per installation.
+	// Every leader duty ends before lead returns and the lock is released,
+	// so the next leader never runs one alongside this replica's.
 	pollCtx, stopPoll := context.WithCancel(ctx)
+	var duties sync.WaitGroup
+	defer duties.Wait()
 	defer stopPoll()
-	go func() {
-		_ = (&poller.Poller{
-			Store: st, Current: current, Forges: &worker.ForgeCache{Build: worker.BuildForge},
-			Dispatcher: ingest.NewService(st, queue),
-			Logger:     logger, Metrics: m,
-		}).Run(pollCtx)
-	}()
+	// The backstop poll is a leader duty: one lister per connection.
+	poll := &poller.Poller{
+		Store: st, Current: current, Forges: forges, Reach: apps.Reach, Dispatcher: svc, Logger: logger, Metrics: m,
+	}
+	duties.Go(func() { poll.Run(pollCtx) })
 	// So is deleting, by name, run Secrets a dead worker left without an
-	// owner. Like the poller it walks the configured tenants, each under
+	// owner. Like the poller it walks the configured accounts, each under
 	// its own row-level security scope.
 	if sweeper != nil {
-		go sweeper.RunSecretSweeper(pollCtx, st, func() []string {
-			tenants := current.Get().Tenants
-			ids := make([]string, 0, len(tenants))
-			for i := range tenants {
-				ids = append(ids, tenants[i].ID())
-			}
-			return ids
-		}, secretSweepInterval)
+		duties.Go(func() {
+			sweeper.RunSecretSweeper(pollCtx, st, func() []string {
+				accounts := current.Get().Accounts
+				ids := make([]string, 0, len(accounts))
+				for i := range accounts {
+					ids = append(ids, accounts[i].ID())
+				}
+				return ids
+			}, secretSweepInterval)
+		})
 	}
 	// So is feeding the index queue its onboarding jobs, a few at a time.
 	onboarder := &worker.Onboarder{Store: st, Queue: queue, Current: current, Logger: logger}
-	if cfg.EmbeddingEnabled() {
-		go onboarder.Run(pollCtx)
+	duties.Go(func() { onboarder.Run(pollCtx) })
+	// And so is rescuing the jobs of a replica that died, and reaping the
+	// runner Jobs they left, which only a Kubernetes executor has.
+	rescuer := &worker.Rescuer{Store: st, Current: current, Forges: forges, Logger: logger, Metrics: m}
+	if sweeper != nil {
+		rescuer.Runs = sweeper
 	}
-	// And so is retention: model-call transcripts and task events past
-	// their configured window and the indexes of repositories disabled past their grace
+	duties.Go(func() { rescuer.Run(pollCtx) })
+	// And so is retention: model-call transcripts past their configured
+	// window and the indexes of repositories stopped past their grace
 	// (owner pool, bypassing row-level security), and expired dashboard
 	// sessions (app pool).
-	go retentionSweep(pollCtx, st, current, retentionSweepInterval, logger)
-	return applyLoop(ctx, current, func(ctx context.Context, f *configfile.File) error {
-		return st.ApplyConfig(ctx, f, leader)
-	}, func(ctx context.Context) error {
-		if !cfg.EmbeddingEnabled() {
-			return nil
+	retention := &worker.Retention{Store: st, Current: current, Logger: logger}
+	duties.Go(func() { retention.Run(pollCtx) })
+	if err := applyConfig(ctx, current.Get(), func(ctx context.Context, f *configfile.File) error {
+		if err := st.ApplyConfig(ctx, f); err != nil {
+			return err
 		}
-		return onboarder.Offer(ctx)
-	}, refusedRetryInterval, configErrors, logger)
-}
-
-// retentionSweepInterval is how often the leader deletes model-call
-// transcripts, task events, disabled repositories' indexes and dashboard sessions past
-// their retention window.
-const retentionSweepInterval = time.Hour
-
-// retentionStore is the subset of *store.Store that retentionSweep needs,
-// narrowed so it can be exercised in tests with a fake.
-type retentionStore interface {
-	SweepModelCalls(ctx context.Context, olderThan time.Duration) (int64, error)
-	SweepTaskEvents(ctx context.Context, olderThan time.Duration) (int64, error)
-	SweepSessions(ctx context.Context, now time.Time) (int64, error)
-	SweepDisabledIndexes(ctx context.Context, grace time.Duration) (int64, error)
-}
-
-// retentionSweep runs once immediately, then every interval until ctx ends,
-// deleting model-call transcripts and task events older than the current
-// file's transcript retention window and the indexes of repositories disabled for longer than its
-// disabledIndexGrace (owner pool, bypassing row-level security), and
-// expired dashboard sessions (app pool). A sweep failure is logged, never
-// fatal: it just leaves stale rows for the next tick.
-func retentionSweep(ctx context.Context, st retentionStore, current *configfile.Current, interval time.Duration, logger *slog.Logger) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		if n, err := st.SweepModelCalls(ctx, current.Get().Retention.TranscriptsOrDefault()); err != nil {
-			if ctx.Err() == nil {
-				logger.Warn("model call transcripts not swept", "error", err)
-			}
-		} else if n > 0 {
-			logger.Info("model call transcripts swept", "rows", n)
+		if err := ensureIndexSchema(ctx, st, cfg.DatabaseAppRole, f.Embedding, logger); err != nil {
+			return err
 		}
-		if n, err := st.SweepTaskEvents(ctx, current.Get().Retention.TranscriptsOrDefault()); err != nil {
-			if ctx.Err() == nil {
-				logger.Warn("task events not swept", "error", err)
-			}
-		} else if n > 0 {
-			logger.Info("task events swept", "rows", n)
-		}
-		if n, err := st.SweepSessions(ctx, time.Now()); err != nil {
-			if ctx.Err() == nil {
-				logger.Warn("dashboard sessions not swept", "error", err)
-			}
-		} else if n > 0 {
-			logger.Info("dashboard sessions swept", "rows", n)
-		}
-		if n, err := st.SweepDisabledIndexes(ctx, current.Get().DisabledIndexGrace()); err != nil {
-			if ctx.Err() == nil {
-				logger.Warn("disabled repositories' indexes not swept", "error", err)
-			}
-		} else if n > 0 {
-			logger.Info("disabled repositories' indexes swept", "repositories", n)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
+		// Once the accounts exist: a fresh instance, or a new connection,
+		// knows its repositories before any webhook names one.
+		poll.SyncRepositories(ctx)
+		return nil
+	}, onboarder.Offer, configErrors, logger); err != nil {
+		return err
 	}
+	<-ctx.Done()
+	return nil
 }
 
-// refusedRetryInterval is how often the leader re-applies a configuration
-// the store refused. A refusal is expected to need a new configuration, but
-// one misclassified race must not leave the store stale until the next edit.
-const refusedRetryInterval = time.Minute
+// ensureIndexSchema keeps the index table to the configuration's embedder,
+// rebuilding it, and so every repository's index, when the model or
+// dimension changed: the dashboard asked the admin to confirm that before
+// saving it, and a configuration file edit makes it without asking.
+// Without an embedder the table is left as it is.
+func ensureIndexSchema(ctx context.Context, st *store.Store, appRole string, e *configfile.Embedding, logger *slog.Logger) error {
+	if e == nil {
+		return nil
+	}
+	rebuilt, err := st.EnsureIndexSchema(ctx, appRole, e.Model, e.Dims)
+	if rebuilt {
+		logger.Warn("index rebuilt for a new embedder: every repository is indexed again", "model", e.Model, "dims", e.Dims)
+	}
+	return err
+}
 
-// applyLoop applies current's snapshot, then each replacement, until ctx
-// ends, calling onApplied after each success. A snapshot the store refuses
-// for its content (store.IsConfigContentError) must not end leadership, or
-// every replica would crash-loop on it in turn: it is logged once per
-// distinct error and raised on the gauge, the last applied state stays, and
-// the loop waits for the next snapshot, retrying the refused one every
-// retry. Any other error is returned, which ends the process for a restart.
-func applyLoop(
-	ctx context.Context, current *configfile.Current, apply func(context.Context, *configfile.File) error,
-	onApplied func(context.Context) error, retry time.Duration, gauge *server.ConfigErrorGauge, logger *slog.Logger,
+// applyConfig applies f to the store once, on election, and calls
+// onApplied on success. A configuration the store refuses for its content
+// (store.IsConfigContentError) must not end leadership, or every replica
+// would crash-loop on it in turn: it is logged and raised on the gauge,
+// the last applied state stays, and the same content would be refused
+// again, so it is not retried before a restart. Any other error is
+// returned, which ends this tenure: the lock is released and competed for
+// again.
+func applyConfig(
+	ctx context.Context, f *configfile.File, apply func(context.Context, *configfile.File) error,
+	onApplied func(context.Context) error, gauge *server.ConfigErrorGauge, logger *slog.Logger,
 ) error {
-	applied, refused, logged := "", "", ""
-	for {
-		// Taken before Get, so a replacement that lands while applying still
-		// wakes the loop.
-		changed := current.Changed()
-		f := current.Get()
-		if h := f.Hash(); h != applied && h != refused {
-			err := apply(ctx, f)
-			switch {
-			case err != nil && store.IsConfigContentError(err):
-				refused = h
-				gauge.Set(server.ConfigErrorApply, true)
-				if err.Error() != logged {
-					logged = err.Error()
-					logger.Error("configuration refused by the store, keeping the last applied one", "hash", h[:12], "error", err)
-				}
-			case err != nil:
-				return err
-			default:
-				applied, refused, logged = h, "", ""
-				gauge.Set(server.ConfigErrorApply, false)
-				logger.Info("configuration applied to the store", "hash", h[:12])
-				if err := onApplied(ctx); err != nil {
-					return err
-				}
-			}
-		}
-		var retryC <-chan time.Time
-		if refused != "" {
-			retryC = time.After(retry)
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-changed:
-		case <-retryC:
-			refused = ""
-		}
+	h := f.Hash()
+	err := apply(ctx, f)
+	switch {
+	case err != nil && store.IsConfigContentError(err):
+		gauge.Set(true)
+		logger.Error("configuration refused by the store, keeping the last applied one", "hash", h[:12], "error", err)
+		return nil
+	case err != nil:
+		return err
 	}
+	gauge.Set(false)
+	logger.Info("configuration applied to the store", "hash", h[:12])
+	return onApplied(ctx)
 }
+
+// driftInterval is how often a replica compares its configuration with
+// the one the leader applied, which differ while a rollout is part done.
+const driftInterval = 10 * time.Second
 
 // reportDrift compares this replica's file with what the leader applied and
 // exposes a mismatch as a gauge. It is deliberately not on /readyz: a stale
 // ConfigMap on one node must not take an ingest replica out of the Service.
 func reportDrift(
 	ctx context.Context, st *store.Store, current *configfile.Current, gauge *server.ConfigDriftGauge, every time.Duration,
+	logger *slog.Logger,
 ) error {
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -599,7 +623,7 @@ func reportDrift(
 		case <-t.C:
 			applied, err := st.AppliedConfigHash(ctx)
 			if err != nil {
-				slog.Warn("could not read applied configuration hash", "error", err)
+				logger.Warn("could not read applied configuration hash", "error", err)
 				continue
 			}
 			gauge.Set(applied != "" && applied != current.Get().Hash())
@@ -608,11 +632,7 @@ func reportDrift(
 }
 
 func logConfig(logger *slog.Logger, f *configfile.File, msg string) {
-	installations := 0
-	for _, t := range f.Tenants {
-		installations += len(t.Installations)
-	}
-	logger.Info(msg, "providers", len(f.Providers), "tenants", len(f.Tenants), "installations", installations)
+	logger.Info(msg, "providers", len(f.Providers), "accounts", len(f.Accounts), "connections", len(f.Connections))
 }
 
 func newLogger(cfg *config.Config) (*slog.Logger, error) {

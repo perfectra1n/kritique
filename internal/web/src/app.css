@@ -1,53 +1,78 @@
-@import 'tailwindcss';
-
 /* ---- theme tokens ---------------------------------------------------- */
+/* A marked-up proof: ink on proof paper, a pen-blue for what can be
+   followed, red pencil for what blocks, and a highlighter (--mark) for what
+   kritique has something to say about. --mark only ever sits behind --text,
+   dimmed in the dark theme as an e-reader's night highlight is; the state
+   it marks carries an --edge that contrasts on its own, since the
+   highlighter itself does not reach 3:1 on the light sheet. */
 :root,
 .light {
-  --bg: #f5f7fa;
-  --panel: #ffffff;
-  --panel-alt: #eef1f5;
-  --border: #d4dae2;
-  --text: #1f2328;
-  --muted: #59636e; /* ≥5.4:1 on panel/bg/panel-alt — much of the UI is 11–12px muted text */
-  --accent: #2563d9;
-  --add-bg: #e9f7ee;
-  --add-bar: #1a7f37;
-  --del-bg: #fdeeec;
-  --del-bar: #cf222e;
-  --danger: #cf222e;
-  --caution: #9a6700; /* amber accent, a notch below --danger */
-  --warn: #9a6700; /* amber accent for warnings */
-  --ok: #1a7f37;
-  --merged: #8250df;
-  --warn-bg: #fff8c5;
+  --bg: #eceee9;
+  --panel: #fbfbf8;
+  --panel-alt: #f1f2ee;
+  --border: #d3d7ce;
+  --text: #1b2130;
+  --muted: #555c6a; /* ≥5.7:1 on panel/bg/panel-alt and the mark wash — much of the UI is 11–12px muted text */
+  --accent: #2447b8;
+  --on-accent: #ffffff;
+  --mark: #f5df4d;
+  --mark-wash: #f9f1bc;
+  --edge: #1b2130;
+  --add-bg: #e3f1e5;
+  --add-bar: #1d7436;
+  --del-bg: #f9e7e3;
+  --del-bar: #b3261e;
+  --danger: #b3261e;
+  --caution: #875800; /* ochre, a notch below --danger */
+  --warn: #875800; /* ochre for warnings */
+  --ok: #1d7436;
+  --merged: #6b43b5;
+  --warn-bg: #faf1bf;
+  /* Charts are ink and greys. Severity is an ordinal ramp of
+     the ink, darkest for blocking: red pencil and ochre stacked side by
+     side are alike to a deuteranope. */
+  --chart-ink: #3d4556;
+  --chart-sev-blocking: #1b2130;
+  --chart-sev-important: #636b7b;
+  --chart-sev-nit: #a5acb8;
 }
 .dark {
-  --bg: #0b0e14;
-  --panel: #11151c;
-  --panel-alt: #161b24;
-  --border: #232a36;
-  --text: #e6edf3;
-  --muted: #9198a1; /* ≥5.9:1 on panel/bg — much of the UI is 11–12px muted text */
-  --accent: #5b8cff;
-  --add-bg: #0d1f15;
-  --add-bar: #2ea043;
-  --del-bg: #221015;
-  --del-bar: #f85149;
-  --danger: #f85149;
-  --caution: #d29922; /* amber accent, a notch below --danger */
-  --warn: #d29922; /* amber accent for warnings */
-  --ok: #3fb950;
-  --merged: #a371f7;
-  --warn-bg: #272115;
+  --bg: #131922;
+  --panel: #1a202b;
+  --panel-alt: #212835;
+  --border: #2f3846;
+  --text: #e4e7ec;
+  --muted: #9aa2af; /* ≥4.5:1 on panel/bg/panel-alt and the mark wash */
+  --accent: #8fa6ff;
+  --on-accent: #131922;
+  --mark: #6b5a10;
+  --mark-wash: #37392f;
+  --edge: #e9d14a;
+  --add-bg: #15291d;
+  --add-bar: #62c27e;
+  --del-bg: #301a1b;
+  --del-bar: #ff8170;
+  --danger: #ff8170;
+  --caution: #e3a84a; /* ochre, a notch below --danger */
+  --warn: #e3a84a; /* ochre for warnings */
+  --ok: #62c27e;
+  --merged: #b99cf5;
+  --warn-bg: #2c2716;
+  --chart-ink: #c3c8d1;
+  --chart-sev-blocking: #e4e7ec;
+  --chart-sev-important: #8a93a3;
+  --chart-sev-nit: #4f5868;
 }
 
-/* Font families: UI/prose in Geist (sans), code + identifiers in Geist Mono.
-   Both are bundled via @fontsource-variable (imported in main.ts); the system
-   stacks are the fallback until the woff2 loads (or if it fails). Theme-
-   independent, so they live on :root rather than the .light/.dark token blocks. */
+/* Font families: UI/prose in Schibsted Grotesk, a news grotesk for a
+   critic's column; code and identifiers in Red Hat Mono, which draws ==
+   and <= as typed rather than as ligatures. Both are bundled via
+   @fontsource-variable (imported in main.ts); the system stacks are the
+   fallback until the woff2 loads (or if it fails). Theme-independent, so
+   they live on :root rather than the .light/.dark token blocks. */
 :root {
-  --font-sans: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-  --font-mono: 'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: 'Schibsted Grotesk Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono: 'Red Hat Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 * {
@@ -61,21 +86,15 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  /* Sans (Geist) for the UI chrome and prose; code and identifiers — diffs,
-     SHAs, resource names, image refs — use mono (Geist Mono) where defined. */
+  /* Sans for the UI chrome and prose; code and identifiers — diffs, SHAs,
+     resource names, image refs — use mono where defined. */
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--type-md);
   -webkit-font-smoothing: antialiased;
 }
 .icon {
   vertical-align: -0.15em;
   flex: 0 0 auto;
-}
-.avatar {
-  border-radius: 50%;
-  object-fit: cover;
-  flex: 0 0 auto;
-  background: var(--panel-alt);
 }
 .add {
   color: var(--ok);
@@ -83,11 +102,10 @@ body {
 .del {
   color: var(--danger);
 }
-.chg {
-  color: var(--accent);
-}
 
 /* ---- shell + topbar -------------------------------------------------- */
+/* The top bar holds the brand, the account switcher and the actions, and
+   under them the section tabs; the routed page fills the rest. */
 .app {
   display: flex;
   flex-direction: column;
@@ -96,41 +114,27 @@ body {
 }
 .topbar {
   display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 8px 14px;
-  background: var(--panel);
+  flex-direction: column;
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
-.brand {
+.topbar-row {
   display: flex;
   align-items: center;
+  gap: 14px;
+  padding: 8px 14px;
+}
+.brand {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
   gap: 8px;
-  font-weight: 700;
-  font-size: 14px;
-  letter-spacing: 0.02em;
   color: inherit;
   text-decoration: none;
 }
 .spacer {
   flex: 1 1 auto;
-}
-/* Below the topbar: the sidebar's navigation beside the routed page. */
-.shell {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-.sidebar {
-  flex: 0 0 200px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 12px 10px;
-  background: var(--panel);
-  border-right: 1px solid var(--border);
-  overflow-y: auto;
 }
 .actions {
   display: flex;
@@ -141,9 +145,9 @@ body {
   border: 1px solid var(--border);
   background: var(--panel-alt);
   color: var(--text);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 6px 12px;
-  font-size: 13px;
+  font-size: var(--type-md);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -165,9 +169,6 @@ body {
 .btn-icon {
   padding: 6px 9px;
 }
-.spin {
-  animation: spin 0.8s linear infinite;
-}
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -178,44 +179,70 @@ body {
 }
 
 /* ---- keyboard-shortcuts help ------------------------------------------ */
-.help-overlay {
+/* The sizes text is set in and the corners boxes are cut with. A size or
+   a corner outside these is one of a kind, and written where it is used. */
+:root {
+  --type-xs: 11px;
+  --type-sm: 12px;
+  --type-md: 13px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
+
+/* What stacks over what, lowest first. */
+:root {
+  --z-sticky: 1;
+  --z-tip: 2;
+  --z-popup: 5;
+  --z-menu: 10;
+  --z-overlay: 30;
+  --z-modal: 31;
+  --z-toast: 40;
+}
+
+/* A modal and the dimmed page behind it: the confirmation dialog, the
+   shortcuts help and the palette. Each adds its own size and place. */
+.overlay {
   position: fixed;
   inset: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.help-backdrop {
-  position: absolute;
-  inset: 0;
-  border: none;
+  z-index: var(--z-overlay);
   background: color-mix(in srgb, var(--bg) 60%, transparent);
-  cursor: default;
+}
+.modal {
+  position: fixed;
+  z-index: var(--z-modal);
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 15%, transparent);
+}
+.modal-centered {
+  inset: 0;
+  margin: auto;
+  height: fit-content;
 }
 .help-card {
-  position: relative;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  width: fit-content;
   padding: 16px 20px;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 15%, transparent);
   min-width: 280px;
+}
+/* The card itself takes focus, having nothing in it to focus. */
+.help-card:focus {
+  outline: none;
 }
 .help-card h2 {
   margin: 0 0 12px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-size: 15px;
+  font-weight: 650;
 }
 .help-keys {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 8px 14px;
   margin: 0;
-  font-size: 13px;
+  font-size: var(--type-md);
 }
 .help-keys dt {
   text-align: right;
@@ -227,35 +254,32 @@ body {
 }
 kbd {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--type-xs);
   border: 1px solid var(--border);
   border-bottom-width: 2px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 1px 5px;
   background: var(--panel-alt);
 }
 
 /* ---- command palette (Ctrl/⌘ K) ---------------------------------------- */
-.palette-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 10;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding-top: 12vh;
-}
 .palette {
-  position: relative;
+  top: 12vh;
+  left: 0;
+  right: 0;
+  margin: 0 auto;
   width: min(640px, 92vw);
   max-height: 70vh;
   display: flex;
   flex-direction: column;
-  background: var(--panel);
-  border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: 0 16px 48px color-mix(in srgb, var(--text) 25%, transparent);
   overflow: hidden;
+}
+.palette-command {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 .palette-input {
   display: flex;
@@ -296,9 +320,9 @@ kbd {
   text-align: left;
   cursor: pointer;
 }
-.palette-row.active {
-  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
-  box-shadow: inset 2px 0 0 var(--accent);
+.palette-row[data-selected] {
+  background: var(--mark-wash);
+  box-shadow: inset 3px 0 0 var(--edge);
 }
 .row-main {
   flex: 1 1 auto;
@@ -314,14 +338,14 @@ kbd {
 }
 .row-title.mono {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--type-md);
 }
 .row-sub {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--type-sm);
 }
 .palette-empty {
   margin: 0;
@@ -338,97 +362,225 @@ kbd {
   padding: 7px 14px;
   border-top: 1px solid var(--border);
   color: var(--muted);
-  font-size: 11px;
-}
-.palette-footer .foot-gap {
-  flex: 1 1 auto;
+  font-size: var(--type-xs);
 }
 
 /* ---- brand + nav (kritique-specific: no konflate equivalent) ------------ */
+/* The highlighter stroke: a band over the lower two thirds of the text,
+   with the slightly uneven ends of a felt tip. */
+.marked {
+  padding: 0 0.2em;
+  border-radius: 0.15em 0.35em 0.2em 0.4em / 0.4em 0.2em 0.35em 0.15em;
+  background: linear-gradient(transparent 38%, var(--mark) 38%, var(--mark) 94%, transparent 94%);
+  box-decoration-break: clone;
+}
 .wordmark {
-  font-weight: 700;
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
 }
-.nav {
+/* The section tabs: the current one is marked with the highlighter over
+   an ink rule, which carries the state where the highlighter alone would
+   not contrast. */
+/* The strip itself reaches over the top bar's rule, so its tabs stay inside
+   it: one reaching out would scroll the strip vertically. */
+.sections {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  gap: 4px;
+  padding: 0 10px;
+  margin-bottom: -1px;
+  overflow-x: auto;
 }
-.nav-instance {
-  margin-top: auto;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-.nav a {
-  display: flex;
+.section-tab {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
-  border-radius: 6px;
+  padding: 6px 8px 8px;
+  border-bottom: 2px solid transparent;
   color: var(--muted);
   text-decoration: none;
-  font-size: 13px;
+  font-size: var(--type-md);
   white-space: nowrap;
 }
-.nav a:hover {
+.section-tab:hover {
   color: var(--text);
-  background: var(--panel-alt);
+  text-decoration: none;
 }
-.nav a.active {
+.section-tab.active {
   color: var(--text);
-  background: var(--panel-alt);
-  box-shadow: inset 2px 0 0 var(--accent);
+  font-weight: 600;
+  border-bottom-color: var(--edge);
 }
-.tenant-switch {
+/* A tab's label is bold only while it is the current one. The bold text's
+   width is held from the start, so the tabs beside it stay where they are. */
+.section-label,
+.tab-label {
+  display: inline-flex;
+  flex-direction: column;
+}
+.section-label::after,
+.tab-label::after {
+  content: attr(data-label);
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  font-weight: 600;
+}
+.section-tab.active .section-label {
+  padding: 0 0.2em;
+  margin: 0 -0.2em;
+  border-radius: 0.15em 0.35em 0.2em 0.4em / 0.4em 0.2em 0.35em 0.15em;
+  background: linear-gradient(transparent 38%, var(--mark) 38%, var(--mark) 94%, transparent 94%);
+}
+
+/* ---- menus (account switcher, user) ------------------------------------ */
+.menu-panel {
+  z-index: var(--z-menu);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
   border: 1px solid var(--border);
-  background: var(--panel-alt);
-  color: var(--text);
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 13px;
-  font: inherit;
-  width: 100%;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 15%, transparent);
 }
+.account-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 280px;
+  padding: 4px 8px;
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: var(--type-md);
+  font-weight: 600;
+  cursor: pointer;
+}
+.account-button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-button:hover {
+  background: var(--panel);
+}
+.account-button .icon {
+  color: var(--muted);
+}
+.account-panel {
+  min-width: 220px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  color: var(--text);
+  font-size: var(--type-md);
+  white-space: nowrap;
+}
+.menu-item:hover {
+  background: var(--panel-alt);
+  text-decoration: none;
+}
+.menu-item[aria-current] {
+  font-weight: 600;
+}
+.menu-heading {
+  margin: 6px 0 2px;
+  padding: 0 10px;
+  font-size: var(--type-xs);
+  color: var(--muted);
+}
+.menu-check {
+  display: inline-flex;
+  width: 15px;
+  flex: 0 0 auto;
+}
+/* The colours of highlighted code, which highlight.ts names: each is one of
+   the palette's, so both themes have them. */
+:root {
+  --code-token-keyword: var(--merged);
+  --code-token-string: var(--ok);
+  --code-token-string-expression: var(--ok);
+  --code-token-constant: var(--accent);
+  --code-token-function: var(--caution);
+  --code-token-parameter: var(--text);
+  --code-token-comment: var(--muted);
+  --code-token-punctuation: var(--muted);
+  --code-token-link: var(--accent);
+  --code-token-inserted: var(--add-bar);
+  --code-token-deleted: var(--del-bar);
+  --code-token-changed: var(--caution);
+}
+.code-italic {
+  font-style: italic;
+}
+
+/* What is set in mono: a name or value someone could paste into a
+   terminal, a configuration file or GitHub. An account, a repository and a
+   pull request written as owner/repo#7; a branch, a commit, a path, a glob;
+   a model, a rule id, an App; a configuration key, value or expression; a
+   job, pod, node or tool; a command to type; code and diffs.
+   Everything else is in the text face: a person's login or email, a title,
+   a status, trigger or other word from a fixed set, a count, a cost, a
+   date, a number on its own (#7, a job id), and any sentence, even one a
+   name appears in as plain text (a dialog, a toast, a tooltip). */
 .mono {
   font-family: var(--font-mono);
 }
 
-/* ---- account menu ------------------------------------------------------ */
-.account-menu {
-  position: relative;
+/* ---- live-updates indicator -------------------------------------------- */
+.live {
+  --live: var(--ok);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  font-size: var(--type-sm);
+  color: var(--muted);
+  white-space: nowrap;
 }
-.account-menu summary {
-  list-style: none;
+.live-down {
+  --live: var(--warn);
+  color: var(--warn);
 }
-.account-menu summary::-webkit-details-marker {
-  display: none;
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--live);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--live) 25%, transparent);
 }
-.account-panel {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 10;
-  display: flex;
-  flex-direction: column;
+
+/* ---- user menu --------------------------------------------------------- */
+.user-panel {
   gap: 8px;
   min-width: 200px;
   padding: 12px 14px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 15%, transparent);
+  border-radius: var(--radius-lg);
 }
-.account-name {
+.user-name {
   margin: 0;
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--type-md);
 }
-.account-email {
+.user-email,
+.user-version {
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--type-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.user-version {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: var(--type-xs);
 }
 
 /* ---- sign-in ------------------------------------------------------------ */
@@ -454,12 +606,14 @@ kbd {
 }
 .signin-card h1 {
   margin: 4px 0 0;
-  font-size: 20px;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
 }
 .signin-sub {
   margin: 0 0 12px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--type-md);
 }
 .signin-providers {
   display: flex;
@@ -471,30 +625,40 @@ kbd {
   justify-content: center;
   padding: 8px 12px;
 }
+.signin-local {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+}
+.signin-or {
+  margin: 6px 0;
+  color: var(--muted);
+  font-size: var(--type-sm);
+}
 .signin-empty,
 .signin-error {
   margin: 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--type-md);
 }
 .signin-error {
   color: var(--danger);
 }
 
-/* ---- placeholder (stands in for pages later tasks build) --------------- */
-.placeholder {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 24px;
-}
-.placeholder-note {
-  margin: 0;
-  color: var(--muted);
-}
-.placeholder-route {
-  color: var(--muted);
-  font-size: 12px;
+/* ---- reduced motion ------------------------------------------------------ */
+/* Nothing slides or fades for a viewer who asked for less motion; the
+   spinner still turns, slowly, since it is the only sign of work under way. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+  }
+  .spinner {
+    animation-duration: 2.4s;
+  }
 }
 
 /* ---- mobile -------------------------------------------------------------- */
@@ -507,29 +671,17 @@ kbd {
     min-height: 40px;
     justify-content: center;
   }
-  /* The sidebar folds into a scrolling strip under the topbar. */
-  .shell {
-    flex-direction: column;
+  .topbar-row {
+    gap: 8px;
+    padding: 6px 10px;
   }
-  .sidebar {
-    flex: 0 0 auto;
-    flex-direction: row;
-    align-items: center;
-    overflow-x: auto;
-    overflow-y: hidden;
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
+  .account-button {
+    max-width: 140px;
   }
-  .nav {
-    flex-direction: row;
-  }
-  .nav-instance {
-    margin-top: 0;
-    padding-top: 0;
-    border-top: 0;
-  }
-  .tenant-switch {
-    width: auto;
-    max-width: 160px;
+}
+/* A touch screen has no keys to list the shortcuts of. */
+@media (pointer: coarse) {
+  .keys-button {
+    display: none;
   }
 }
